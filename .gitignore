@@ -31,7 +31,6 @@ MANIFEST
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
-
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
@@ -164,3 +163,5 @@ test.ipynb
 dataset/
 *.ipynb
 *.txt
+./config.yaml
+config.yaml
