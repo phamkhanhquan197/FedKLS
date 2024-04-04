@@ -14,6 +14,8 @@ from torch.utils.data import DataLoader
 import flwr as fl
 from flwr.common import Metrics
 from flwr.common.typing import Scalar
+from logging import INFO, DEBUG
+from flwr.common.logger import log
 
 from datasets import Dataset
 from datasets.utils.logging import disable_progress_bar
@@ -24,7 +26,9 @@ from torchvision.models import resnet18
 from mak.strategy.is_strategy import ImportanceSamplingStrategyLoss
 import pandas as pd
 from mak.client import FlowerClient
-from mak.training import test, weighted_average, set_params,apply_transforms
+from mak.training import test, weighted_average, set_params
+import mak.models as custom_models
+from flwr_datasets.partitioner import IidPartitioner, DirichletPartitioner
 
 def gen_dir_outfile_server(config):
     # generates the basic directory structure for out data and the header for file
@@ -61,8 +65,8 @@ def gen_dir_outfile_server(config):
     json_file_name = f"config.json"
     with open(os.path.join(final_dir_path,json_file_name), 'w') as fp:
         json.dump(config, fp,indent=4)
-
-    file_name = f"{config['server']['strategy']}_{config['common']['dataset']}_{config['common']['data_type']}_{config['client']['batch_size']}_{config['client']['lr']}_{config['client']['epochs']}"
+    dataset_str = config['common']['dataset'].replace('/','_')
+    file_name = f"{config['server']['strategy']}_{dataset_str}_{config['common']['data_type']}_{config['client']['batch_size']}_{config['client']['lr']}_{config['client']['epochs']}"
     file_name = f"{file_name}.csv"
     out_file_path = os.path.join(
         final_dir_path, file_name)
@@ -75,33 +79,46 @@ def gen_dir_outfile_server(config):
             writer.writerow(header)
             f.close()
     return out_file_path, final_dir_path
-class Net(nn.Module):
-    """Model (simple CNN adapted from 'PyTorch: A 60 Minute Blitz')."""
 
-    def __init__(self) -> None:
-        super(Net, self).__init__()
-        self.conv1 = nn.Conv2d(1, 6, 5)
-        self.pool = nn.MaxPool2d(2, 2)
-        self.conv2 = nn.Conv2d(6, 16, 5)
-        self.fc1 = nn.Linear(16 * 4 * 4, 120)
-        self.fc2 = nn.Linear(120, 84)
-        self.fc3 = nn.Linear(84, 10)
+def get_partitioner(config_sim):
+    num_clients = config_sim['server']['num_clients']
+    if config_sim['common']['data_type'] == 'dirichlet_niid':
+        dirchlet_alpha = config_sim['common']['dirichlet_alpha']
+        partitioner = DirichletPartitioner(num_partitions=num_clients, partition_by="label",
+                                           alpha=dirchlet_alpha, min_partition_size=5,
+                                           self_balancing=True)
+    else:
+        partitioner = IidPartitioner(num_partitions=num_clients)
+    return {"train":partitioner}
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.pool(F.relu(self.conv1(x)))
-        x = self.pool(F.relu(self.conv2(x)))
-        x = x.view(-1, 16 * 4 * 4)
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        return self.fc3(x)
+def get_dataset(config_sim):
+    dataset_name=config_sim['common']['dataset']
+    supported_datasets = ['mnist', 'cifar10', 'fashion_mnist', 'sasha/dog-food', 'zh-plus/tiny-imagenet']
+    partitioner = get_partitioner(config_sim=config_sim)
+    if dataset_name not in supported_datasets:
+        raise Exception(f"Dataset name should be among : {supported_datasets}")
+    else:
+        fds = FederatedDataset(dataset=dataset_name, partitioners=partitioner)
+        if dataset_name == 'zh-plus/tiny-imagenet':
+            centralized_testset = fds.load_split("valid")
+        else:
+            centralized_testset = fds.load_split("train")
+        return fds, centralized_testset
 
 def get_model(config):
-    # model = resnet18(weights = None,num_classes =10)
-    model = Net()
-    return model
+    model_name = config['common']['model']
+    num_classes = 10
+    if model_name == 'resnet18':
+        return custom_models.resnet18(num_classes=10)
+    elif model_name == 'net':
+        return custom_models.Net()
+    elif model_name == 'cifarnet':
+        return custom_models.CifarNet()
+    else:
+        raise Exception(f"No model found named : {model_name}")
 
 def get_evaluate_fn(
-    centralized_testset: Dataset,config_sim,device,save_model_dir,
+    centralized_testset: Dataset,config_sim,device,save_model_dir,metrics_file, apply_transforms,
 ):
     """Return an evaluation function for centralized evaluation."""
 
@@ -120,9 +137,14 @@ def get_evaluate_fn(
 
         testloader = DataLoader(testset, batch_size=50)
         loss, accuracy = test(model, testloader, device=device)
-
+        metrics_df = pd.read_csv(metrics_file)
+        if metrics_df['loss'].min() > loss:
+            log(INFO,f" =>>>>> Min Loss improved from {metrics_df['loss'].min()} to : {loss} Saving best model having accuracy : {accuracy}")
+            torch.save(model.state_dict(), os.path.join(save_model_dir,'saved_best_model.pth'))
+            
+        
         if server_round == config_sim['server']['num_rounds']:
-            torch.save(model.state_dict(), os.path.join(save_model_dir,'saved_model.pth'))
+            torch.save(model.state_dict(), os.path.join(save_model_dir,'saved_model_final.pth'))
             print(f"++++++++++ final accuracy : {accuracy} and loss : {loss}")
 
         return loss, {"accuracy": accuracy}
@@ -187,7 +209,7 @@ def save_simulation_history(hist : fl.server.history.History, path):
     df.to_csv(os.path.join(path))
 
 
-def get_strategy(config,test_data,save_model_dir,device):
+def get_strategy(config,test_data,save_model_dir,out_file_path, device,apply_transforms):
     STRATEGY = config['server']['strategy']
     model = get_model(config=config)
     MIN_CLIENTS_FIT = config['server']['min_fit_clients']
@@ -204,7 +226,7 @@ def get_strategy(config,test_data,save_model_dir,device):
             min_fit_clients=MIN_CLIENTS_FIT,  # Never sample less than 2 clients for training
             min_evaluate_clients=MIN_CLIENTS_EVAL,  # Never sample less than 2 clients for evaluation
             min_available_clients=NUM_CLIENTS,
-            evaluate_fn=get_evaluate_fn(centralized_testset=test_data,config_sim=config,save_model_dir = save_model_dir,device=device),
+            evaluate_fn=get_evaluate_fn(centralized_testset=test_data,config_sim=config,save_model_dir = save_model_dir,metrics_file = out_file_path,device=device,apply_transforms=apply_transforms),
             evaluate_metrics_aggregation_fn=weighted_average,
             device=device,
             on_fit_config_fn=get_fit_config_fn(config_sim=config),
@@ -216,7 +238,7 @@ def get_strategy(config,test_data,save_model_dir,device):
             min_fit_clients=MIN_CLIENTS_FIT,
             min_evaluate_clients=MIN_CLIENTS_EVAL,
             min_available_clients=NUM_CLIENTS,
-            evaluate_fn=get_evaluate_fn(centralized_testset=test_data,config_sim=config,save_model_dir = save_model_dir,device=device),
+            evaluate_fn=get_evaluate_fn(centralized_testset=test_data,config_sim=config,save_model_dir = save_model_dir,metrics_file = out_file_path,device=device,apply_transforms=apply_transforms),
             evaluate_metrics_aggregation_fn=weighted_average,
             on_fit_config_fn=get_fit_config_fn(config_sim=config),
             proximal_mu = 0.5,
@@ -228,7 +250,7 @@ def get_strategy(config,test_data,save_model_dir,device):
             min_fit_clients=MIN_CLIENTS_FIT,
             min_evaluate_clients=MIN_CLIENTS_EVAL,
             min_available_clients=NUM_CLIENTS,
-            evaluate_fn=get_evaluate_fn(centralized_testset=test_data,config_sim=config,save_model_dir = save_model_dir,device=device),
+            evaluate_fn=get_evaluate_fn(centralized_testset=test_data,config_sim=config,save_model_dir = save_model_dir,metrics_file = out_file_path,device=device,apply_transforms=apply_transforms),
             evaluate_metrics_aggregation_fn=weighted_average,
             on_fit_config_fn=get_fit_config_fn(config_sim=config),
             server_learning_rate=1.0,
@@ -241,7 +263,7 @@ def get_strategy(config,test_data,save_model_dir,device):
         min_fit_clients=MIN_CLIENTS_FIT,  # Never sample less than 2 clients for training
         min_evaluate_clients=MIN_CLIENTS_EVAL,  # Never sample less than 2 clients for evaluation
         min_available_clients=NUM_CLIENTS,
-        evaluate_fn=get_evaluate_fn(centralized_testset=test_data,config_sim=config,save_model_dir = save_model_dir,device=device),
+        evaluate_fn=get_evaluate_fn(centralized_testset=test_data,config_sim=config,save_model_dir = save_model_dir,metrics_file = out_file_path,device=device,apply_transforms=apply_transforms),
         evaluate_metrics_aggregation_fn=weighted_average,
         on_fit_config_fn=get_fit_config_fn(config_sim=config),
     )
@@ -282,6 +304,5 @@ def get_fit_config_fn(config_sim):
         }
         return config
     return fit_config
-
 
 

@@ -2,8 +2,8 @@ import flwr as fl
 import torch
 from torch.utils.data import DataLoader
 from flwr_datasets import FederatedDataset
-
-from mak.training import set_params, train, test, apply_transforms
+from mak.pytorch_transformations import get_transformations
+from mak.training import set_params, train, test
 
 # Flower client, adapted from Pytorch quickstart example
 class FlowerClient(fl.client.NumPyClient):
@@ -49,7 +49,7 @@ class FlowerClient(fl.client.NumPyClient):
         return float(loss), len(valloader.dataset), {"accuracy": float(accuracy)}
 
 
-def get_client_fn(dataset: FederatedDataset, model,device):
+def get_client_fn(dataset: FederatedDataset, model,device,apply_transforms):
     """Return a function to construct a client.
 
     The VirtualClientEngine will execute this function whenever a client is sampled by

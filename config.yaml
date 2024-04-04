@@ -2,33 +2,33 @@
 # config
 
 common:
-  data_type : iid #data_type = data distribution one among ['iid','dirichlet-niid']
-  dataset : mnist #data_set = data set used  one among [fashionmnist,mnist,cifar10 ]
+  data_type : iid #data_type = data distribution one among ['iid','dirichlet_niid']
+  dataset : mnist #data_set = data set used  one among ['mnist', 'cifar10', 'fashion_mnist', 'sasha/dog-food', 'zh-plus/tiny-imagenet']
   dirichlet_alpha : 0.11 #dirichlet concentration parameter (only used if data_type is dirchlet-niid)
   target_acc : 0.95
-  model : resnet18 #one among [resnet18]
+  model : net #one among [resnet18,net,cifarnet]
   optimizer : sgd # one among [sgd,adam]
   seed : 133
 
 server:
   num_rounds : 21
   address : 127.0.0.1
-  fraction_fit : 0.05
+  fraction_fit : 0.1
   min_fit_clients: 2
-  num_clients : 20  # total number of clients participating in training 
-  fraction_evaluate : 0.025
-  strategy : fedavg #Strategy : choices=['fedavg', 'fedyogi', 'fedadagrad', 'fedavgm','fedprox']
+  num_clients : 100  # total number of clients participating in training 
+  fraction_evaluate : 0.05
+  strategy : fedavg #Strategy : choices=['fedavg', 'fedyogi', 'fedadagrad', 'fedavgm','fedprox','weighted_loss']
 
 client:
-  epochs : 2
-  batch_size : 64
+  epochs : 3
+  batch_size : 32
   lr: 0.001  #[0.0001,0.001,0.005,0.01,0.1,0.2]
   save_train_res : True
   total_cpus : 20
   total_gpus : 1
-  gpu : true  # True or False, Use GPU for training or not.
-  num_cpus : 2  # no. of CPU cores that are assigned for each actor
-  num_gpus : 0.0  # no. of GPU that are assigned for each actor (it can be fraction value as well)
+  gpu : True  # True or False, Use GPU for training or not.
+  num_cpus : 3  # no. of CPU cores that are assigned for each actor
+  num_gpus : 0.1  # no. of GPU that are assigned for each actor (it can be fraction value as well)
 
 
 
