@@ -30,6 +30,8 @@ from mak.training import test, weighted_average, set_params
 import mak.models as custom_models
 from flwr_datasets.partitioner import IidPartitioner, DirichletPartitioner
 
+from torchvision.models.resnet import resnet18 as resnet18_torch
+
 def gen_dir_outfile_server(config):
     # generates the basic directory structure for out data and the header for file
     today = date.today()
@@ -109,7 +111,11 @@ def get_model(config):
     model_name = config['common']['model']
     num_classes = 10
     if model_name == 'resnet18':
-        return custom_models.resnet18(num_classes=10)
+        return custom_models.resnet18(num_classes = num_classes)
+    elif model_name == 'resnet18_pretrained':
+        mod = resnet18_torch(weights='DEFAULT')
+        mod.fc = nn.Linear(mod.fc.in_features, num_classes)
+        return mod
     elif model_name == 'net':
         return custom_models.Net()
     elif model_name == 'cifarnet':

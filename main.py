@@ -29,7 +29,7 @@ def main(config_sim):
         client_res = {'num_cpus': config_sim['client']['num_cpus'], 'num_gpus' : 0.0}
 
     if config_sim['client']['gpu']:
-        ray_init_args = {'num_cpus': config_sim['client']['total_cpus'], 'num_gpus' : config_sim['client']['total_cpus']}
+        ray_init_args = {'num_cpus': config_sim['client']['total_cpus'], 'num_gpus' : config_sim['client']['total_gpus']}
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
         ray_init_args = {'num_cpus': config_sim['client']['total_cpus'], 'num_gpus' : 0}
