@@ -62,7 +62,7 @@ def get_client_fn(dataset: FederatedDataset, model,device,apply_transforms):
         # Let's get the partition corresponding to the i-th client
         client_dataset = dataset.load_partition(int(cid), "train")
 
-        # Now let's split it into train (90%) and validation (10%)
+        # Now let's split it into train (90%) and validation (15%)
         client_dataset_splits = client_dataset.train_test_split(test_size=0.15)
 
         trainset = client_dataset_splits["train"]

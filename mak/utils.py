@@ -130,7 +130,7 @@ def get_dataset(config_sim):
         if dataset_name == 'zh-plus/tiny-imagenet':
             centralized_testset = fds.load_split("valid")
         else:
-            centralized_testset = fds.load_split("train")
+            centralized_testset = fds.load_split("test")
         return fds, centralized_testset
 
 def get_model(config):
@@ -167,7 +167,7 @@ def get_evaluate_fn(
         # Disable tqdm for dataset preprocessing
         disable_progress_bar()
 
-        testloader = DataLoader(testset, batch_size=50)
+        testloader = DataLoader(testset, batch_size=32)
         loss, accuracy = test(model, testloader, device=device)
         metrics_df = pd.read_csv(metrics_file)
         if metrics_df['loss'].min() > loss:
