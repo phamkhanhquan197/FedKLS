@@ -159,6 +159,7 @@ cython_debug/
 #.idea/
 
 out/
+data/
 test.ipynb
 dataset/
 *.ipynb

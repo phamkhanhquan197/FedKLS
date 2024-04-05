@@ -12,7 +12,7 @@ from mak.custom_server import ServerSaveData
 from mak.utils import gen_dir_outfile_server, get_model, get_strategy,save_simulation_history,get_dataset
 import torch
 from mak.pytorch_transformations import get_transformations
-import mak
+from mak.utils import get_device_and_resources
 
 def main(config_sim):
     out_file_path, saved_models_path = gen_dir_outfile_server(config=config_sim)
@@ -23,21 +23,8 @@ def main(config_sim):
     apply_transforms = get_transformations(dataset_name = dataset_name)
 
     model = get_model(config_sim)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    if config_sim['client']['num_cpus'] and (config_sim['client']['num_gpus'] > 0.0 and config_sim['client']['num_gpus'] <= 1.0):
-        client_res = {'num_cpus': config_sim['client']['num_cpus'], 'num_gpus' : config_sim['client']['num_gpus']}
-    else:
-        client_res = {'num_cpus': config_sim['client']['num_cpus'], 'num_gpus' : 0.0}
-
-    if config_sim['client']['gpu'] and device == 'cuda':
-        ray_init_args = {'num_cpus': config_sim['client']['total_cpus'], 'num_gpus' : config_sim['client']['total_gpus']}
-    else:
-        ray_init_args = {'num_cpus': config_sim['client']['total_cpus'], 'num_gpus' : 0}
-        client_res = {'num_cpus': config_sim['client']['num_cpus'], 'num_gpus' : 0.0}
-    if config_sim['common']['multi_node']:
-        ray_init_args["address"] = "auto"
-        ray_init_args["runtime_env"] = {"py_modules" : [mak]} 
+    device, ray_init_args, client_res = get_device_and_resources(config_sim=config_sim)
     
     #log all config here
     try:
@@ -47,6 +34,7 @@ def main(config_sim):
     log(INFO,f" =>>>>> Model : {model._get_name()} Device : {device}")
     log(INFO,f" =>>>>> Dataset : {dataset_name} Partitoner : {str(fds._partitioners['train']).split('.')[-1]} Alpha : {dir_alpha}")
     log(INFO,f" =>>>>> Ray init args : {ray_init_args} Client Res : {client_res}")
+
     strategy = get_strategy(config=config_sim,test_data=centralized_testset,save_model_dir=saved_models_path,out_file_path= out_file_path,device=device,apply_transforms=apply_transforms)
     server = ServerSaveData(
         strategy=strategy, client_manager=fl.server.client_manager.SimpleClientManager(),out_file_path=out_file_path,target_acc=config_sim['common']['target_acc'])

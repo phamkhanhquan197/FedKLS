@@ -32,6 +32,32 @@ from flwr_datasets.partitioner import IidPartitioner, DirichletPartitioner
 
 from torchvision.models.resnet import resnet18 as resnet18_torch
 
+import mak
+
+
+def get_device_and_resources(config_sim):
+    # Check if GPU is available
+    device = torch.device("cuda" if torch.cuda.is_available() and config_sim['client']['gpu'] else "cpu")
+
+    # Assign GPU and CPU resources
+    if device.type == 'cuda':
+        # Assign GPU resources
+        num_gpus_total = config_sim['client']['total_gpus']
+        if num_gpus_total > 0:
+            ray_init_args = {'num_cpus': config_sim['client']['total_cpus'], 'num_gpus': num_gpus_total}
+        else:
+            ray_init_args = {'num_cpus': config_sim['client']['total_cpus'], 'num_gpus': 0}
+    else:
+        # Assign CPU resources
+        ray_init_args = {'num_cpus': config_sim['client']['total_cpus'], 'num_gpus': 0}
+
+    # Assign client resources
+    client_res = {'num_cpus': config_sim['client']['num_cpus'], 'num_gpus': config_sim['client']['num_gpus'] if device.type == 'cuda' else 0.0}
+    if config_sim['common']['multi_node']:
+        ray_init_args["address"] = "auto"
+        ray_init_args["runtime_env"] = {"py_modules" : [mak]} 
+    return device, ray_init_args, client_res
+
 def gen_dir_outfile_server(config):
     # generates the basic directory structure for out data and the header for file
     today = date.today()
