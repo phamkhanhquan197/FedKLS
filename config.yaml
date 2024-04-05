@@ -3,15 +3,15 @@
 
 common:
   data_type : iid #data_type = data distribution one among ['iid','dirichlet_niid']
-  dataset : mnist #data_set = data set used  one among ['mnist', 'cifar10', 'fashion_mnist', 'sasha/dog-food', 'zh-plus/tiny-imagenet']
+  dataset : cifar10 #data_set = data set used  one among ['mnist', 'cifar10', 'fashion_mnist', 'sasha/dog-food', 'zh-plus/tiny-imagenet']
   dirichlet_alpha : 0.11 #dirichlet concentration parameter (only used if data_type is dirchlet-niid)
   target_acc : 0.95
-  model : net #one among [resnet18,net,cifarnet]
+  model : resnet18_pretrained #one among [resnet18,net,cifarnet,resnet18_pretrained]
   optimizer : sgd # one among [sgd,adam]
   seed : 133
 
 server:
-  num_rounds : 21
+  num_rounds : 5
   address : 127.0.0.1
   fraction_fit : 0.1
   min_fit_clients: 2
@@ -27,7 +27,7 @@ client:
   total_cpus : 20
   total_gpus : 1
   gpu : True  # True or False, Use GPU for training or not.
-  num_cpus : 3  # no. of CPU cores that are assigned for each actor
+  num_cpus : 2  # no. of CPU cores that are assigned for each actor
   num_gpus : 0.1  # no. of GPU that are assigned for each actor (it can be fraction value as well)
 
 
