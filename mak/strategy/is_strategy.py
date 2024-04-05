@@ -34,6 +34,7 @@ class ImportanceSamplingStrategyLoss(fl.server.strategy.FedAvg):
         evaluate_fn,
         initial_parameters,
         evaluate_metrics_aggregation_fn,
+        apply_transforms,
         device = 'cpu',
         on_fit_config_fn = None
 
@@ -54,6 +55,7 @@ class ImportanceSamplingStrategyLoss(fl.server.strategy.FedAvg):
         self.initial_parameters = initial_parameters
         self.on_fit_config_fn = on_fit_config_fn
         self.evaluate_metrics_aggregation_fn = evaluate_metrics_aggregation_fn
+        self.apply_transforms = apply_transforms
         
 
     def __repr__(self) -> str:
@@ -99,14 +101,14 @@ class ImportanceSamplingStrategyLoss(fl.server.strategy.FedAvg):
         set_params(client_model, client_parameters)
         client_model.to(device)
         # Apply transform to dataset
-        testset = self.test_data.with_transform(apply_transforms)
+        testset = self.test_data.with_transform(self.apply_transforms)
 
         # Disable tqdm for dataset preprocessing
         disable_progress_bar()
 
         testloader = DataLoader(testset, batch_size=50)
         loss, accuracy = test(client_model, testloader, device=device)
-        return loss
+        return 1/loss
 
     def _aggregate(self, results: List[Tuple[NDArrays, int, float]]) -> NDArrays:
         """Compute weighted average."""

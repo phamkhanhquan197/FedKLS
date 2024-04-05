@@ -9,6 +9,7 @@ common:
   model : resnet18_pretrained #one among [resnet18,net,cifarnet,resnet18_pretrained]
   optimizer : sgd # one among [sgd,adam]
   seed : 133
+  multi_node : False
 
 server:
   num_rounds : 5
