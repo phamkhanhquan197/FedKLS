@@ -32,7 +32,6 @@ class ImportanceSamplingStrategyLoss(fl.server.strategy.FedAvg):
         min_evaluate_clients : int,
         min_available_clients : int,
         evaluate_fn,
-        initial_parameters,
         evaluate_metrics_aggregation_fn,
         apply_transforms,
         device = 'cpu',
@@ -45,17 +44,16 @@ class ImportanceSamplingStrategyLoss(fl.server.strategy.FedAvg):
                          min_evaluate_clients = min_evaluate_clients,
                          min_available_clients = min_available_clients,
                          evaluate_fn = evaluate_fn,
-                         initial_parameters= initial_parameters,
                          on_fit_config_fn = on_fit_config_fn)
         print("++++++++++++++++ Using Loss based Importance Sampling Strategy +++++++++++++++++++++++++++")
         self.model = model
         self.test_data = test_data
         self.fraction_fit = fraction_fit
         self.evaluate_fn = evaluate_fn
-        self.initial_parameters = initial_parameters
         self.on_fit_config_fn = on_fit_config_fn
         self.evaluate_metrics_aggregation_fn = evaluate_metrics_aggregation_fn
         self.apply_transforms = apply_transforms
+        self.device = device
         
 
     def __repr__(self) -> str:
@@ -78,11 +76,12 @@ class ImportanceSamplingStrategyLoss(fl.server.strategy.FedAvg):
         # Convert results 
         #weighted results based on the loss
         weights_results = [
-            (parameters_to_ndarrays(fit_res.parameters), fit_res.num_examples, self.evaluate_client(parameters_to_ndarrays(fit_res.parameters)))
+            (parameters_to_ndarrays(fit_res.parameters), fit_res.num_examples, self.evaluate_client(parameters_to_ndarrays(fit_res.parameters),self.device))
             for _, fit_res in results
         ]
         print(f"++++++++++ weights results done aggregating parameters")
-        parameters_aggregated = ndarrays_to_parameters(self._aggregate_greedy(weights_results))
+        parameters_aggregated = ndarrays_to_parameters(self._aggregate(weights_results))
+        # parameters_aggregated = ndarrays_to_parameters(self._aggregate_greedy(weights_results))
 
         # Aggregate custom metrics if aggregation fn was provided
         metrics_aggregated = {}
@@ -177,7 +176,7 @@ class ImportanceSamplingStrategyLoss(fl.server.strategy.FedAvg):
             # }
             # Run the potential greedy soup on the held-out val set.
             # print(f"++++++++ type of pweights : {type(potential_greedy_soup_params)}")
-            held_out_val_loss = self.evaluate_client(potential_greedy_soup_params)
+            held_out_val_loss = self.evaluate_client(potential_greedy_soup_params,self.device)
             # If loss on the held-out val set decreases, add the new model to the greedy soup.
             print(f'Potential greedy soup val loss {held_out_val_loss}, best so far {best_val_loss_so_far}.')
             if held_out_val_loss < best_val_loss_so_far:

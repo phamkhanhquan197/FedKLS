@@ -261,6 +261,7 @@ def get_strategy(config,test_data,save_model_dir,out_file_path, device,apply_tra
             evaluate_fn=get_evaluate_fn(centralized_testset=test_data,config_sim=config,save_model_dir = save_model_dir,metrics_file = out_file_path,device=device,apply_transforms=apply_transforms),
             evaluate_metrics_aggregation_fn=weighted_average,
             device=device,
+            apply_transforms=apply_transforms,
             on_fit_config_fn=get_fit_config_fn(config_sim=config),
     )
     elif STRATEGY == "fedprox": #from flwr 1.XX
