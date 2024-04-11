@@ -288,6 +288,7 @@ def get_strategy(config,test_data,save_model_dir,out_file_path, device,apply_tra
             on_fit_config_fn=get_fit_config_fn(config_sim=config),
             server_learning_rate=1.0,
             server_momentum=0.2,
+            initial_parameters=fl.common.ndarrays_to_parameters([val.cpu().numpy() for _, val in model.state_dict().items()])
         )
     else: #default fedavg strategy
         strategy = fl.server.strategy.FedAvg(

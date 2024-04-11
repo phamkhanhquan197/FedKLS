@@ -101,22 +101,13 @@ def test(net, testloader, device: str):
     accuracy = correct / len(testloader.dataset)
     return loss, accuracy
 
-# def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays]):
-#     """Set model weights from a list of NumPy ndarrays."""
-#     params_dict = zip(model.state_dict().keys(), params)
-#     state_dict = OrderedDict({k: torch.Tensor(v) for k, v in params_dict})
-#     # print(f"+++++++++++++++ state dict : {state_dict}")
-#     model.load_state_dict(state_dict, strict=True)
-
 def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays]):
     """Set model weights from a list of NumPy ndarrays."""
-    state_dict = OrderedDict(
-            {
-                k: torch.tensor(np.atleast_1d(v))
-                for k, v in zip(model.state_dict().keys(), params)
-            }
-        )
+    params_dict = zip(model.state_dict().keys(), params)
+    state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
+    # print(f"+++++++++++++++ state dict : {state_dict}")
     model.load_state_dict(state_dict, strict=True)
+
 
 
 
