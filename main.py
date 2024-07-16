@@ -1,18 +1,20 @@
-from mak.utils import get_config, set_seed
-config_sim = get_config('./config.yaml')
-set_seed(seed=config_sim['common']['seed'])
-from mak.client import get_client_fn
 import flwr as fl
 from logging import INFO, DEBUG
 from flwr.common.logger import log
 from flwr_datasets import FederatedDataset
 from flwr_datasets.partitioner import DirichletPartitioner
 from datasets.utils.logging import disable_progress_bar
-from mak.custom_server import ServerSaveData
-from mak.utils import gen_dir_outfile_server, get_model, get_strategy,save_simulation_history,get_dataset
 import torch
-from mak.pytorch_transformations import get_transformations
-from mak.utils import get_device_and_resources
+
+from mak.utils.helper import get_config, set_seed
+from mak.utils.helper import get_device_and_resources
+from mak.utils.helper import gen_dir_outfile_server, get_model, get_strategy,save_simulation_history,get_dataset
+from mak.utils.pytorch_transformations import get_transformations
+from mak.client import get_client_fn
+from mak.custom_server import ServerSaveData
+
+config_sim = get_config('./config.yaml')
+set_seed(seed=config_sim['common']['seed'])
 
 def main(config_sim):
     out_file_path, saved_models_path = gen_dir_outfile_server(config=config_sim)

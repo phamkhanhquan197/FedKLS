@@ -1,12 +1,18 @@
+import os
 from typing import Dict, List, Tuple, Union, Optional
 from logging import WARNING
-import flwr as fl
 from dataclasses import dataclass, asdict
 import json
 from functools import reduce
 import numpy as np
-import tensorflow as tf
-
+import flwr as fl
+from flwr.server.strategy.aggregate import aggregate
+from flwr.common.logger import log
+from flwr.server.client_proxy import ClientProxy
+from numpy import average
+from numpy import array
+from numpy.typing import NDArray
+from functools import reduce
 from flwr.common import (
     Scalar,
     FitRes,
@@ -15,17 +21,8 @@ from flwr.common import (
     ndarrays_to_parameters,
     parameters_to_ndarrays,
 )
-from flwr.server.strategy.aggregate import aggregate
-from flwr.common.logger import log
-from flwr.server.client_proxy import ClientProxy
-import os
-from tensorflow.keras.models import load_model
-
-from numpy import average
-from numpy import array
-from numpy.typing import NDArray
-from functools import reduce
-
+# import tensorflow as tf
+# from tensorflow.keras.models import load_model
 
 class FedPR(fl.server.strategy.FedAvg):
     def __init__(

@@ -1,15 +1,25 @@
-"""Implements the Resnet18 model."""
+"""Implements the Base Resnet model."""
 
-import torch.nn as nn
+from torch import nn, Tensor
 import torch.nn.functional as F
 
+from mak.models.base_model import Model
 
 class BasicBlock(nn.Module):
-    """Resnet Basic Block."""
+    """Resnet Basic Block. (https://arxiv.org/abs/2103.16257)"""
 
     expansion = 1
 
-    def __init__(self, in_planes, planes, activation, stride=1):
+    def __init__(self, in_planes: int, planes: int, activation: nn.functional, stride: int=1):
+        """
+        Initializes a ResNet basic block.
+
+        Args:
+            in_planes (int): Number of input channels.
+            planes (int): Number of output channels.
+            activation (nn.functional): Activation function.
+            stride (int): Stride for the convolutional layers. Defaults to 1.
+        """
         super().__init__()
         self.conv1 = nn.Conv2d(
             in_planes, planes, kernel_size=3, stride=stride, padding=1, bias=False
@@ -35,8 +45,16 @@ class BasicBlock(nn.Module):
 
         self.activation = activation
 
-    def forward(self, x):
-        """Forward pass."""
+    def forward(self, x: Tensor) -> Tensor:
+        """
+        Forward pass of the ResNet basic block.
+
+        Args:
+            x (Tensor): Input tensor.
+
+        Returns:
+            Tensor: Output tensor.
+        """
         out = self.activation(self.bn1(self.conv1(x)))
         out = self.bn2(self.conv2(out))
         out += self.shortcut(x)
@@ -49,7 +67,16 @@ class Bottleneck(nn.Module):
 
     expansion = 4
 
-    def __init__(self, in_planes, planes, activation, stride=1):
+    def __init__(self, in_planes: int, planes: int, activation: nn.functional, stride: int=1):
+        """
+        Initializes a ResNet bottleneck block.
+
+        Args:
+            in_planes (int): Number of input channels.
+            planes (int): Number of output channels.
+            activation (nn.functional): Activation function.
+            stride (int): Stride for the convolutional layers. Defaults to 1.
+        """
         super().__init__()
         self.conv1 = nn.Conv2d(in_planes, planes, kernel_size=1, bias=False)
         self.bn1 = nn.BatchNorm2d(planes)
@@ -77,8 +104,16 @@ class Bottleneck(nn.Module):
                 nn.BatchNorm2d(self.expansion * planes),
             )
 
-    def forward(self, x):
-        """Forward pass."""
+    def forward(self, x: Tensor) -> Tensor:
+        """
+        Forward pass of the ResNet bottleneck block.
+
+        Args:
+            x (Tensor): Input tensor.
+
+        Returns:
+            Tensor: Output tensor.
+        """
         out = self.activation(self.bn1(self.conv1(x)))
         out = self.activation(self.bn2(self.conv2(out)))
         out = self.bn3(self.conv3(out))
@@ -87,11 +122,23 @@ class Bottleneck(nn.Module):
         return out
 
 
-class ResNet(nn.Module):
-    """Resnet Model Class."""
+class BaseResNet(Model):
+    """Resnet Base Model Class."""
 
-    def __init__(self, block, num_blocks, activation, num_classes=10):
-        super().__init__()
+    def __init__(self, block: nn.Module, num_blocks: list[int], activation: nn.functional, num_classes: int, *args, **kwargs):
+        """
+        Initializes a ResNet model.
+
+        Args:
+            block (nn.Module): Block type for ResNet (e.g., BasicBlock or Bottleneck).
+            num_blocks (list[int]): List specifying the number of blocks in each layer of the ResNet.
+            activation (nn.functional): Activation function.
+            num_classes (int): Number of output classes.
+            *args: Variable length argument list.
+            **kwargs: Arbitrary keyword arguments.
+        """
+        super().__init__(num_classes, *args, **kwargs)
+
         self.in_planes = 64
         self.activation = activation
 
@@ -103,7 +150,19 @@ class ResNet(nn.Module):
         self.layer4 = self._make_layer(block, 512, num_blocks[3], stride=2)
         self.linear = nn.Linear(512 * block.expansion, num_classes)
 
-    def _make_layer(self, block, planes, num_blocks, stride):
+    def _make_layer(self, block: nn.Module, planes: int, num_blocks: int, stride: int):
+        """
+        Helper function to create a ResNet layer.
+
+        Args:
+            block (nn.Module): Block type for ResNet (e.g., BasicBlock or Bottleneck).
+            planes (int): Number of output channels for each block in the layer.
+            num_blocks (int): Number of blocks in the layer.
+            stride (int): Stride for the convolutional layers.
+
+        Returns:
+            nn.Sequential: Sequential container for the layer.
+        """
         strides = [stride] + [1] * (num_blocks - 1)
         layers = []
         for curr_stride in strides:
@@ -111,8 +170,16 @@ class ResNet(nn.Module):
             self.in_planes = planes * block.expansion
         return nn.Sequential(*layers)
 
-    def forward(self, x):
-        """Forward pass."""
+    def forward(self, x: Tensor) -> Tensor:
+        """
+        Forward pass of the ResNet model.
+
+        Args:
+            x (Tensor): Input tensor.
+
+        Returns:
+            Tensor: Output tensor.
+        """
         out = self.activation(self.bn1(self.conv1(x)))
         out = self.layer1(out)
         out = self.layer2(out)

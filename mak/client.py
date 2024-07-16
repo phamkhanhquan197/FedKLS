@@ -1,8 +1,9 @@
-import flwr as fl
 import torch
 from torch.utils.data import DataLoader
+import flwr as fl
 from flwr_datasets import FederatedDataset
-from mak.pytorch_transformations import get_transformations
+
+from mak.utils.pytorch_transformations import get_transformations
 from mak.training import set_params, train, test
 
 # Flower client, adapted from Pytorch quickstart example
@@ -24,12 +25,12 @@ class FlowerClient(fl.client.NumPyClient):
         set_params(self.model, parameters)
 
         # Read from config
-        batch, epochs = config["batch_size"], config["epochs"]
+        batch, epochs, learning_rate = config["batch_size"], config["epochs"], config["lr"]
         # Construct dataloader
         trainloader = DataLoader(self.trainset, batch_size=batch, shuffle=True)
 
         # Define optimizer
-        optimizer = torch.optim.SGD(self.model.parameters(), lr=0.01, momentum=0.9)
+        optimizer = torch.optim.SGD(self.model.parameters(), lr=learning_rate, momentum=0.9)
         # Train
         train(net=self.model, trainloader=trainloader, optim= optimizer, epochs=epochs, device=self.device)
 

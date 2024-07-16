@@ -14,25 +14,27 @@ from torch.utils.data import DataLoader
 import flwr as fl
 from flwr.common import Metrics
 from flwr.common.typing import Scalar
-from logging import INFO, DEBUG
 from flwr.common.logger import log
+from logging import INFO, DEBUG
 
 from datasets import Dataset
 from datasets.utils.logging import disable_progress_bar
 from flwr_datasets import FederatedDataset
 from datetime import datetime, date
 import random, csv, os, json
-from torchvision.models import resnet18
-from mak.strategy.is_strategy import ImportanceSamplingStrategyLoss
 import pandas as pd
-from mak.client import FlowerClient
-from mak.training import test, weighted_average, set_params
-import mak.models as custom_models
 from flwr_datasets.partitioner import IidPartitioner, DirichletPartitioner
-
 from torchvision.models.resnet import resnet18 as resnet18_torch
 
+
 import mak
+from mak.client import FlowerClient
+from mak.training import test, weighted_average, set_params
+from mak.strategy.is_strategy import ImportanceSamplingStrategyLoss
+import mak.models.models as custom_models
+# from mak.models.resnet import resnet18
+from mak.strategy.fedavgpr_strategy import FedAvgPR
+from mak.strategy.fedavgga_strategy import FedAvgGA, FedAvgMine
 
 
 def get_device_and_resources(config_sim):
@@ -137,15 +139,17 @@ def get_model(config):
     model_name = config['common']['model']
     num_classes = 10
     if model_name == 'resnet18':
-        return custom_models.resnet18(num_classes = num_classes)
+        return custom_models.Resnet18(num_classes = num_classes)
     elif model_name == 'resnet18_pretrained':
         mod = resnet18_torch(weights='DEFAULT')
         mod.fc = nn.Linear(mod.fc.in_features, num_classes)
         return mod
     elif model_name == 'net':
-        return custom_models.Net()
+        return custom_models.Net(num_classes = num_classes)
     elif model_name == 'cifarnet':
-        return custom_models.CifarNet()
+        return custom_models.CifarNet(num_classes = num_classes)
+    elif model_name == 'fedavgcnn':
+        return custom_models.FedAVGCNN(num_classes = num_classes)
     else:
         raise Exception(f"No model found named : {model_name}")
 
@@ -249,6 +253,7 @@ def get_strategy(config,test_data,save_model_dir,out_file_path, device,apply_tra
     NUM_CLIENTS = config['server']['num_clients']
     FRACTION_FIT = config['server']['fraction_fit']
     FRACTION_EVAL = config['server']['fraction_evaluate']
+    
     if STRATEGY == 'weighted_loss':
         strategy = ImportanceSamplingStrategyLoss(
             model=model,
@@ -263,7 +268,7 @@ def get_strategy(config,test_data,save_model_dir,out_file_path, device,apply_tra
             device=device,
             apply_transforms=apply_transforms,
             on_fit_config_fn=get_fit_config_fn(config_sim=config),
-    )
+        )
     elif STRATEGY == "fedprox": #from flwr 1.XX
         strategy = fl.server.strategy.FedProx(
             fraction_fit=FRACTION_FIT,
@@ -290,17 +295,60 @@ def get_strategy(config,test_data,save_model_dir,out_file_path, device,apply_tra
             server_momentum=0.2,
             initial_parameters=fl.common.ndarrays_to_parameters([val.cpu().numpy() for _, val in model.state_dict().items()])
         )
-    else: #default fedavg strategy
+    elif STRATEGY == "fedopt":
+        strategy = fl.server.strategy.FedOpt(
+            fraction_fit=FRACTION_FIT,
+            fraction_evaluate= FRACTION_EVAL,
+            min_fit_clients=MIN_CLIENTS_FIT,
+            min_evaluate_clients=MIN_CLIENTS_EVAL,
+            min_available_clients=NUM_CLIENTS,
+            evaluate_fn=get_evaluate_fn(centralized_testset=test_data,config_sim=config,save_model_dir = save_model_dir,metrics_file = out_file_path,device=device,apply_transforms=apply_transforms),
+            evaluate_metrics_aggregation_fn=weighted_average,
+            on_fit_config_fn=get_fit_config_fn(config_sim=config),
+            eta = 1e-1, 
+            eta_l = 1e-1, 
+            beta_1 = 0.0,
+            beta_2 = 0.0,
+            tau = 1e-9,
+        )
+    elif STRATEGY == "fedadam":
+        strategy = fl.server.strategy.FedAdam(
+            fraction_fit=FRACTION_FIT,
+            fraction_evaluate= FRACTION_EVAL,
+            min_fit_clients=MIN_CLIENTS_FIT,
+            min_evaluate_clients=MIN_CLIENTS_EVAL,
+            min_available_clients=NUM_CLIENTS,
+            evaluate_fn=get_evaluate_fn(centralized_testset=test_data,config_sim=config,save_model_dir = save_model_dir,metrics_file = out_file_path,device=device,apply_transforms=apply_transforms),
+            evaluate_metrics_aggregation_fn=weighted_average,
+            on_fit_config_fn=get_fit_config_fn(config_sim=config),
+            eta = 1e-1, 
+            eta_l = 1e-1, 
+            beta_1 = 0.9,
+            beta_2 = 0.99,
+            tau = 1e-9,
+        ) 
+    elif STRATEGY == "fedmedian":
+        strategy = fl.server.strategy.FedMedian(
+            fraction_fit=FRACTION_FIT,
+            fraction_evaluate= FRACTION_EVAL,
+            min_fit_clients=MIN_CLIENTS_FIT,
+            min_evaluate_clients=MIN_CLIENTS_EVAL,
+            min_available_clients=NUM_CLIENTS,
+            evaluate_fn=get_evaluate_fn(centralized_testset=test_data,config_sim=config,save_model_dir = save_model_dir,metrics_file = out_file_path,device=device,apply_transforms=apply_transforms),
+            evaluate_metrics_aggregation_fn=weighted_average,
+            on_fit_config_fn=get_fit_config_fn(config_sim=config),
+        )
+    elif STRATEGY == "fedavg": #default fedavg strategy
         strategy = fl.server.strategy.FedAvg(
-        fraction_fit= FRACTION_FIT ,  # Sample 10% of available clients for training
-        fraction_evaluate= FRACTION_EVAL,  # Sample 5% of available clients for evaluation
-        min_fit_clients=MIN_CLIENTS_FIT,  # Never sample less than 2 clients for training
-        min_evaluate_clients=MIN_CLIENTS_EVAL,  # Never sample less than 2 clients for evaluation
-        min_available_clients=NUM_CLIENTS,
-        evaluate_fn=get_evaluate_fn(centralized_testset=test_data,config_sim=config,save_model_dir = save_model_dir,metrics_file = out_file_path,device=device,apply_transforms=apply_transforms),
-        evaluate_metrics_aggregation_fn=weighted_average,
-        on_fit_config_fn=get_fit_config_fn(config_sim=config),
-    )
+            fraction_fit= FRACTION_FIT ,  # Sample 10% of available clients for training
+            fraction_evaluate= FRACTION_EVAL,  # Sample 5% of available clients for evaluation
+            min_fit_clients=MIN_CLIENTS_FIT,  # Never sample less than 2 clients for training
+            min_evaluate_clients=MIN_CLIENTS_EVAL,  # Never sample less than 2 clients for evaluation
+            min_available_clients=NUM_CLIENTS,
+            evaluate_fn=get_evaluate_fn(centralized_testset=test_data,config_sim=config,save_model_dir = save_model_dir,metrics_file = out_file_path,device=device,apply_transforms=apply_transforms),
+            evaluate_metrics_aggregation_fn=weighted_average,
+            on_fit_config_fn=get_fit_config_fn(config_sim=config),
+        )
     
     return strategy
 
