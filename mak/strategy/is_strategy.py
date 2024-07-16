@@ -5,7 +5,10 @@ from dataclasses import dataclass, asdict
 import json
 from functools import reduce
 import numpy as np
-
+from flwr.server.strategy.aggregate import aggregate
+from flwr.common.logger import log
+from flwr.server.client_proxy import ClientProxy
+from flwr.common import NDArray, NDArrays
 from flwr.common import (
     Scalar,
     FitRes,
@@ -14,12 +17,9 @@ from flwr.common import (
     ndarrays_to_parameters,
     parameters_to_ndarrays,
 )
-from flwr.server.strategy.aggregate import aggregate
-from flwr.common.logger import log
-from flwr.server.client_proxy import ClientProxy
-from flwr.common import NDArray, NDArrays
+
 from mak.training import set_params, test
-from mak.utils import  disable_progress_bar, DataLoader
+from mak.utils.helper import  disable_progress_bar, DataLoader
 
 class ImportanceSamplingStrategyLoss(fl.server.strategy.FedAvg):
     def __init__(
