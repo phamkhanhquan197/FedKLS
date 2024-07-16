@@ -32,9 +32,6 @@ from mak.client import FlowerClient
 from mak.training import test, weighted_average, set_params
 from mak.strategy.is_strategy import ImportanceSamplingStrategyLoss
 import mak.models.models as custom_models
-# from mak.models.resnet import resnet18
-from mak.strategy.fedavgpr_strategy import FedAvgPR
-from mak.strategy.fedavgga_strategy import FedAvgGA, FedAvgMine
 
 
 def get_device_and_resources(config_sim):
