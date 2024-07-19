@@ -1,4 +1,4 @@
-name: flwr-torch
+name: venv-flwr
 channels:
   - defaults
 dependencies:
