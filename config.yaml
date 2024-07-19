@@ -6,28 +6,28 @@ common:
   dataset : cifar10 # data_set = data set used  one among ['mnist', 'cifar10', 'fashion_mnist', 'sasha/dog-food', 'zh-plus/tiny-imagenet']
   dirichlet_alpha : 0.1 #dirichlet concentration parameter (only used if data_type is dirchlet-niid)
   target_acc : 0.95
-  model : fedavgcnn # <<< changes here >>> one among [resnet18, resnet18_pretrained, net, cifarnet, fedavgcnn]
+  model : fedavgcnn # one among [resnet18, resnet18_pretrained, net, cifarnet, fedavgcnn]
   optimizer : sgd # one among [sgd,adam]
   seed : 133
   multi_node : False
 
 server:
-  num_rounds : 100 # <<< changes here >>>
+  num_rounds : 100 
   address : 127.0.0.1
   fraction_fit : 0.1
   min_fit_clients: 2
   num_clients : 50  # total number of clients participating in training 
   fraction_evaluate : 0.05
-  strategy : fedavg # <<< changes here >>> Strategy : choices=['fedavg', 'fedyogi', 'fedadagrad', 'fedavgm','fedprox','weighted_loss', 'fedopt', 'fedadam', 'fedmedian']
+  strategy : fedavg #  Strategy : choices=['fedavg', 'fedyogi', 'fedadagrad', 'fedavgm','fedprox','weighted_loss', 'fedopt', 'fedadam', 'fedmedian']
 
 client:
   epochs : 3
   batch_size : 32
-  lr: 0.01 # <<< changes here >>>  [0.0001,0.001,0.005,0.01,0.1,0.2]
+  lr: 0.01 #  [0.0001,0.001,0.005,0.01,0.1,0.2]
   save_train_res : True
-  total_cpus : 10 # <<< changes here >>>
-  total_gpus : 1
+  total_cpus : 10 # no. of CPU cores that are assigned for all simulation
+  total_gpus : 1 # no. of GPU's assigned for whole simulation
   gpu : True  # True or False, Use GPU for training or not.
   num_cpus : 1  # no. of CPU cores that are assigned for each actor
-  num_gpus : 0.25 # <<< changes here >>>  no. of GPU that are assigned for each actor (it can be fraction value as well)
+  num_gpus : 0.25 #  no. of GPU that are assigned for each actor (it can be fraction value as well)
 
