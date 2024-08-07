@@ -139,46 +139,46 @@ def get_dataset(config_sim):
 
         return fds, centralized_testset
 
-def get_model(config):
+def get_model(config, shape):
     model_name = config['common']['model']
     # get num_classes
     dataset_name = config['common']['dataset']
     num_classes = dataset_info[dataset_name]['num_classes']
     # get model
     if model_name == 'resnet18':
-        return custom_models.Resnet18(num_classes = num_classes)
+        return custom_models.Resnet18(num_classes = num_classes,input_shape = shape)
     elif model_name == 'resnet18_pretrained':
         mod = resnet18_torch(weights='DEFAULT')
         mod.fc = nn.Linear(mod.fc.in_features, num_classes)
         return mod
     if model_name == 'resnet34':
-        return custom_models.Resnet34(num_classes = num_classes)
+        return custom_models.Resnet34(num_classes = num_classes,input_shape = shape)
     elif model_name == 'resnet34_pretrained':
         mod = resnet34_torch(weights='DEFAULT')
         mod.fc = nn.Linear(mod.fc.in_features, num_classes)
         return mod
     elif model_name == 'net':
-        return custom_models.Net(num_classes = num_classes)
+        return custom_models.Net(num_classes = num_classes,input_shape = shape)
     elif model_name == 'cifarnet':
-        return custom_models.CifarNet(num_classes = num_classes)
+        return custom_models.CifarNet(num_classes = num_classes,input_shape = shape)
     elif model_name == 'mobilenetv2':
-        return custom_models.MobileNetV2(num_classes = num_classes)
+        return custom_models.MobileNetV2(num_classes = num_classes,input_shape = shape)
     elif model_name == 'efficientnetb0':
-        return custom_models.EfficientNetB0(num_classes = num_classes)
+        return custom_models.EfficientNetB0(num_classes = num_classes,input_shape = shape)
     elif model_name == 'simplecnn':
-        return custom_models.SimpleCNN(num_classes = num_classes)
+        return custom_models.SimpleCNN(num_classes = num_classes,input_shape = shape)
     elif model_name == 'kerasexpcnn':
-        return custom_models.KerasExpCNN(num_classes = num_classes)
+        return custom_models.KerasExpCNN(num_classes = num_classes,input_shape = shape)
     elif model_name == 'mnistcnn':
-        return custom_models.MNISTCNN(num_classes = num_classes)
+        return custom_models.MNISTCNN(num_classes = num_classes,input_shape = shape)
     elif model_name == 'simplednn':
-        return custom_models.SimpleDNN(num_classes = num_classes)
+        return custom_models.SimpleDNN(num_classes = num_classes,input_shape = shape)
     elif model_name == 'fmcnn':
-        return custom_models.FMCNNModel(num_classes = num_classes)
+        return custom_models.FMCNNModel(num_classes = num_classes,input_shape = shape)
     elif model_name == 'lstmmodel':
         return custom_models.LSTMModel(num_classes = num_classes)
     elif model_name == 'fedavgcnn':
-        return custom_models.FedAVGCNN(num_classes = num_classes)
+        return custom_models.FedAVGCNN(num_classes = num_classes,input_shape = shape)
     else:
         raise Exception(f"No model found named : {model_name}")
 
@@ -186,11 +186,13 @@ def get_evaluate_fn(
     centralized_testset: Dataset,config_sim,device,save_model_dir,metrics_file, apply_transforms,
 ):
     """Return an evaluation function for centralized evaluation."""
+    dataset_name = config_sim["common"]["dataset"]
+    shape = dataset_info[dataset_name]["input_shape"]
 
     def evaluate(
         server_round: int, parameters: fl.common.NDArrays, config: Dict[str, Scalar]
     ):
-        model = get_model(config=config_sim)
+        model = get_model(config=config_sim, shape= shape)
         set_params(model, parameters)
         model.to(device)
 
@@ -276,7 +278,9 @@ def save_simulation_history(hist : fl.server.history.History, path):
 
 def get_strategy(config,test_data,save_model_dir,out_file_path, device,apply_transforms):
     STRATEGY = config['server']['strategy']
-    model = get_model(config=config)
+    dataset_name = config["common"]["dataset"]
+    shape = dataset_info[dataset_name]["input_shape"]
+    model = get_model(config=config,shape = shape)
     MIN_CLIENTS_FIT = config['server']['min_fit_clients']
     MIN_CLIENTS_EVAL = 2
     NUM_CLIENTS = config['server']['num_clients']
@@ -417,3 +421,13 @@ def get_fit_config_fn(config_sim):
     return fit_config
 
 
+def get_mode_and_shape(partition):
+    data_set_keys = list(partition.features.keys())
+    x_column = data_set_keys[0]
+    shape = partition[x_column][0].size
+    mode = partition[x_column][0].mode
+    if mode == 'RGB':
+        channel = 3
+    else:
+        channel = 1
+    return (channel,shape[0],shape[1])

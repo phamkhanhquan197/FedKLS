@@ -7,28 +7,31 @@ from datasets.utils.logging import disable_progress_bar
 import torch
 
 from mak.utils.helper import get_config, set_seed
-from mak.utils.helper import get_device_and_resources
+from mak.utils.helper import get_device_and_resources, get_mode_and_shape
 from mak.utils.helper import gen_dir_outfile_server, get_model, get_strategy,save_simulation_history,get_dataset
 from mak.utils.pytorch_transformations import get_transformations
 from mak.client import get_client_fn
 from mak.custom_server import ServerSaveData
+from mak.utils.dataset_info import dataset_info
 
-config_sim = get_config('./config.yaml')  # To Do get config file path from args set config.yaml as default
+config_sim = get_config('./config.yaml')  # To Do: get config file path from args set config.yaml as default
 set_seed(seed=config_sim['common']['seed'])
 
 def main(config_sim):
-    out_file_path, saved_models_path = gen_dir_outfile_server(config=config_sim)
-
     fds, centralized_testset = get_dataset(config_sim=config_sim)
     dataset_name = fds._dataset_name
+    # partition= fds.load_partition(0)
+    # shape = get_mode_and_shape(partition=partition)
+    shape = dataset_info[dataset_name]["input_shape"]
+    log(INFO,f" =>>>>> Dataset : {dataset_name} Shape : {shape}") 
 
+    model = get_model(config_sim,shape = shape)
     apply_transforms = get_transformations(dataset_name = dataset_name)
-
-    model = get_model(config_sim)
-
     device, ray_init_args, client_res = get_device_and_resources(config_sim=config_sim)
-    
-    #log all config here
+    generated_info = {"shape" : shape, "device": str(device)}
+    config_sim["generated_info"] = generated_info
+    out_file_path, saved_models_path = gen_dir_outfile_server(config=config_sim)
+
     try:
         dir_alpha = fds._partitioners['train']._alpha[0]
     except (AttributeError):
