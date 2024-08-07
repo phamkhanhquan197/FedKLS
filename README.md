@@ -1,6 +1,6 @@
 # Federated Learning Framework with Flower and PyTorch
 
-![Federated Learning](https://your-image-url-here.com/federated-learning.png)
+<!-- ![Federated Learning](https://your-image-url-here.com/federated-learning.png) -->
 
 This repository provides an easy-to-use Federated Learning framework based on Flower and PyTorch. It's designed to simplify the process of setting up and running federated learning experiments.
 
