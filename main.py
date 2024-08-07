@@ -13,7 +13,7 @@ from mak.utils.pytorch_transformations import get_transformations
 from mak.client import get_client_fn
 from mak.custom_server import ServerSaveData
 
-config_sim = get_config('./config.yaml')
+config_sim = get_config('./config.yaml')  # To Do get config file path from args set config.yaml as default
 set_seed(seed=config_sim['common']['seed'])
 
 def main(config_sim):
