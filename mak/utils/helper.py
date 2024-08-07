@@ -134,8 +134,8 @@ def get_dataset(config_sim):
     else:
         fds = FederatedDataset(dataset=dataset_name, partitioners=partitioner)
         # get test column name
-        test_column = dataset_info[dataset_name]['test_column']
-        centralized_testset = fds.load_split(test_column)
+        test_set = dataset_info[dataset_name]['test_set']
+        centralized_testset = fds.load_split(test_set)
 
         return fds, centralized_testset
 
