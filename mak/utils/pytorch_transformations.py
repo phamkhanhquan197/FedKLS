@@ -27,7 +27,7 @@ def apply_transforms_default(batch):
     return batch
 
 def get_transformations(dataset_name):
-    if dataset_name == 'cifar10':
+    if dataset_name == 'cifar10' or dataset_name == 'cifar100':
         return apply_transforms_cifar10
     else:
         return  apply_transforms_default

@@ -25,13 +25,14 @@ import random, csv, os, json
 import pandas as pd
 from flwr_datasets.partitioner import IidPartitioner, DirichletPartitioner
 from torchvision.models.resnet import resnet18 as resnet18_torch
-
+from torchvision.models.resnet import resnet34 as resnet34_torch
 
 import mak
 from mak.client import FlowerClient
 from mak.training import test, weighted_average, set_params
 from mak.strategy.is_strategy import ImportanceSamplingStrategyLoss
 import mak.models.models as custom_models
+from mak.utils.dataset_info import dataset_info
 
 
 def get_device_and_resources(config_sim):
@@ -110,41 +111,72 @@ def gen_dir_outfile_server(config):
 def get_partitioner(config_sim):
     num_clients = config_sim['server']['num_clients']
     if config_sim['common']['data_type'] == 'dirichlet_niid':
+        # alpha value
         dirchlet_alpha = config_sim['common']['dirichlet_alpha']
-        partitioner = DirichletPartitioner(num_partitions=num_clients, partition_by="label",
+        # dataset
+        dataset_name = config_sim['common']['dataset']
+        # dataset's label column
+        label = dataset_info[dataset_name]['output_column']
+        partitioner = DirichletPartitioner(num_partitions=num_clients, partition_by=label,
                                            alpha=dirchlet_alpha, min_partition_size=5,
                                            self_balancing=True)
     else:
         partitioner = IidPartitioner(num_partitions=num_clients)
+    # return train data
     return {"train":partitioner}
 
 def get_dataset(config_sim):
-    dataset_name=config_sim['common']['dataset']
-    supported_datasets = ['mnist', 'cifar10', 'fashion_mnist', 'sasha/dog-food', 'zh-plus/tiny-imagenet']
     partitioner = get_partitioner(config_sim=config_sim)
-    if dataset_name not in supported_datasets:
-        raise Exception(f"Dataset name should be among : {supported_datasets}")
+    
+    dataset_name = config_sim['common']['dataset']
+    if dataset_name not in dataset_info.keys():
+        raise Exception(f"Dataset name should be among : {list(dataset_info.keys())}")
     else:
         fds = FederatedDataset(dataset=dataset_name, partitioners=partitioner)
-        if dataset_name == 'zh-plus/tiny-imagenet':
-            centralized_testset = fds.load_split("valid")
-        else:
-            centralized_testset = fds.load_split("test")
+        # get test column name
+        test_column = dataset_info[dataset_name]['test_column']
+        centralized_testset = fds.load_split(test_column)
+
         return fds, centralized_testset
 
 def get_model(config):
     model_name = config['common']['model']
-    num_classes = 10
+    # get num_classes
+    dataset_name = config['common']['dataset']
+    num_classes = dataset_info[dataset_name]['num_classes']
+    # get model
     if model_name == 'resnet18':
         return custom_models.Resnet18(num_classes = num_classes)
     elif model_name == 'resnet18_pretrained':
         mod = resnet18_torch(weights='DEFAULT')
         mod.fc = nn.Linear(mod.fc.in_features, num_classes)
         return mod
+    if model_name == 'resnet34':
+        return custom_models.Resnet34(num_classes = num_classes)
+    elif model_name == 'resnet34_pretrained':
+        mod = resnet34_torch(weights='DEFAULT')
+        mod.fc = nn.Linear(mod.fc.in_features, num_classes)
+        return mod
     elif model_name == 'net':
         return custom_models.Net(num_classes = num_classes)
     elif model_name == 'cifarnet':
         return custom_models.CifarNet(num_classes = num_classes)
+    elif model_name == 'mobilenetv2':
+        return custom_models.MobileNetV2(num_classes = num_classes)
+    elif model_name == 'efficientnetb0':
+        return custom_models.EfficientNetB0(num_classes = num_classes)
+    elif model_name == 'simplecnn':
+        return custom_models.SimpleCNN(num_classes = num_classes)
+    elif model_name == 'kerasexpcnn':
+        return custom_models.KerasExpCNN(num_classes = num_classes)
+    elif model_name == 'mnistcnn':
+        return custom_models.MNISTCNN(num_classes = num_classes)
+    elif model_name == 'simplednn':
+        return custom_models.SimpleDNN(num_classes = num_classes)
+    elif model_name == 'fmcnn':
+        return custom_models.FMCNNModel(num_classes = num_classes)
+    elif model_name == 'lstmmodel':
+        return custom_models.LSTMModel(num_classes = num_classes)
     elif model_name == 'fedavgcnn':
         return custom_models.FedAVGCNN(num_classes = num_classes)
     else:

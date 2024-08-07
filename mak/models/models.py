@@ -7,17 +7,6 @@ import torchvision.models as torch_models
 from mak.models.base_model import Model
 from mak.models.resnet import BaseResNet, BasicBlock
 
-### models implemented so far:
-# 1. base model
-# 2. SimpleCNN
-# 3. KerasExpCNN
-# 4. MNISTCNN
-# 5. SimpleDNN
-# 6. EfficientNetB0
-# 7. FMCNNModel
-# 8. FedAVGCNN
-# 9. resnet18
-
 class CifarNet(Model):
     """
     Model (simple CNN adapted from 'PyTorch: A 60 Minute Blitz for three channel input').
@@ -50,7 +39,7 @@ class CifarNet(Model):
         self.conv2 = nn.Conv2d(6, 16, 5)
         self.fc1 = nn.Linear(16 * 5 * 5, 120)
         self.fc2 = nn.Linear(120, 84)
-        self.fc3 = nn.Linear(84, 10)
+        self.fc3 = nn.Linear(84, 10) #use num_classes instead of 10
 
         if weights is not None:
             self.load_state_dict(load(weights), strict=True)

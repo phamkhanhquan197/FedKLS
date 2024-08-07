@@ -3,10 +3,10 @@
 
 common:
   data_type : dirichlet_niid # data_type = data distribution one among ['iid','dirichlet_niid']
-  dataset : cifar10 # data_set = data set used  one among ['mnist', 'cifar10', 'fashion_mnist', 'sasha/dog-food', 'zh-plus/tiny-imagenet']
-  dirichlet_alpha : 0.1 #dirichlet concentration parameter (only used if data_type is dirchlet-niid)
+  dataset : zh-plus/tiny-imagenet # data_set = data set used  one among ['cifar10', 'cifar100', 'mnist', 'fashion_mnist', 'sasha/dog-food', 'zh-plus/tiny-imagenet', 'Mike0307/MNIST-M', 'flwrlabs/usps']
+  dirichlet_alpha : 0.3 #dirichlet concentration parameter (only used if data_type is dirchlet-niid)
   target_acc : 0.95
-  model : fedavgcnn # one among [resnet18, resnet18_pretrained, net, cifarnet, fedavgcnn]
+  model : cifarnet # one among [resnet18, resnet18_pretrained, resnet34, resnet34_pretrained, net, cifarnet, mobilenetv2, efficientnetb0, simplecnn, kerasexpcnn, mnistcnn, simplednn, fmcnn, lstmmodel, fedavgcnn]
   optimizer : sgd # one among [sgd,adam]
   seed : 133
   multi_node : False
@@ -16,7 +16,7 @@ server:
   address : 127.0.0.1
   fraction_fit : 0.1
   min_fit_clients: 2
-  num_clients : 50  # total number of clients participating in training 
+  num_clients : 50  # total number of clients participating in training
   fraction_evaluate : 0.05
   strategy : fedavg #  Strategy : choices=['fedavg', 'fedyogi', 'fedadagrad', 'fedavgm','fedprox','weighted_loss', 'fedopt', 'fedadam', 'fedmedian']
 
