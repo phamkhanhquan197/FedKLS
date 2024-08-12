@@ -212,8 +212,7 @@ def get_evaluate_fn(
         
         if server_round == config_sim['server']['num_rounds']:
             torch.save(model.state_dict(), os.path.join(save_model_dir,'saved_model_final.pth'))
-            print(f"++++++++++ final accuracy : {accuracy} and loss : {loss}")
-
+            log(INFO, f"++++++++++ final accuracy : {accuracy} and loss : {loss}")
         return loss, {"accuracy": accuracy}
 
     return evaluate
@@ -394,7 +393,7 @@ def set_seed(seed : int = 13):
     torch.cuda.manual_seed(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-    print(f"All random seeds set to {seed}")
+    log(INFO, f"All random seeds set to {seed}")
 
 
 def get_config(file_path):
