@@ -1,5 +1,5 @@
 """Implements the Base Resnet model."""
-
+from typing import Tuple
 from torch import nn, Tensor
 import torch.nn.functional as F
 
@@ -125,7 +125,7 @@ class Bottleneck(nn.Module):
 class BaseResNet(Model):
     """Resnet Base Model Class."""
 
-    def __init__(self, block: nn.Module, num_blocks: list[int], activation: nn.functional, num_classes: int, *args, **kwargs):
+    def __init__(self, block: nn.Module, num_blocks: list[int], activation: nn.functional, num_classes: int, input_shape: Tuple,*args, **kwargs):
         """
         Initializes a ResNet model.
 
@@ -137,7 +137,7 @@ class BaseResNet(Model):
             *args: Variable length argument list.
             **kwargs: Arbitrary keyword arguments.
         """
-        super().__init__(num_classes, *args, **kwargs)
+        super().__init__(input_shape, num_classes, *args, **kwargs)
 
         self.in_planes = 64
         self.activation = activation
