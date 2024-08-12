@@ -5,6 +5,7 @@ from flwr_datasets import FederatedDataset
 from flwr_datasets.partitioner import DirichletPartitioner
 from datasets.utils.logging import disable_progress_bar
 import torch
+import os
 
 from mak.utils.helper import get_config, set_seed
 from mak.utils.helper import get_device_and_resources, get_mode_and_shape
@@ -23,7 +24,6 @@ def main(config_sim):
     # partition= fds.load_partition(0)
     # shape = get_mode_and_shape(partition=partition)
     shape = dataset_info[dataset_name]["input_shape"]
-    log(INFO,f" =>>>>> Dataset : {dataset_name} Shape : {shape}") 
 
     model = get_model(config_sim,shape = shape)
     apply_transforms = get_transformations(dataset_name = dataset_name)
@@ -31,6 +31,10 @@ def main(config_sim):
     generated_info = {"shape" : shape, "device": str(device)}
     config_sim["generated_info"] = generated_info
     out_file_path, saved_models_path = gen_dir_outfile_server(config=config_sim)
+    if config_sim["common"]["save_log"]:
+        fl.common.logger.configure(identifier="FLNCLAB", filename=os.path.join(saved_models_path,'log.txt'))
+        
+    log(INFO,f" =>>>>> Dataset : {dataset_name} Shape : {shape}") 
 
     try:
         dir_alpha = fds._partitioners['train']._alpha[0]
@@ -44,7 +48,7 @@ def main(config_sim):
     server = ServerSaveData(
         strategy=strategy, client_manager=fl.server.client_manager.SimpleClientManager(),out_file_path=out_file_path,target_acc=config_sim['common']['target_acc'])
     log(INFO,f" =>>>>> Using Strategy : {strategy.__class__} Server : {server.__class__}")
-
+    
     hist = fl.simulation.start_simulation(
         client_fn=get_client_fn(model=model,dataset=fds,device=device,apply_transforms=apply_transforms),
         num_clients=config_sim['server']['num_clients'],

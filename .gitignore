@@ -162,6 +162,7 @@ out/
 data/
 test.ipynb
 dataset/
+mak/strategy/
 *.ipynb
 *.txt
 ./config.yaml

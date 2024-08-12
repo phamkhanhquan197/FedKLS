@@ -105,7 +105,6 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays]):
     """Set model weights from a list of NumPy ndarrays."""
     params_dict = zip(model.state_dict().keys(), params)
     state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
-    # print(f"+++++++++++++++ state dict : {state_dict}")
     model.load_state_dict(state_dict, strict=True)
 
 
@@ -120,46 +119,3 @@ def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
 
     # Aggregate and return custom metric (weighted average)
     return {"accuracy": sum(accuracies) / sum(examples)}
-
-# def apply_transforms(batch):
-#     """Apply transforms to the partition from FederatedDataset."""
-#     pytorch_transforms = Compose(
-#         [
-#             # Resize(256),
-#             # CenterCrop(224),
-#             ToTensor(),
-#             # Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-#         ]
-#     )
-#     batch["img"] = [pytorch_transforms(img) for img in batch["img"]]
-#     return batch
-
-# def get_evaluate_fn(
-#     centralized_testset: Dataset,
-# ):
-#     """Return an evaluation function for centralized evaluation."""
-
-#     def evaluate(
-#         server_round: int, parameters: fl.common.NDArrays, config: Dict[str, Scalar]
-#     ):
-#         """Use the entire CIFAR-10 test set for evaluation."""
-
-#         # Determine device
-#         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
-#         model = Net()
-#         set_params(model, parameters)
-#         model.to(device)
-
-#         # Apply transform to dataset
-#         testset = centralized_testset.with_transform(apply_transforms)
-
-#         # Disable tqdm for dataset preprocessing
-#         disable_progress_bar()
-
-#         testloader = DataLoader(testset, batch_size=50)
-#         loss, accuracy = test(model, testloader, device=device)
-
-#         return loss, {"accuracy": accuracy}
-
-#     return evaluate

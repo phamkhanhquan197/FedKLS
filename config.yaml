@@ -2,14 +2,15 @@
 # config
 
 common:
-  data_type : dirichlet_niid # data_type = data distribution one among ['iid','dirichlet_niid']
-  dataset : zh-plus/tiny-imagenet # data_set = data set used  one among ['cifar10', 'cifar100', 'mnist', 'fashion_mnist', 'sasha/dog-food', 'zh-plus/tiny-imagenet', 'Mike0307/MNIST-M', 'flwrlabs/usps']
+  data_type : iid # data_type = data distribution one among ['iid','dirichlet_niid']
+  dataset : cifar10 # data_set = data set used  one among ['cifar10', 'cifar100', 'mnist', 'fashion_mnist', 'sasha/dog-food', 'zh-plus/tiny-imagenet', 'Mike0307/MNIST-M', 'flwrlabs/usps']
   dirichlet_alpha : 0.3 #dirichlet concentration parameter (only used if data_type is dirchlet-niid)
   target_acc : 0.95
   model : cifarnet # one among [resnet18, resnet18_pretrained, resnet34, resnet34_pretrained, net, cifarnet, mobilenetv2, efficientnetb0, simplecnn, kerasexpcnn, mnistcnn, simplednn, fmcnn, lstmmodel, fedavgcnn]
   optimizer : sgd # one among [sgd,adam]
   seed : 133
   multi_node : False
+  save_log : False
 
 server:
   num_rounds : 100 

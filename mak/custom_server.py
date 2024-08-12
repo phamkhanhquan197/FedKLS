@@ -157,7 +157,7 @@ class ServerSaveData:
             loss = res_cen[0] if res_cen is not None else None
             acc = res_cen[1] if res_cen is not None else None
             acc = acc['accuracy'] if acc is not None else None
-            print("Accuracy ",acc)
+            log(INFO, f"Accuracy: {acc}")
             if self.out_file_path is not None:
                 field_names = ["round","accuracy","loss","time"]
                 dict = {"round": current_round,"accuracy":acc,"loss":loss,"time":timeit.default_timer()-curr_round_start_time}
@@ -166,7 +166,7 @@ class ServerSaveData:
                     dictwriter_object.writerow(dict)
                     f.close()
             if (acc >= float(self.target_acc)):
-                print("Reached specified accuracy so stopping further rounds")
+                log(INFO, f"Reached target accuracy so stopping further rounds: {self.target_acc}")
                 break
 
         # Bookkeeping
