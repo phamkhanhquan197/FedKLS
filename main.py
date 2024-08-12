@@ -7,7 +7,7 @@ from datasets.utils.logging import disable_progress_bar
 import torch
 import os
 
-from mak.utils.helper import get_config, set_seed
+from mak.utils.helper import get_config, set_seed, parse_args
 from mak.utils.helper import get_device_and_resources, get_mode_and_shape
 from mak.utils.helper import gen_dir_outfile_server, get_model, get_strategy,save_simulation_history,get_dataset
 from mak.utils.pytorch_transformations import get_transformations
@@ -15,7 +15,8 @@ from mak.client import get_client_fn
 from mak.custom_server import ServerSaveData
 from mak.utils.dataset_info import dataset_info
 
-config_sim = get_config('./config.yaml')  # To Do: get config file path from args set config.yaml as default
+args = parse_args()
+config_sim = get_config(args.config) 
 set_seed(seed=config_sim['common']['seed'])
 
 def main(config_sim):

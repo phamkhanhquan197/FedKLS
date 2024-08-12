@@ -430,3 +430,24 @@ def get_mode_and_shape(partition):
     else:
         channel = 1
     return (channel,shape[0],shape[1])
+
+
+import argparse
+from typing import Optional
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="FLNCLAB"
+    )
+    
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="./config.yaml",
+        help="path to the config.yaml file."
+    )
+    
+    args = parser.parse_args()
+    return args
+
+   
