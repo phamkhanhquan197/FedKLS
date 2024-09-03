@@ -29,11 +29,24 @@ from torchvision.models.resnet import resnet34 as resnet34_torch
 
 import mak
 from mak.client import FlowerClient
+import mak.models
+import mak.models.fedlaw_models
 from mak.training import test, weighted_average, set_params
 from mak.strategy.is_strategy import ImportanceSamplingStrategyLoss
+from mak.strategy.fedlaw_strategy import FedLaw
 import mak.models.models as custom_models
 from mak.utils.dataset_info import dataset_info
 
+
+
+from flwr.common import (
+    Scalar,
+    FitRes,
+    FitIns,
+    Parameters,
+    ndarrays_to_parameters,
+    parameters_to_ndarrays,
+)
 
 def get_device_and_resources(config_sim):
     # Check if GPU is available
@@ -157,6 +170,10 @@ def get_model(config, shape):
         mod = resnet34_torch(weights='DEFAULT')
         mod.fc = nn.Linear(mod.fc.in_features, num_classes)
         return mod
+    elif model_name == 'resnet20_small':  #small model architecture from fedlaw paper
+        return mak.models.fedlaw_models.ResNet20(num_classes=num_classes)
+    elif model_name == 'resnet18_small':  #small model architecture from fedlaw paper
+        return mak.models.fedlaw_models.ResNet18(num_classes=num_classes)
     elif model_name == 'net':
         return custom_models.Net(num_classes = num_classes,input_shape = shape)
     elif model_name == 'cifarnet':
@@ -182,13 +199,13 @@ def get_model(config, shape):
     else:
         raise Exception(f"No model found named : {model_name}")
 
+
 def get_evaluate_fn(
     centralized_testset: Dataset,config_sim,device,save_model_dir,metrics_file, apply_transforms,
 ):
     """Return an evaluation function for centralized evaluation."""
     dataset_name = config_sim["common"]["dataset"]
     shape = dataset_info[dataset_name]["input_shape"]
-
     def evaluate(
         server_round: int, parameters: fl.common.NDArrays, config: Dict[str, Scalar]
     ):
@@ -275,7 +292,7 @@ def save_simulation_history(hist : fl.server.history.History, path):
     df.to_csv(os.path.join(path))
 
 
-def get_strategy(config,test_data,save_model_dir,out_file_path, device,apply_transforms):
+def get_strategy(config,test_data,save_model_dir,out_file_path, device,apply_transforms,size_weights):
     STRATEGY = config['server']['strategy']
     dataset_name = config["common"]["dataset"]
     shape = dataset_info[dataset_name]["input_shape"]
@@ -300,6 +317,22 @@ def get_strategy(config,test_data,save_model_dir,out_file_path, device,apply_tra
             device=device,
             apply_transforms=apply_transforms,
             on_fit_config_fn=get_fit_config_fn(config_sim=config),
+        )
+    elif STRATEGY == "fedlaw": 
+        strategy = FedLaw(
+            config=config,
+            model=model,
+            test_data= test_data,
+            fraction_fit=FRACTION_FIT,
+            fraction_evaluate= FRACTION_EVAL,
+            min_fit_clients=MIN_CLIENTS_FIT,
+            min_evaluate_clients=MIN_CLIENTS_EVAL,
+            min_available_clients=NUM_CLIENTS,
+            evaluate_fn=get_evaluate_fn(centralized_testset=test_data,config_sim=config,save_model_dir = save_model_dir,metrics_file = out_file_path,device=device,apply_transforms=apply_transforms),
+            evaluate_metrics_aggregation_fn=weighted_average,
+            apply_transforms=apply_transforms,
+            on_fit_config_fn=get_fit_config_fn(config_sim=config),
+            size_weights = size_weights,
         )
     elif STRATEGY == "fedprox": #from flwr 1.XX
         strategy = fl.server.strategy.FedProx(
@@ -414,7 +447,8 @@ def get_fit_config_fn(config_sim):
             "round": server_round,
             "batch_size" : config_sim['client']['batch_size'],
             "epochs" : config_sim['client']['epochs'],
-            "lr" : config_sim['client']['lr']
+            "lr" : config_sim['client']['lr'],
+            "lr_scheduler" : config_sim['client']['lr_scheduler'],
         }
         return config
     return fit_config
@@ -451,3 +485,10 @@ def parse_args() -> argparse.Namespace:
     return args
 
    
+#for fedlaw
+def get_size_weights(federated_dataset, num_clients):
+    sample_size = []
+    for i in range(num_clients): 
+        sample_size.append(len(federated_dataset.load_partition(i)))
+    size_weights = [i/sum(sample_size) for i in sample_size]
+    return size_weights
