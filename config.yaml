@@ -8,6 +8,7 @@ common:
   target_acc : 0.95
   model : resnet20_small # one among [resnet18, resnet18_pretrained, resnet34, resnet34_pretrained, net, cifarnet, mobilenetv2, efficientnetb0, simplecnn, kerasexpcnn, mnistcnn, simplednn, fmcnn, lstmmodel, fedavgcnn]
   optimizer : sgd # one among [sgd,adam]
+  sgd_momentum : 0.9
   seed : 8  #8,9,10
   multi_node : False
   save_log : True

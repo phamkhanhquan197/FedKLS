@@ -2,7 +2,7 @@ import torch
 from torch.utils.data import DataLoader
 import flwr as fl
 from flwr_datasets import FederatedDataset
-
+from mak.utils.helper import get_optimizer
 from mak.utils.pytorch_transformations import get_transformations
 from mak.training import set_params, train, test
 
@@ -33,7 +33,8 @@ class FlowerClient(fl.client.NumPyClient):
         trainloader = DataLoader(self.trainset, batch_size=batch, shuffle=True)
 
         # Define optimizer
-        optimizer = torch.optim.SGD(self.model.parameters(), lr=learning_rate, momentum=0.9)
+        optimizer = get_optimizer(model = self.model, config_client = config)
+
         # Train
         train(net=self.model, trainloader=trainloader, optim= optimizer, epochs=epochs, device=self.device)
 

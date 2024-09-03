@@ -4,7 +4,8 @@ import random
 import argparse
 from collections import OrderedDict
 from typing import Dict, Tuple, List
-
+import argparse
+from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -449,6 +450,8 @@ def get_fit_config_fn(config_sim):
             "epochs" : config_sim['client']['epochs'],
             "lr" : config_sim['client']['lr'],
             "lr_scheduler" : config_sim['client']['lr_scheduler'],
+            "optimizer" : config_sim['common']['optimizer'],
+            "sgd_momentum" : config_sim['common']['sgd_momentum'],
         }
         return config
     return fit_config
@@ -466,9 +469,6 @@ def get_mode_and_shape(partition):
     return (channel,shape[0],shape[1])
 
 
-import argparse
-from typing import Optional
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="FLNCLAB"
@@ -483,6 +483,13 @@ def parse_args() -> argparse.Namespace:
     
     args = parser.parse_args()
     return args
+
+def get_optimizer(model, client_config):
+    if client_config['optimizer'] == 'adam':
+        return torch.optim.Adam(model.parameters(), lr=client_config['lr'])
+    else:
+        return torch.optim.SGD(model.parameters(), lr=client_config['lr'], momentum= client_config["sgd_momentum"])
+
 
    
 #for fedlaw
