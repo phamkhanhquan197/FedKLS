@@ -165,5 +165,6 @@ dataset/
 mak/strategy/
 *.ipynb
 *.txt
+*.sh
 ./config.yaml
 config.yaml
