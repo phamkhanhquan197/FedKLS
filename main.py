@@ -3,7 +3,6 @@ args = parse_args()
 config_sim = get_config(args.config) 
 set_seed(seed=config_sim['common']['seed'])
 
-
 import flwr as fl
 from logging import INFO, DEBUG
 from flwr.common.logger import log
@@ -15,7 +14,7 @@ import os
 from mak.utils.helper import get_device_and_resources, get_mode_and_shape
 from mak.utils.helper import gen_dir_outfile_server, get_model, get_strategy,save_simulation_history,get_dataset, get_size_weights
 from mak.utils.pytorch_transformations import get_transformations
-from mak.client import get_client_fn
+from mak.clients.utils import get_client_fn
 from mak.custom_server import ServerSaveData
 from mak.utils.dataset_info import dataset_info
 
@@ -57,7 +56,7 @@ def main(config_sim):
     log(INFO,f" =>>>>> Using Strategy : {strategy.__class__} Server : {server.__class__}")
     
     hist = fl.simulation.start_simulation(
-        client_fn=get_client_fn(model=model,dataset=fds,device=device,apply_transforms=apply_transforms),
+        client_fn=get_client_fn(config_sim = config_sim, model=model,dataset=fds,device=device,apply_transforms=apply_transforms),
         num_clients=config_sim['server']['num_clients'],
         client_resources=client_res,
         config=fl.server.ServerConfig(num_rounds=config_sim['server']['num_rounds']),

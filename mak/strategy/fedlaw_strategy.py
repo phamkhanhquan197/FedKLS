@@ -67,7 +67,7 @@ class FedLaw(fl.server.strategy.FedAvg):
                          min_available_clients = min_available_clients,
                          evaluate_fn = evaluate_fn,
                          on_fit_config_fn = on_fit_config_fn)
-        print("++++++++++++++++ Using FedLaw strategy +++++++++++++++++++++++++++")
+       
         self.model = model
         self.test_data = test_data
         self.fraction_fit = fraction_fit

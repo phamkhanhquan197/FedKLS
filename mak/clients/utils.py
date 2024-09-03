@@ -1,22 +1,42 @@
+
 import flwr as fl
+from mak.clients.fedavg_client import FedAvgClient
+from mak.clients.fedprox_client import FedProxClient
+from flwr_datasets import FederatedDataset
 from flwr.common import Metrics
 from flwr.common.typing import Scalar
 import torch
 from collections import OrderedDict
 from typing import Dict, Tuple, List
-from datasets import Dataset
-from datasets.utils.logging import disable_progress_bar
 from flwr_datasets import FederatedDataset
-from torchvision.transforms import Compose, ToTensor, Normalize, Resize, CenterCrop
-from torch.utils.data import DataLoader
-import numpy as np
 
-# borrowed from Pytorch quickstart example
+
+def get_client_fn(config_sim: dict, dataset: FederatedDataset, model, device, apply_transforms):
+    strategy = config_sim['server']['strategy']
+    client_class = get_client_class(strategy)
+    train_batch_size = config_sim['client']['batch_size']
+    test_batch_size = config_sim['client']['test_batch_size']
+
+    def client_fn(cid: str) -> fl.client.Client:
+        client_dataset = dataset.load_partition(int(cid), "train")
+        client_dataset_splits = client_dataset.train_test_split(test_size=0.15)
+        trainset = client_dataset_splits["train"].with_transform(apply_transforms)
+        valset = client_dataset_splits["test"].with_transform(apply_transforms)
+        return client_class(model=model, trainset=trainset, valset=valset, train_batch_size=train_batch_size, test_batch_size=test_batch_size, device=device).to_client()
+    return client_fn
+
+def get_client_class(strategy: str):
+    if strategy == 'fedprox':
+        return FedProxClient
+    else:
+        return FedAvgClient
+    
 def test(net, testloader, device: str):
     """Validate the network on the entire test set."""
     criterion = torch.nn.CrossEntropyLoss()
     correct, loss = 0, 0.0
     net.eval()
+    
     with torch.no_grad():
         for data in testloader:
             keys = list(data.keys())
