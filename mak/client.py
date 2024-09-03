@@ -17,7 +17,8 @@ class FlowerClient(fl.client.NumPyClient):
 
         # Determine device
         self.device = device
-        self.model.to(self.device)  # send model to device
+        self.model.to(self.device) 
+
     def get_parameters(self, config):
         return [val.cpu().numpy() for _, val in self.model.state_dict().items()]
 
@@ -25,6 +26,8 @@ class FlowerClient(fl.client.NumPyClient):
         set_params(self.model, parameters)
 
         # Read from config
+        if config["lr_scheduler"] == True and config["round"] > 1:
+            config["lr"] = config["lr"] * (0.99 ** config["round"])
         batch, epochs, learning_rate = config["batch_size"], config["epochs"], config["lr"]
         # Construct dataloader
         trainloader = DataLoader(self.trainset, batch_size=batch, shuffle=True)
