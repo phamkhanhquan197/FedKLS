@@ -1,4 +1,3 @@
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -204,13 +203,13 @@ class WResNet_cifar(nn.Module):
 
 
 # CIFAR-10/100 models
-def ResNet20(num_classes):
+def ResNet20Small(num_classes, *args, **kwargs):
     # print(f"+++++++++ Resnet 20 cifar from fedlaw ++++++")
     depth = 20
     n = (depth - 2) // 6
     return ResNet_cifar(BasicBlock, [n,n,n], num_classes)
 
-def ResNet18(num_classes):
+def ResNet18Small(num_classes, *args, **kwargs):
     # print(f"+++++++++ Resnet18 cifar from fedlaw ++++++")
     depth = 18
     n = (depth - 2) // 6

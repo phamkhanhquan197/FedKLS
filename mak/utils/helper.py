@@ -1,54 +1,32 @@
+import os
+import csv
+import json
 import yaml
-import numpy as np
+import torch
 import random
 import argparse
-from collections import OrderedDict
-from typing import Dict, Tuple, List
-import argparse
-from typing import Optional
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torchvision.transforms import Compose, ToTensor, Normalize, Resize, CenterCrop
+import numpy as np
+import pandas as pd
+from typing import Dict
+from logging import INFO
+from datetime import date
+from datetime import datetime
 from torch.utils.data import DataLoader
 
 import flwr as fl
-from flwr.common import Metrics
-from flwr.common.typing import Scalar
+from flwr.common import Scalar
 from flwr.common.logger import log
-from logging import INFO, DEBUG
+from flwr.common.typing import Scalar
+from flwr_datasets import FederatedDataset
 
 from datasets import Dataset
 from datasets.utils.logging import disable_progress_bar
-from flwr_datasets import FederatedDataset
-from datetime import datetime, date
-import random, csv, os, json
-import pandas as pd
 from flwr_datasets.partitioner import IidPartitioner, DirichletPartitioner
-from torchvision.models.resnet import resnet18 as resnet18_torch
-from torchvision.models.resnet import resnet34 as resnet34_torch
 
 import mak
-# from mak.client import FlowerClient
-
-import mak.models
-import mak.models.fedlaw_models
 from mak.training import test, weighted_average, set_params
-from mak.strategy.is_strategy import ImportanceSamplingStrategyLoss
 from mak.strategy.fedlaw_strategy import FedLaw
-import mak.models.models as custom_models
 from mak.utils.dataset_info import dataset_info
-
-
-
-from flwr.common import (
-    Scalar,
-    FitRes,
-    FitIns,
-    Parameters,
-    ndarrays_to_parameters,
-    parameters_to_ndarrays,
-)
 
 def get_device_and_resources(config_sim):
     # Check if GPU is available
@@ -160,47 +138,8 @@ def get_model(config, shape):
     dataset_name = config['common']['dataset']
     num_classes = dataset_info[dataset_name]['num_classes']
     # get model
-    if model_name == 'resnet18':
-        return custom_models.Resnet18(num_classes = num_classes,input_shape = shape)
-    elif model_name == 'resnet18_pretrained':
-        mod = resnet18_torch(weights='DEFAULT')
-        mod.fc = nn.Linear(mod.fc.in_features, num_classes)
-        return mod
-    if model_name == 'resnet34':
-        return custom_models.Resnet34(num_classes = num_classes,input_shape = shape)
-    elif model_name == 'resnet34_pretrained':
-        mod = resnet34_torch(weights='DEFAULT')
-        mod.fc = nn.Linear(mod.fc.in_features, num_classes)
-        return mod
-    elif model_name == 'resnet20_small':  #small model architecture from fedlaw paper
-        return mak.models.fedlaw_models.ResNet20(num_classes=num_classes)
-    elif model_name == 'resnet18_small':  #small model architecture from fedlaw paper
-        return mak.models.fedlaw_models.ResNet18(num_classes=num_classes)
-    elif model_name == 'net':
-        return custom_models.Net(num_classes = num_classes,input_shape = shape)
-    elif model_name == 'cifarnet':
-        return custom_models.CifarNet(num_classes = num_classes,input_shape = shape)
-    elif model_name == 'mobilenetv2':
-        return custom_models.MobileNetV2(num_classes = num_classes,input_shape = shape)
-    elif model_name == 'efficientnetb0':
-        return custom_models.EfficientNetB0(num_classes = num_classes,input_shape = shape)
-    elif model_name == 'simplecnn':
-        return custom_models.SimpleCNN(num_classes = num_classes,input_shape = shape)
-    elif model_name == 'kerasexpcnn':
-        return custom_models.KerasExpCNN(num_classes = num_classes,input_shape = shape)
-    elif model_name == 'mnistcnn':
-        return custom_models.MNISTCNN(num_classes = num_classes,input_shape = shape)
-    elif model_name == 'simplednn':
-        return custom_models.SimpleDNN(num_classes = num_classes,input_shape = shape)
-    elif model_name == 'fmcnn':
-        return custom_models.FMCNNModel(num_classes = num_classes,input_shape = shape)
-    elif model_name == 'lstmmodel':
-        return custom_models.LSTMModel(num_classes = num_classes)
-    elif model_name == 'fedavgcnn':
-        return custom_models.FedAVGCNN(num_classes = num_classes,input_shape = shape)
-    else:
-        raise Exception(f"No model found named : {model_name}")
-
+    model = getattr(__import__('mak.models', fromlist=[model_name]), model_name)(num_classes=num_classes, input_shape=shape)
+    return model
 
 def get_evaluate_fn(
     centralized_testset: Dataset,config_sim,device,save_model_dir,metrics_file, apply_transforms,
@@ -305,22 +244,7 @@ def get_strategy(config,test_data,save_model_dir,out_file_path, device,apply_tra
     FRACTION_FIT = config['server']['fraction_fit']
     FRACTION_EVAL = config['server']['fraction_evaluate']
     
-    if STRATEGY == 'weighted_loss':
-        strategy = ImportanceSamplingStrategyLoss(
-            model=model,
-            test_data= test_data,
-            fraction_fit=FRACTION_FIT,  # Sample 10% of available clients for training
-            fraction_evaluate=FRACTION_EVAL,  # Sample 5% of available clients for evaluation
-            min_fit_clients=MIN_CLIENTS_FIT,  # Never sample less than 2 clients for training
-            min_evaluate_clients=MIN_CLIENTS_EVAL,  # Never sample less than 2 clients for evaluation
-            min_available_clients=NUM_CLIENTS,
-            evaluate_fn=get_evaluate_fn(centralized_testset=test_data,config_sim=config,save_model_dir = save_model_dir,metrics_file = out_file_path,device=device,apply_transforms=apply_transforms),
-            evaluate_metrics_aggregation_fn=weighted_average,
-            device=device,
-            apply_transforms=apply_transforms,
-            on_fit_config_fn=get_fit_config_fn(config_sim=config),
-        )
-    elif STRATEGY == "fedlaw": 
+    if STRATEGY == "fedlaw": 
         strategy = FedLaw(
             config=config,
             model=model,

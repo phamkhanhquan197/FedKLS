@@ -191,3 +191,16 @@ class BaseResNet(Model):
         return out
 
 
+class Resnet18(BaseResNet):
+    """Resnet 18 Model Class."""
+    def __init__(self, num_classes: int=10, *args, **kwargs):
+        super().__init__(block=BasicBlock, num_blocks=[2, 2, 2, 2], activation=F.relu, num_classes = num_classes, *args, **kwargs)
+
+        self.__class__.__name__ = 'Resnet18 Custom'
+
+class Resnet34(BaseResNet):
+    """Resnet 34 Model Class."""
+    def __init__(self, num_classes: int=10, *args, **kwargs):
+        super().__init__(block=BasicBlock, num_blocks=[3, 4, 6, 3], activation=F.relu, num_classes = num_classes, *args, **kwargs)
+
+        self.__class__.__name__ = 'Resnet34 Custom'

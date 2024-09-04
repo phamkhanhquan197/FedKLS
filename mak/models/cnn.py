@@ -1,14 +1,7 @@
-from typing import Tuple
-
-from torch import nn, Tensor, load, flatten
+from torch import nn
 import torch.nn.functional as F
-import torchvision.models as torch_models
-
 from mak.models.base_model import Model
-from mak.models.resnet import BaseResNet, BasicBlock
-
 import torch
-
 
 class CifarNet(Model):
     """
@@ -53,8 +46,6 @@ class CifarNet(Model):
             self.load_state_dict(torch.load(weights), strict=True)
             self.pretrained = True
 
-    
-
     def forward(self, x):
         """
         Forward pass of the CifarNet model.
@@ -80,7 +71,6 @@ class CifarNet(Model):
             x = self.pool(F.relu(self.conv1(x)))
             x = self.pool(F.relu(self.conv2(x)))
             return x.numel()
-
 
 class Net(Model):
     """
@@ -151,7 +141,6 @@ class Net(Model):
         x = F.relu(self.fc2(x))
         return self.fc3(x)
 
-
 class SimpleCNN(Model):
     def __init__(self, input_shape: tuple, num_classes: int, weights=None, *args, **kwargs) -> None:
         """
@@ -211,7 +200,6 @@ class SimpleCNN(Model):
         x = self.dropout3(F.relu(self.fc1(x)))
         return self.fc2(x)
 
-
 class KerasExpCNN(Model):
     def __init__(self, input_shape: tuple, num_classes: int, weights=None, *args, **kwargs) -> None:
         """
@@ -269,7 +257,6 @@ class KerasExpCNN(Model):
         x = self.fc1(x)
         return x
 
-
 class MNISTCNN(Model):
     def __init__(self, input_shape: tuple, num_classes: int, weights=None, *args, **kwargs) -> None:
         """
@@ -309,7 +296,6 @@ class MNISTCNN(Model):
         x = F.relu(self.fc1(x))
         return self.fc2(x)
 
-
 class SimpleDNN(Model):
     def __init__(self, input_shape: tuple, num_classes: int, weights=None, *args, **kwargs) -> None:
         """
@@ -348,7 +334,6 @@ class SimpleDNN(Model):
         x = F.relu(self.fc2(x))
         return self.fc3(x)
     
-
 class FMCNNModel(Model):
     def __init__(self, input_shape: tuple, num_classes: int, weights=None, *args, **kwargs) -> None:
         """
@@ -392,7 +377,6 @@ class FMCNNModel(Model):
         x = torch.flatten(x, 1)
         x = F.relu(self.fc1(x))
         return self.fc2(x)
-
 
 class FedAVGCNN(Model):
     """Architecture of CNN model used in original FedAVG paper with Cifar-10 dataset.
@@ -440,130 +424,3 @@ class FedAVGCNN(Model):
         x = torch.flatten(x, 1)
         x = F.relu(self.fc1(x))
         return self.fc2(x)
-
-
-
-class MobileNetV2(Model):
-    def __init__(self, num_classes: int, weights = None, *args, **kwargs) -> None:
-        """
-        MobileNetV2 model with customizable classifier head.
-
-        Args:
-            num_classes (int): Number of output classes.
-            weights (str or None): Weights to initialize the model ('DEFAULT' or None).
-            *args: Variable length argument list.
-            **kwargs: Arbitrary keyword arguments.
-        """
-        super().__init__(num_classes, *args, **kwargs)
-
-        if weights == 'DEFAULT':
-            self._model = torch_models.mobilenet_v2(weights=torch_models.MobileNet_V2_Weights.DEFAULT)
-            # change the classifier head for num_classes
-            self._model.classifier = nn.Sequential(
-                nn.Dropout(p=0.2, inplace=False),
-                nn.Linear(in_features=1280, out_features=self.num_classes),
-            )
-            self.pretrained = True
-        else:
-            self._model = torch_models.mobilenet_v2(num_classes=num_classes)
-    
-    def forward(self, x: Tensor) -> Tensor:
-        """
-        Forward pass of the MobileNetV2 model.
-
-        Args:
-            x (Tensor): Input tensor.
-
-        Returns:
-            Tensor: Output tensor.
-        """
-        return self._model(x)
-
-class EfficientNetB0(Model):
-    def __init__(self, num_classes: int, weights = None, *args, **kwargs) -> None:
-        """
-        EfficientNetB0 model with customizable classifier head.
-
-        Args:
-            num_classes (int): Number of output classes.
-            weights (str or None): Weights to initialize the model ('DEFAULT' or None).
-            *args: Variable length argument list.
-            **kwargs: Arbitrary keyword arguments.
-        """
-        super().__init__(num_classes, *args, **kwargs)
-
-        if weights == 'DEFAULT':
-            self._model = torch_models.efficientnet_b0(weights=torch_models.EfficientNet_B0_Weights.DEFAULT)
-            # change the classifier head for num_classes
-            self._model.classifier = nn.Sequential(
-                nn.Dropout(p=0.2, inplace=False),
-                nn.Linear(in_features=1280, out_features=self.num_classes),
-            )
-            self.pretrained = True
-        else:
-            self._model = torch_models.efficientnet_b0(num_classes=num_classes)
-    
-    def forward(self, x: Tensor) -> Tensor:
-        """
-        Forward pass of the EfficientNetB0 model.
-
-        Args:
-            x (Tensor): Input tensor.
-
-        Returns:
-            Tensor: Output tensor.
-        """
-        return self._model(x)
-    
-
-
-class LSTMModel(Model):
-    """Create an LSTM model for next character task."""
-    def __init__(self, num_classes: int, weights = None, *args, **kwargs) -> None:
-        """
-        LSTM model for next character prediction task.
-
-        Args:
-            num_classes (int): Number of output classes.
-            weights (str or None): Path to pre-trained weights (if available).
-            *args: Variable length argument list.
-            **kwargs: Arbitrary keyword arguments.
-        """
-        super().__init__(num_classes, *args, **kwargs)
-
-        self.embedding = nn.Embedding(self.num_classes, 256)
-        self.lstm = nn.LSTM(256, 256, batch_first=True)
-        self.fc = nn.Linear(256, self.num_classes)
-
-        if weights is not None:
-            self.load_state_dict(load(weights), strict=True)
-            self.pretrained = True
-
-    def forward(self, x: Tensor) -> Tensor:
-        """
-        Forward pass of the LSTMModel model.
-
-        Args:
-            x (Tensor): Input tensor.
-
-        Returns:
-            Tensor: Output tensor.
-        """
-        x = self.embedding(x)
-        h1, (h1_T,c1_T) = self.lstm(x)
-        out = self.fc(h1_T.squeeze(0))
-        return out
-
-class Resnet18(BaseResNet):
-    """Resnet 18 Model Class."""
-    def __init__(self, num_classes: int=10, *args, **kwargs):
-        super().__init__(block=BasicBlock, num_blocks=[2, 2, 2, 2], activation=F.relu, num_classes = num_classes, *args, **kwargs)
-
-        self.__class__.__name__ = 'Resnet18 Custom'
-
-class Resnet34(BaseResNet):
-    """Resnet 34 Model Class."""
-    def __init__(self, num_classes: int=10, *args, **kwargs):
-        super().__init__(block=BasicBlock, num_blocks=[3, 4, 6, 3], activation=F.relu, num_classes = num_classes, *args, **kwargs)
-
-        self.__class__.__name__ = 'Resnet34 Custom'
