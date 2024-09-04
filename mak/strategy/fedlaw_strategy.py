@@ -24,7 +24,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 import torch.optim as optim
 import torch.nn as nn
 import torch.nn.functional as F
-from mak.utils.helper import set_params
+from mak.training import set_params
 
 from flwr.common import (
     Scalar,

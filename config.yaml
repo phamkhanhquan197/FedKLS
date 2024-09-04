@@ -6,7 +6,7 @@ common:
   dataset : cifar10 # data_set = data set used  one among ['cifar10', 'cifar100', 'mnist', 'fashion_mnist', 'sasha/dog-food', 'zh-plus/tiny-imagenet', 'Mike0307/MNIST-M', 'flwrlabs/usps']
   dirichlet_alpha : 0.1 #dirichlet concentration parameter (only used if data_type is dirchlet-niid)
   target_acc : 0.95
-  model : ResNet20Small # one among [resnet18, resnet18_pretrained, resnet34, resnet34_pretrained, net, cifarnet, mobilenetv2, efficientnetb0, simplecnn, kerasexpcnn, mnistcnn, simplednn, fmcnn, lstmmodel, fedavgcnn]
+  model : ResNet20Small
   optimizer : sgd # one among [sgd,adam]
   sgd_momentum : 0.9
   seed : 8  #8,9,10
@@ -20,7 +20,7 @@ server:
   min_fit_clients: 2
   num_clients : 20  # total number of clients participating in training
   fraction_evaluate : 0.2
-  strategy : fedavg #  Strategy : choices=['fedavg', 'fedyogi', 'fedadagrad', 'fedavgm','fedprox','weighted_loss', 'fedopt', 'fedadam', 'fedmedian', 'fedlaw']
+  strategy : FedLaw
 
 client:
   epochs : 3
