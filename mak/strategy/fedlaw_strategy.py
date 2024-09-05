@@ -1,15 +1,16 @@
-from typing import Dict, List, Tuple, Union, Optional
-from logging import WARNING
-import flwr as fl
-from flwr.common.logger import log
-from flwr.server.client_proxy import ClientProxy
 import copy
+import flwr as fl
+from logging import WARNING
+from flwr.common.logger import log
+from mak.utils.general import set_params
 from torch.utils.data import DataLoader
+from flwr.server.client_proxy import ClientProxy
+from typing import Dict, List, Tuple, Union, Optional
+
 import torch
-import torch.optim as optim
 import torch.nn as nn
+import torch.optim as optim
 import torch.nn.functional as F
-from mak.training import set_params
 
 from flwr.common import (
     Scalar,
@@ -41,8 +42,8 @@ class FedLaw(fl.server.strategy.FedAvg):
         size_weights,
         config,
         device = 'cpu',
-        on_fit_config_fn = None
-
+        on_fit_config_fn = None,
+        **kwargs
     ) -> None:
         super().__init__(fraction_fit=fraction_fit,
                          fraction_evaluate = fraction_evaluate,

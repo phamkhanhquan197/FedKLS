@@ -11,7 +11,7 @@ import os
 from mak.utils.helper import get_device_and_resources
 from mak.utils.helper import gen_dir_outfile_server, get_model, get_strategy,save_simulation_history,get_dataset, get_size_weights
 from mak.utils.pytorch_transformations import get_transformations
-from mak.clients.utils import get_client_fn
+from mak.clients import get_client_fn
 from mak.custom_server import ServerSaveData
 from mak.utils.dataset_info import dataset_info
 

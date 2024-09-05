@@ -25,7 +25,7 @@ from flwr_datasets.partitioner import IidPartitioner, DirichletPartitioner
 
 import mak
 import mak.strategy
-from mak.training import test, weighted_average, set_params
+from mak.utils.general import test, weighted_average, set_params
 from mak.utils.dataset_info import dataset_info
 
 def get_device_and_resources(config_sim):

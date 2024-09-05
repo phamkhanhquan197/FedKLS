@@ -2,9 +2,10 @@ import torch
 from mak.clients.base_client import BaseClient
 
 class FedProxClient(BaseClient):
-    """Flwr client implementation based on fedprox\
+    """
+        Flwr client implementation based on fedprox
         The train loop is changed based on fedprox algorithm 
-         """
+    """
     def __repr__(self) -> str:
         return " FedProx client"
 
