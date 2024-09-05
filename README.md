@@ -87,7 +87,7 @@ The `server` section contains the configurations for the server that coordinates
 - `num_clients` : total number of clients participating in training.
 - `fraction_evaluate` : This field specifies the fraction of participating clients used for evaluation in each round.
 - `min_avalaible_clients` : This field specifies the minimum number of clients that should be available for the training process.
-- `strategy` : This field specifies the strategy used for Federated Learning. Currently supported strategies are [`fedavg`, `fedyogi`, `fedadagrad`, `fedavgm`,`fedprox`,`weighted_loss`, `fedopt`, `fedadam`, `fedmedian`] Detailed explination can be found [here](./docs/strategies.md)
+- `strategy` : This field specifies the strategy used for Federated Learning. Currently supported strategies are [`FedLaw`, `FedProx`, `FedAvgM`, `FedOpt`, `FedAdam`, `FedMedian`, `FedAvg`,] Detailed explination can be found [here](./docs/strategies.md)
 
 ### Client Section
 The `client` section contains the configurations for the clients participating in the Federated Learning process.
