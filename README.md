@@ -73,7 +73,7 @@ The `common` section contains the common configurations used in this framework.
 - `dataset` : This field specifies the dataset used in the training process. Currently supported data distributions are [`mnist`, `cifar10`, `fashion_mnist`, `sasha/dog-food`, `zh-plus/tiny-imagenet`]. Detailed explination can be found [here](./docs/datasets.md)
 - `dirichlet_alpha` : This field is used when `data_type` is set to `dirichlet_niid`. It specifies the Dirichlet concentration parameter.
 - `target_acc` : This field specifies the target accuracy that the model needs to achieve. It can take any value greater than `0`.
-- `model` : This field specifies the model architecture used in the training process. Currently Implemented models are [  `resnet18`, `resnet18_pretrained`, `net`, `cifarnet`, `fedavgcnn` ]. Detailed explination can be found [here](./docs/models.md)
+- `model` : This field specifies the model architecture used in the training process. Currently Implemented models are [ `Net`, `CifarNet`, `SimpleCNN`, `KerasExpCNN`, `MNISTCNN`, `SimpleDNN`, `FMCNNModel`,`FedAVGCNN`,`Resnet18`, `Resnet34`,`ResNet18Pretrained`, `ResNet34Pretrained`,`ResNet18Small`, `ResNet20Small`,`MobileNetV2`,`EfficientNetB0`,`LSTMModel`]. Detailed explination can be found [here](./docs/models.md)
 - `optimizer` : This field specifies the optimizer used in the training process. It could be either `sgd` or `adam`.
 - `seed` : This field fixes the seed for reproducibility
 

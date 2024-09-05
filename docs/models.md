@@ -2,11 +2,11 @@ This file describes the models already implemented in this framework.
 
 The code of all these model classes can be found inside [`mak/models`](../mak/models) file.
 ## Models
-1. `resnet18:` A simple standard resnet18 architecture
+1. `Resnet18:` A simple standard resnet18 architecture
     
-2. `resnet18_pretrained:` A pretrained resnet18 architecture from torchvision
+2. `ResNet18Pretrained:` A pretrained resnet18 architecture from torchvision
 
-3. `net:` A simple CNN model implemented from scratch, the architecture is shown below:
+3. `Net:` A simple CNN model implemented from scratch, the architecture is shown below:
     ```
     def __init__(self, num_classes: int, weights = None, *args, **kwargs):
         """
@@ -52,7 +52,7 @@ The code of all these model classes can be found inside [`mak/models`](../mak/mo
         return self.fc3(x)
     ```
 
-4. `cifarnet :` A Simple CNN model adapted from 'PyTorch: A 60 Minute Blitz for three channel input' :
+4. `CifarNet :` A Simple CNN model adapted from 'PyTorch: A 60 Minute Blitz for three channel input' :
     ```
     def __init__(self, num_classes: int, weights = None, *args, **kwargs):
         """
@@ -98,7 +98,7 @@ The code of all these model classes can be found inside [`mak/models`](../mak/mo
         x = self.fc3(x)
         return x
      ```
-5. `fedavgcnn :` Architecture of CNN model used in original FedAVG paper ( https://doi.org/10.48550/arXiv.1602.05629) :
+5. `FedAVGCNN :` Architecture of CNN model used in original FedAVG paper ( https://doi.org/10.48550/arXiv.1602.05629) :
     ```
     def __init__(self, num_classes: int, weights = None, *args, **kwargs) -> None:
         """
