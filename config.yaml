@@ -20,7 +20,7 @@ server:
   min_fit_clients: 2
   num_clients : 20  # total number of clients participating in training
   fraction_evaluate : 0.2
-  strategy : FedLaw
+  strategy : FedAvg  #[FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, FedAvg,]
 
 client:
   epochs : 3
