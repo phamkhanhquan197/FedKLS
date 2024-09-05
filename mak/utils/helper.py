@@ -374,7 +374,6 @@ def get_fit_config_fn(config_sim):
             "batch_size" : config_sim['client']['batch_size'],
             "epochs" : config_sim['client']['epochs'],
             "lr" : config_sim['client']['lr'],
-            "lr_scheduler" : config_sim['client']['lr_scheduler'],
             "optimizer" : config_sim['common']['optimizer'],
             "sgd_momentum" : config_sim['common']['sgd_momentum'],
             "strategy" : config_sim['server']['strategy'],

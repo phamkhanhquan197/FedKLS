@@ -10,8 +10,7 @@ class FedAvgClient(BaseClient):
 
     def fit(self, parameters, config):
         self.set_parameters(parameters)
-        if config["lr_scheduler"] == True and config["round"] > 1:
-            config["lr"] = config["lr"] * (0.99 ** config["round"])
+        
         batch, epochs, learning_rate = config["batch_size"], config["epochs"], config["lr"]
         
         trainloader = DataLoader(self.trainset, batch_size=batch, shuffle=True)
