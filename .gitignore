@@ -162,7 +162,7 @@ out/
 data/
 test.ipynb
 dataset/
-mak/strategy/
+# mak/strategy/
 *.ipynb
 *.txt
 *.sh

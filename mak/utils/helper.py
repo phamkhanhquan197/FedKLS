@@ -24,8 +24,8 @@ from datasets.utils.logging import disable_progress_bar
 from flwr_datasets.partitioner import IidPartitioner, DirichletPartitioner
 
 import mak
+import mak.strategy
 from mak.training import test, weighted_average, set_params
-from mak.strategy.fedlaw_strategy import FedLaw
 from mak.utils.dataset_info import dataset_info
 
 def get_device_and_resources(config_sim):
@@ -244,105 +244,53 @@ def get_strategy(config,test_data,save_model_dir,out_file_path, device,apply_tra
     FRACTION_FIT = config['server']['fraction_fit']
     FRACTION_EVAL = config['server']['fraction_evaluate']
     
-    if STRATEGY == "fedlaw": 
-        strategy = FedLaw(
-            config=config,
-            model=model,
-            test_data= test_data,
-            fraction_fit=FRACTION_FIT,
-            fraction_evaluate= FRACTION_EVAL,
-            min_fit_clients=MIN_CLIENTS_FIT,
-            min_evaluate_clients=MIN_CLIENTS_EVAL,
-            min_available_clients=NUM_CLIENTS,
-            evaluate_fn=get_evaluate_fn(centralized_testset=test_data,config_sim=config,save_model_dir = save_model_dir,metrics_file = out_file_path,device=device,apply_transforms=apply_transforms),
-            evaluate_metrics_aggregation_fn=weighted_average,
-            apply_transforms=apply_transforms,
-            on_fit_config_fn=get_fit_config_fn(config_sim=config),
-            size_weights = size_weights,
-        )
-    elif STRATEGY == "fedprox": #from flwr 1.XX
-        strategy = fl.server.strategy.FedProx(
-            fraction_fit=FRACTION_FIT,
-            fraction_evaluate= FRACTION_EVAL,
-            min_fit_clients=MIN_CLIENTS_FIT,
-            min_evaluate_clients=MIN_CLIENTS_EVAL,
-            min_available_clients=NUM_CLIENTS,
-            evaluate_fn=get_evaluate_fn(centralized_testset=test_data,config_sim=config,save_model_dir = save_model_dir,metrics_file = out_file_path,device=device,apply_transforms=apply_transforms),
-            evaluate_metrics_aggregation_fn=weighted_average,
-            on_fit_config_fn=get_fit_config_fn(config_sim=config),
-            proximal_mu = config['fedprox']['proximal_mu'],
-        )
-    elif STRATEGY == "fedavgm":
-        strategy = fl.server.strategy.FedAvgM(
-            fraction_fit=FRACTION_FIT,
-            fraction_evaluate= FRACTION_EVAL,
-            min_fit_clients=MIN_CLIENTS_FIT,
-            min_evaluate_clients=MIN_CLIENTS_EVAL,
-            min_available_clients=NUM_CLIENTS,
-            evaluate_fn=get_evaluate_fn(centralized_testset=test_data,config_sim=config,save_model_dir = save_model_dir,metrics_file = out_file_path,device=device,apply_transforms=apply_transforms),
-            evaluate_metrics_aggregation_fn=weighted_average,
-            on_fit_config_fn=get_fit_config_fn(config_sim=config),
-            server_learning_rate=1.0,
-            server_momentum=0.2,
-            initial_parameters=fl.common.ndarrays_to_parameters([val.cpu().numpy() for _, val in model.state_dict().items()])
-        )
-    elif STRATEGY == "fedopt":
-        strategy = fl.server.strategy.FedOpt(
-            fraction_fit=FRACTION_FIT,
-            fraction_evaluate= FRACTION_EVAL,
-            min_fit_clients=MIN_CLIENTS_FIT,
-            min_evaluate_clients=MIN_CLIENTS_EVAL,
-            min_available_clients=NUM_CLIENTS,
-            evaluate_fn=get_evaluate_fn(centralized_testset=test_data,config_sim=config,save_model_dir = save_model_dir,metrics_file = out_file_path,device=device,apply_transforms=apply_transforms),
-            evaluate_metrics_aggregation_fn=weighted_average,
-            on_fit_config_fn=get_fit_config_fn(config_sim=config),
-            eta = 1e-1, 
-            eta_l = 1e-1, 
-            beta_1 = 0.0,
-            beta_2 = 0.0,
-            tau = 1e-9,
-        )
-    elif STRATEGY == "fedadam":
-        strategy = fl.server.strategy.FedAdam(
-            fraction_fit=FRACTION_FIT,
-            fraction_evaluate= FRACTION_EVAL,
-            min_fit_clients=MIN_CLIENTS_FIT,
-            min_evaluate_clients=MIN_CLIENTS_EVAL,
-            min_available_clients=NUM_CLIENTS,
-            evaluate_fn=get_evaluate_fn(centralized_testset=test_data,config_sim=config,save_model_dir = save_model_dir,metrics_file = out_file_path,device=device,apply_transforms=apply_transforms),
-            evaluate_metrics_aggregation_fn=weighted_average,
-            on_fit_config_fn=get_fit_config_fn(config_sim=config),
-            eta = 1e-1, 
-            eta_l = 1e-1, 
-            beta_1 = 0.9,
-            beta_2 = 0.99,
-            tau = 1e-9,
-        ) 
-    elif STRATEGY == "fedmedian":
-        strategy = fl.server.strategy.FedMedian(
-            fraction_fit=FRACTION_FIT,
-            fraction_evaluate= FRACTION_EVAL,
-            min_fit_clients=MIN_CLIENTS_FIT,
-            min_evaluate_clients=MIN_CLIENTS_EVAL,
-            min_available_clients=NUM_CLIENTS,
-            evaluate_fn=get_evaluate_fn(centralized_testset=test_data,config_sim=config,save_model_dir = save_model_dir,metrics_file = out_file_path,device=device,apply_transforms=apply_transforms),
-            evaluate_metrics_aggregation_fn=weighted_average,
-            on_fit_config_fn=get_fit_config_fn(config_sim=config),
-        )
-    elif STRATEGY == "fedavg": #default fedavg strategy
-        strategy = fl.server.strategy.FedAvg(
-            fraction_fit= FRACTION_FIT ,  # Sample 10% of available clients for training
-            fraction_evaluate= FRACTION_EVAL,  # Sample 5% of available clients for evaluation
-            min_fit_clients=MIN_CLIENTS_FIT,  # Never sample less than 2 clients for training
-            min_evaluate_clients=MIN_CLIENTS_EVAL,  # Never sample less than 2 clients for evaluation
-            min_available_clients=NUM_CLIENTS,
-            evaluate_fn=get_evaluate_fn(centralized_testset=test_data,config_sim=config,save_model_dir = save_model_dir,metrics_file = out_file_path,device=device,apply_transforms=apply_transforms),
-            evaluate_metrics_aggregation_fn=weighted_average,
-            on_fit_config_fn=get_fit_config_fn(config_sim=config),
-        )
+    kwargs = {
+        'FedAvgM' : {
+            'server_learning_rate': 1.0,
+            'server_momentum': 0.2,
+        },
+        'FedAdam' : {
+            'eta': 1e-1, 
+            'eta_l': 1e-1, 
+            'beta_1': 0.9,
+            'beta_2': 0.99,
+            'tau': 1e-9,
+        },
+        'FedOpt': {
+            'eta': 1e-1, 
+            'eta_l': 1e-1, 
+            'beta_1': 0.0,
+            'beta_2': 0.0,
+            'tau': 1e-9,
+        },
+        'FedProx': {
+            'proximal_mu': config['fedprox']['proximal_mu'],
+        },
+        'FedLaw': {
+            'config': config,
+            'model': model,
+            'test_data': test_data,
+            'size_weights': size_weights,
+            'apply_transforms': apply_transforms
+        }
+    }
     
-    return strategy
-
+    return getattr(
+        __import__(
+            'mak.strategy', 
+            fromlist=[STRATEGY]
+        ), STRATEGY)(
+            fraction_fit=FRACTION_FIT,
+            fraction_evaluate=FRACTION_EVAL,
+            min_fit_clients=MIN_CLIENTS_FIT,
+            min_evaluate_clients=MIN_CLIENTS_EVAL,
+            min_available_clients=NUM_CLIENTS,
+            evaluate_fn=get_evaluate_fn(centralized_testset=test_data,config_sim=config,save_model_dir = save_model_dir,metrics_file = out_file_path,device=device,apply_transforms=apply_transforms),
+            evaluate_metrics_aggregation_fn=weighted_average,
+            on_fit_config_fn=get_fit_config_fn(config_sim=config),
+            initial_parameters = fl.common.ndarrays_to_parameters([val.cpu().numpy() for _, val in model.state_dict().items()]),
+            **kwargs.get(STRATEGY, {})
+    )
 
 def set_seed(seed : int = 13):
     torch.manual_seed(seed)

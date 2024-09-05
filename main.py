@@ -19,7 +19,7 @@ from mak.utils.dataset_info import dataset_info
 def main(config_sim):
     fds, centralized_testset = get_dataset(config_sim=config_sim)
     
-    if config_sim['server']['strategy'] == 'fedlaw':
+    if config_sim['server']['strategy'] == 'FedLaw':
         size_weights = get_size_weights(federated_dataset=fds,num_clients=config_sim['server']['num_clients']) #for fedlaw only
     else:
         size_weights = []
