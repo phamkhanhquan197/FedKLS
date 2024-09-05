@@ -248,7 +248,6 @@ def get_strategy(config,test_data,save_model_dir,out_file_path, device,apply_tra
         'FedAvgM' : {
             'server_learning_rate': 1.0,
             'server_momentum': 0.2,
-            'initial_parameters': fl.common.ndarrays_to_parameters([val.cpu().numpy() for _, val in model.state_dict().items()])
         },
         'FedAdam' : {
             'eta': 1e-1, 
@@ -256,7 +255,6 @@ def get_strategy(config,test_data,save_model_dir,out_file_path, device,apply_tra
             'beta_1': 0.9,
             'beta_2': 0.99,
             'tau': 1e-9,
-            'initial_parameters': fl.common.ndarrays_to_parameters([val.cpu().numpy() for _, val in model.state_dict().items()]),
         },
         'FedOpt': {
             'eta': 1e-1, 
@@ -264,7 +262,6 @@ def get_strategy(config,test_data,save_model_dir,out_file_path, device,apply_tra
             'beta_1': 0.0,
             'beta_2': 0.0,
             'tau': 1e-9,
-            'initial_parameters': fl.common.ndarrays_to_parameters([val.cpu().numpy() for _, val in model.state_dict().items()]),
         },
         'FedProx': {
             'proximal_mu': config['fedprox']['proximal_mu'],
@@ -291,6 +288,7 @@ def get_strategy(config,test_data,save_model_dir,out_file_path, device,apply_tra
             evaluate_fn=get_evaluate_fn(centralized_testset=test_data,config_sim=config,save_model_dir = save_model_dir,metrics_file = out_file_path,device=device,apply_transforms=apply_transforms),
             evaluate_metrics_aggregation_fn=weighted_average,
             on_fit_config_fn=get_fit_config_fn(config_sim=config),
+            initial_parameters = fl.common.ndarrays_to_parameters([val.cpu().numpy() for _, val in model.state_dict().items()]),
             **kwargs.get(STRATEGY, {})
     )
 
