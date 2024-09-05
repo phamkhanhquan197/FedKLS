@@ -1,15 +1,8 @@
 import flwr as fl
 from flwr.common import Metrics
-from flwr.common.typing import Scalar
 import torch
 from collections import OrderedDict
-from typing import Dict, Tuple, List
-from datasets import Dataset
-from datasets.utils.logging import disable_progress_bar
-from flwr_datasets import FederatedDataset
-from torchvision.transforms import Compose, ToTensor, Normalize, Resize, CenterCrop
-from torch.utils.data import DataLoader
-import numpy as np
+from typing import Tuple, List
 
 # borrowed from Pytorch quickstart example
 def test(net, testloader, device: str):

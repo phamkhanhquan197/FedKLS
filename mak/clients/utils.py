@@ -4,10 +4,9 @@ from mak.clients.fedavg_client import FedAvgClient
 from mak.clients.fedprox_client import FedProxClient
 from flwr_datasets import FederatedDataset
 from flwr.common import Metrics
-from flwr.common.typing import Scalar
 import torch
 from collections import OrderedDict
-from typing import Dict, Tuple, List
+from typing import Tuple, List
 from flwr_datasets import FederatedDataset
 
 

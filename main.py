@@ -4,14 +4,11 @@ config_sim = get_config(args.config)
 set_seed(seed=config_sim['common']['seed'])
 
 import flwr as fl
-from logging import INFO, DEBUG
+from logging import INFO
 from flwr.common.logger import log
-from flwr_datasets import FederatedDataset
-from flwr_datasets.partitioner import DirichletPartitioner
 from datasets.utils.logging import disable_progress_bar
-import torch
 import os
-from mak.utils.helper import get_device_and_resources, get_mode_and_shape
+from mak.utils.helper import get_device_and_resources
 from mak.utils.helper import gen_dir_outfile_server, get_model, get_strategy,save_simulation_history,get_dataset, get_size_weights
 from mak.utils.pytorch_transformations import get_transformations
 from mak.clients.utils import get_client_fn
@@ -28,8 +25,6 @@ def main(config_sim):
         size_weights = []
     
     dataset_name = fds._dataset_name
-    # partition= fds.load_partition(0)
-    # shape = get_mode_and_shape(partition=partition)
     shape = dataset_info[dataset_name]["input_shape"]
 
     model = get_model(config_sim,shape = shape)
@@ -47,12 +42,15 @@ def main(config_sim):
         dir_alpha = fds._partitioners['train']._alpha[0]
     except (AttributeError):
         dir_alpha = "NA"
+
     log(INFO,f" =>>>>> Model : {model._get_name()} Device : {device}")
     log(INFO,f" =>>>>> Dataset : {dataset_name} Partitoner : {str(fds._partitioners['train']).split('.')[-1]} Alpha : {dir_alpha}")
     log(INFO,f" =>>>>> Ray init args : {ray_init_args} Client Res : {client_res}")
+
     strategy = get_strategy(config=config_sim,test_data=centralized_testset,save_model_dir=saved_models_path,out_file_path= out_file_path,device=device,apply_transforms=apply_transforms,size_weights=size_weights)
     server = ServerSaveData(
         strategy=strategy, client_manager=fl.server.client_manager.SimpleClientManager(),out_file_path=out_file_path,target_acc=config_sim['common']['target_acc'])
+    
     log(INFO,f" =>>>>> Using Strategy : {strategy.__class__} Server : {server.__class__}")
     
     hist = fl.simulation.start_simulation(

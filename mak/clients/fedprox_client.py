@@ -1,6 +1,4 @@
 import torch
-from torch.utils.data import DataLoader
-from mak.utils.helper import get_optimizer
 from mak.clients.base_client import BaseClient
 
 class FedProxClient(BaseClient):

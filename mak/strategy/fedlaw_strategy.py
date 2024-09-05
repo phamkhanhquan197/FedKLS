@@ -1,26 +1,11 @@
-import os
 from typing import Dict, List, Tuple, Union, Optional
 from logging import WARNING
-from dataclasses import dataclass, asdict
-import json
-from functools import reduce
-import numpy as np
 import flwr as fl
-from flwr.server.strategy.aggregate import aggregate
 from flwr.common.logger import log
 from flwr.server.client_proxy import ClientProxy
-from numpy import average
-from numpy import array
-from numpy.typing import NDArray
-from functools import reduce
 import copy
-import math
 from torch.utils.data import DataLoader
-
 import torch
-from torch.nn import Module
-from torch.optim.lr_scheduler import _LRScheduler
-from torch.optim.lr_scheduler import CosineAnnealingLR
 import torch.optim as optim
 import torch.nn as nn
 import torch.nn.functional as F
@@ -29,7 +14,6 @@ from mak.utils.helper import set_params
 from flwr.common import (
     Scalar,
     FitRes,
-    FitIns,
     Parameters,
     ndarrays_to_parameters,
     parameters_to_ndarrays,

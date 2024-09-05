@@ -1,12 +1,8 @@
 import torch
 from torch.utils.data import DataLoader
 import flwr as fl
-from flwr_datasets import FederatedDataset
 from mak.utils.helper import get_optimizer
-from mak.utils.pytorch_transformations import get_transformations
 from mak.training import set_params, test
-import mak
-
 
 
 class BaseClient(fl.client.NumPyClient):
