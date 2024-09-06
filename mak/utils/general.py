@@ -1,8 +1,8 @@
-import flwr as fl
-from flwr.common import Metrics
 import torch
-from collections import OrderedDict
+import flwr as fl
 from typing import Tuple, List
+from flwr.common import Metrics
+from collections import OrderedDict
 
 # borrowed from Pytorch quickstart example
 def test(net, testloader, device: str):
@@ -27,7 +27,6 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays]):
     params_dict = zip(model.state_dict().keys(), params)
     state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
     model.load_state_dict(state_dict, strict=True)
-
 
 def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
     """Aggregation function for (federated) evaluation metrics, i.e. those returned by

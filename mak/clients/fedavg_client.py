@@ -3,8 +3,9 @@ from mak.utils.helper import get_optimizer
 from mak.clients.base_client import BaseClient
 
 class FedAvgClient(BaseClient):
-    """Simple flwr client implementation using basic fedavg approach """
-
+    """
+        Simple flwr client implementation using basic fedavg approach
+    """
     def __repr__(self) -> str:
         return " FedAvg client"
 
