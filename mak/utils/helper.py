@@ -170,7 +170,6 @@ def get_evaluate_fn(
         
         if server_round == config_sim['server']['num_rounds']:
             torch.save(model.state_dict(), os.path.join(save_model_dir,'saved_model_final.pth'))
-            log(INFO, f"++++++++++ final accuracy : {accuracy} and loss : {loss}")
         return loss, {"accuracy": accuracy}
 
     return evaluate

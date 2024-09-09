@@ -1,8 +1,9 @@
 import torch
-import flwr as fl
 from torch.utils.data import DataLoader
+import flwr as fl
 from mak.utils.helper import get_optimizer
 from mak.utils.general import set_params, test
+
 
 class BaseClient(fl.client.NumPyClient):
     """flwr base client implementaion """
@@ -56,5 +57,9 @@ class BaseClient(fl.client.NumPyClient):
                 loss.backward()
                 optim.step()
 
+
     def test(self, net, testloader, device: str):
        return test(net=net,testloader=testloader,device=device)
+
+
+
