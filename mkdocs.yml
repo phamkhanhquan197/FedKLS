@@ -1,5 +1,6 @@
 site_name: FedEasy
 theme: readthedocs
+site_url: !ENV READTHEDOCS_CANONICAL_URL
 
 nav:
   - Home: index.md
@@ -9,3 +10,4 @@ nav:
   - Data Distributions: data_distribution.md
   - Models : models.md
   - Strategies: strategies.md
+

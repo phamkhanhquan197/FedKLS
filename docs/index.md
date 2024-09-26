@@ -20,7 +20,7 @@ FedEasy is an intuitive powerful yet simple to use Federated Learning framework 
 
 - **Contribution:** Contribute to the repository by enhancing existing features, adding new models or strategies, or improving documentation. Your contributions are welcome and will help make federated learning more accessible to everyone.
 
-> **Note**: While FedEasy is primarily designed for Linux environments, Windows users can also use it with some adjustments.
+> **Note**: While FedEasy is primarily tested in Linux environments, Windows users can also use it with some adjustments.
 
 
 
@@ -45,7 +45,7 @@ For questions, suggestions, or collaborations, please reach out to:
 - **Email**: Your Name (nclabteam@gmail.com)
 - **GitHub Issues**: For bug reports and feature requests, please use our [GitHub Issues page](https://github.com/nclabteam/FedEasy/issues)
 
-We welcome contributions from the community! Check out our [Contribution Guidelines](CONTRIBUTING.md) to get started.
+<!-- We welcome contributions from the community! Check out our [Contribution Guidelines](CONTRIBUTING) to get started. -->
 
 ## License
 
