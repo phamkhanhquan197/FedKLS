@@ -1,9 +1,15 @@
 site_name: FedEasy
-theme: readthedocs
 site_url: !ENV READTHEDOCS_CANONICAL_URL
 
+theme:
+  name: readthedocs
+  display_version: True
+  highlightjs: True
+  hljs_languages:
+    - yaml
+    - bash
+
 nav:
-  - Home: index.md
   - Installaton & Setup: install.md
   - Configuration: config.md
   - Datasets: datasets.md
