@@ -5,9 +5,10 @@ site_url: !ENV READTHEDOCS_CANONICAL_URL
 nav:
   - Home: index.md
   - Installaton & Setup: install.md
-  - Confugration: config.md
+  - Configuration: config.md
   - Datasets: datasets.md
   - Data Distributions: data_distribution.md
   - Models : models.md
   - Strategies: strategies.md
+  - License: license.md
 

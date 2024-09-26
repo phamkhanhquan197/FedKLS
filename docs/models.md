@@ -1,4 +1,4 @@
-The code of all these model classes can be found inside [`mak/models`](../mak/models) file.
+The code of all these model classes can be found inside [`mak/models`](https://github.com/nclabteam/FedEasy/tree/main/mak/models) file.
 ## Models
 ### 1. `Resnet18` 
 A simple standard resnet18 architecture

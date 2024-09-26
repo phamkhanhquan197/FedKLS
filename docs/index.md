@@ -42,11 +42,10 @@ If you use FedEasy in your research, please cite our work:
 
 For questions, suggestions, or collaborations, please reach out to:
 
-- **Email**: Your Name (nclabteam@gmail.com)
+- **Email**: nclabteam@gmail.com
 - **GitHub Issues**: For bug reports and feature requests, please use our [GitHub Issues page](https://github.com/nclabteam/FedEasy/issues)
 
 <!-- We welcome contributions from the community! Check out our [Contribution Guidelines](CONTRIBUTING) to get started. -->
 
-## License
 
-FedEasy is released under this [License](../LICENSE).
+FedEasy is released under this [License](license.md).
