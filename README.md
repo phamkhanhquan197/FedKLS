@@ -1,6 +1,9 @@
-# Federated Learning Framework with Flower and PyTorch
+# FedEasy: Federated Learning With Ease
 
-<!-- ![Federated Learning](https://your-image-url-here.com/federated-learning.png) -->
+<!-- ![FedEasy Logo](placeholder-for-logo.png) -->
+
+
+FedEasy is an intuitive powerful yet simple to use Federated Learning framework built on top of [Flower](https://flower.ai/) framework and [PyTorch](https://pytorch.org/). Our goal is to streamline the process of setting up and running federated learning experiments, making advanced machine learning techniques accessible to researchers and developers alike.
 
 This repository provides an easy-to-use Federated Learning framework based on Flower and PyTorch. It's designed to simplify the process of setting up and running federated learning experiments.
 
@@ -20,7 +23,7 @@ Follow these steps to set up and use this repository:
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/nclabteam/flwr-torch.git
+git clone https://github.com/nclabteam/FedEasy.git
 ```
 2. After clone cd into cloned directory and open terminal.
 
