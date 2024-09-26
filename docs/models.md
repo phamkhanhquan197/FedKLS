@@ -1,13 +1,14 @@
-This file describes the models already implemented in this framework.
-
 The code of all these model classes can be found inside [`mak/models`](../mak/models) file.
 ## Models
-1. `Resnet18:` A simple standard resnet18 architecture
+### 1. `Resnet18` 
+A simple standard resnet18 architecture
     
-2. `ResNet18Pretrained:` A pretrained resnet18 architecture from torchvision
+### 2. `ResNet18Pretrained` 
+A pretrained resnet18 architecture from torchvision
 
-3. `Net:` A simple CNN model implemented from scratch, the architecture is shown below:
-    ```
+### 3. `Net` 
+A simple CNN model implemented from scratch, the architecture is shown below:
+```
     def __init__(self, num_classes: int, weights = None, *args, **kwargs):
         """
         Initialize the Net model.
@@ -50,10 +51,11 @@ The code of all these model classes can be found inside [`mak/models`](../mak/mo
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         return self.fc3(x)
-    ```
+```
 
-4. `CifarNet :` A Simple CNN model adapted from 'PyTorch: A 60 Minute Blitz for three channel input' :
-    ```
+### 4. `CifarNet` 
+A Simple CNN model adapted from 'PyTorch: A 60 Minute Blitz for three channel input' ( [Link](https://pytorch.org/tutorials/beginner/deep_learning_60min_blitz.html) ) :
+```
     def __init__(self, num_classes: int, weights = None, *args, **kwargs):
         """
         Initialize the CifarNet model.
@@ -97,9 +99,10 @@ The code of all these model classes can be found inside [`mak/models`](../mak/mo
         x = F.relu(self.fc2(x))
         x = self.fc3(x)
         return x
-     ```
-5. `FedAVGCNN :` Architecture of CNN model used in original FedAVG paper ( https://doi.org/10.48550/arXiv.1602.05629) :
-    ```
+```
+### 5. `FedAVGCNN` 
+Architecture of CNN model used in original FedAVG paper ([Paper]( https://doi.org/10.48550/arXiv.1602.05629))
+```
     def __init__(self, num_classes: int, weights = None, *args, **kwargs) -> None:
         """
         FedAVG CNN model with customizable classifier head.
@@ -141,5 +144,5 @@ The code of all these model classes can be found inside [`mak/models`](../mak/mo
         """
         return self._model(x)
 
-    ```
+```
 

@@ -1,4 +1,4 @@
-This file describes the strategies (Federated Optimization Algorithms) which are avalaible in this framework.
+This page describes the strategies (Federated Optimization Algorithms) which are avalaible in this framework.
 1. `FedAvg`: Federated Averaging (FedAvg) [McMahan et al., 2016] strategy Paper: https://arxiv.org/abs/1602.05629
 2. `FedProx`: Federated Optimization in Heterogeneous Networks. Paper : https://arxiv.org/abs/1812.06127
 3. `FedAvgM` : Federated Averaging with Momentum (FedAvgM) [Hsu et al., 2019] strategy. Paper: https://arxiv.org/pdf/1909.06335.pdf

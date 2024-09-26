@@ -8,3 +8,6 @@ This file describes the datasets already implemented in this framework.
 3. `fashion_mnist`
 4. `sasha/dog-food`
 5. `zh-plus/tiny-imagenet`
+
+
+> **Note**: More datasets will be added soon.
