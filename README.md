@@ -87,7 +87,7 @@ The `server` section contains the configurations for the server that coordinates
 - `address` : This field specifies the IP address of the server.
 - `fraction_fit` : This field specifies the fraction of participating clients used for training in each round.
 - `min_fit_clients` : This field specifies the minimum number of participating clients required for training in each round.
-- `num_clients` : total number of clients participating in training.
+- `num_clients` : Total number of clients participating in training.
 - `fraction_evaluate` : This field specifies the fraction of participating clients used for evaluation in each round.
 - `min_avalaible_clients` : This field specifies the minimum number of clients that should be available for the training process.
 - `strategy` : This field specifies the strategy used for Federated Learning. Currently supported strategies are [`FedLaw`, `FedProx`, `FedAvgM`, `FedOpt`, `FedAdam`, `FedMedian`, `FedAvg`,] Detailed explination can be found [here](./docs/strategies.md)
@@ -100,10 +100,10 @@ The `client` section contains the configurations for the clients participating i
 - `lr` : This field specifies the learning rate for each client's training process.
 - `save_train_res` : This field specifies whether to save the training results. It could be either `true` or `false`.
 If `save_train_res` is set to `true`, all the output data like accuracy, loss, time of each round would be saved in the `out` directory.
-- `total_cpus` : 10  no. of CPU cores that are assigned for all simulation
-- `total_gpus` :  no. of GPU's assigned for whole simulation
+- `total_cpus` : No. of CPU cores that are assigned for all simulation
+- `total_gpus` :  No. of GPU's assigned for whole simulation
 - `gpu` : True or False, Use GPU for training or not. Default to False
-- `num_cpus` : 1  no. of CPU cores that are assigned for each actor Default to 1
+- `num_cpus` : No. of CPU cores that are assigned for each actor Default to 1
 - `num_gpus` : Fraction of GPU assigned to each actor. (num_cpus and num_gpus can only used in simulation mode if `simulation` is set to `True`) For more details on this please refer to https://flower.dev/docs/framework/how-to-run-simulations.html and https://docs.ray.io/en/latest/ray-core/scheduling/resources.html
 
 
