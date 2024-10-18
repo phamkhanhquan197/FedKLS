@@ -6,4 +6,4 @@ from flwr.server.strategy import (
     FedMedian,
     FedAvg,
 )
-from mak.strategy.fedlaw_strategy import FedLaw
+from mak.strategies.fedlaw_strategy import FedLaw
