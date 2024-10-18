@@ -11,7 +11,7 @@ class FedProxClient(BaseClient):
 
     def train(self, net, trainloader, optim, epochs, device: str, config : dict):
         """Train the network on the training set for fedprox."""
-        criterion = torch.nn.CrossEntropyLoss()
+        criterion = self.get_loss(loss=config['loss'])
 
         global_params = [val.detach().clone() for val in net.parameters()]
         net.train()

@@ -42,9 +42,12 @@ class BaseClient(fl.client.NumPyClient):
         loss, accuracy = self.test(self.model, valloader, device=self.device)
         return float(loss), len(valloader.dataset), {"accuracy": float(accuracy)}
     
+    def get_loss(self, loss):
+        return getattr(__import__('mak.losses', fromlist=[loss]), loss)()
+
     def train(self, net, trainloader, optim, epochs, device: str, config : dict):
         """Train the network on the training set."""
-        criterion = torch.nn.CrossEntropyLoss()
+        criterion = self.get_loss(loss=config['loss'])
         net.train()
 
         for _ in range(epochs):

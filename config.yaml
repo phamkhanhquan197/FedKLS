@@ -23,6 +23,7 @@ server:
   strategy : FedAvg  #[FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, FedAvg,]
 
 client:
+  loss: CrossEntropyLoss # [CrossEntropyLoss, FocalLoss]
   epochs : 3
   batch_size : 128
   test_batch_size : 128

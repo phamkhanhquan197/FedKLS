@@ -24,7 +24,7 @@ from datasets.utils.logging import disable_progress_bar
 from flwr_datasets.partitioner import IidPartitioner, DirichletPartitioner
 
 import mak
-import mak.strategy
+import mak.strategies
 from mak.utils.general import test, weighted_average, set_params
 from mak.utils.dataset_info import dataset_info
 
@@ -232,7 +232,7 @@ def save_simulation_history(hist : fl.server.history.History, path):
     df.to_csv(os.path.join(path))
 
 
-def get_strategy(config,test_data,save_model_dir,out_file_path, device,apply_transforms,size_weights):
+def get_strategy(config, test_data, save_model_dir, out_file_path, device, apply_transforms, size_weights):
     STRATEGY = config['server']['strategy']
     dataset_name = config["common"]["dataset"]
     shape = dataset_info[dataset_name]["input_shape"]
@@ -276,7 +276,7 @@ def get_strategy(config,test_data,save_model_dir,out_file_path, device,apply_tra
     
     return getattr(
         __import__(
-            'mak.strategy', 
+            'mak.strategies', 
             fromlist=[STRATEGY]
         ), STRATEGY)(
             fraction_fit=FRACTION_FIT,
@@ -325,6 +325,7 @@ def get_fit_config_fn(config_sim):
             "sgd_momentum" : config_sim['common']['sgd_momentum'],
             "strategy" : config_sim['server']['strategy'],
             "proximal_mu" : config_sim['fedprox']['proximal_mu'],
+            "loss" : config_sim['client']['loss']
         }
         return config
     return fit_config
