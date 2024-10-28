@@ -1,4 +1,5 @@
-from torchvision.transforms import Compose, ToTensor, Normalize
+from torchvision.transforms import Compose, Normalize, ToTensor
+
 
 def apply_transforms_cifar10(batch):
     """Apply transforms to the partition from FederatedDataset."""
@@ -7,11 +8,15 @@ def apply_transforms_cifar10(batch):
             # Resize(256),
             # CenterCrop(224),
             ToTensor(),
-            Normalize(mean=[0.49139968, 0.48215827, 0.44653124], std=[0.24703233, 0.24348505, 0.26158768]),
+            Normalize(
+                mean=[0.49139968, 0.48215827, 0.44653124],
+                std=[0.24703233, 0.24348505, 0.26158768],
+            ),
         ]
     )
     batch["img"] = [pytorch_transforms(img) for img in batch["img"]]
     return batch
+
 
 def apply_transforms_default(batch):
     """Apply transforms to the partition from FederatedDataset."""
@@ -26,8 +31,9 @@ def apply_transforms_default(batch):
     batch["image"] = [pytorch_transforms(img) for img in batch["image"]]
     return batch
 
+
 def get_transformations(dataset_name):
-    if dataset_name == 'cifar10' or dataset_name == 'cifar100':
+    if dataset_name == "cifar10" or dataset_name == "cifar100":
         return apply_transforms_cifar10
     else:
-        return  apply_transforms_default
+        return apply_transforms_default

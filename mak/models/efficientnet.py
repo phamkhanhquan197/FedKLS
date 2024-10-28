@@ -1,9 +1,11 @@
+from torch import Tensor, nn
+from torchvision.models import EfficientNet_B0_Weights, efficientnet_b0
+
 from mak.models.base_model import Model
-from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
-from torch import nn, Tensor
+
 
 class EfficientNetB0(Model):
-    def __init__(self, num_classes: int, weights = None, *args, **kwargs) -> None:
+    def __init__(self, num_classes: int, weights=None, *args, **kwargs) -> None:
         """
         EfficientNetB0 model with customizable classifier head.
 
@@ -15,7 +17,7 @@ class EfficientNetB0(Model):
         """
         super().__init__(num_classes, *args, **kwargs)
 
-        if weights == 'DEFAULT':
+        if weights == "DEFAULT":
             self._model = efficientnet_b0(weights=EfficientNet_B0_Weights.DEFAULT)
             # change the classifier head for num_classes
             self._model.classifier = nn.Sequential(
@@ -25,7 +27,7 @@ class EfficientNetB0(Model):
             self.pretrained = True
         else:
             self._model = efficientnet_b0(num_classes=num_classes)
-    
+
     def forward(self, x: Tensor) -> Tensor:
         """
         Forward pass of the EfficientNetB0 model.

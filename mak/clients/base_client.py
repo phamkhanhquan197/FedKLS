@@ -1,13 +1,17 @@
+import flwr as fl
 import torch
 from torch.utils.data import DataLoader
-import flwr as fl
-from mak.utils.helper import get_optimizer
+
 from mak.utils.general import set_params, test
+from mak.utils.helper import get_optimizer
 
 
 class BaseClient(fl.client.NumPyClient):
-    """flwr base client implementaion """
-    def __init__(self, model, trainset, valset, train_batch_size, test_batch_size, device):
+    """flwr base client implementaion"""
+
+    def __init__(
+        self, model, trainset, valset, train_batch_size, test_batch_size, device
+    ):
         self.trainset = trainset
         self.valset = valset
         self.model = model
@@ -27,12 +31,23 @@ class BaseClient(fl.client.NumPyClient):
 
     def fit(self, parameters, config):
         self.set_parameters(parameters)
-            
-        batch, epochs, learning_rate = config["batch_size"], config["epochs"], config["lr"]
-        
+
+        batch, epochs, learning_rate = (
+            config["batch_size"],
+            config["epochs"],
+            config["lr"],
+        )
+
         trainloader = DataLoader(self.trainset, batch_size=batch, shuffle=True)
         optimizer = get_optimizer(model=self.model, client_config=config)
-        self.train(net=self.model, trainloader=trainloader, optim=optimizer, epochs=epochs, device=self.device, config = config)
+        self.train(
+            net=self.model,
+            trainloader=trainloader,
+            optim=optimizer,
+            epochs=epochs,
+            device=self.device,
+            config=config,
+        )
 
         return self.get_parameters({}), len(trainloader.dataset), {}
 
@@ -41,13 +56,13 @@ class BaseClient(fl.client.NumPyClient):
         valloader = DataLoader(self.valset, batch_size=self.test_batch_size)
         loss, accuracy = self.test(self.model, valloader, device=self.device)
         return float(loss), len(valloader.dataset), {"accuracy": float(accuracy)}
-    
-    def get_loss(self, loss):
-        return getattr(__import__('mak.losses', fromlist=[loss]), loss)()
 
-    def train(self, net, trainloader, optim, epochs, device: str, config : dict):
+    def get_loss(self, loss):
+        return getattr(__import__("mak.losses", fromlist=[loss]), loss)()
+
+    def train(self, net, trainloader, optim, epochs, device: str, config: dict):
         """Train the network on the training set."""
-        criterion = self.get_loss(loss=config['loss'])
+        criterion = self.get_loss(loss=config["loss"])
         net.train()
 
         for _ in range(epochs):
@@ -60,9 +75,5 @@ class BaseClient(fl.client.NumPyClient):
                 loss.backward()
                 optim.step()
 
-
     def test(self, net, testloader, device: str):
-       return test(net=net,testloader=testloader,device=device)
-
-
-
+        return test(net=net, testloader=testloader, device=device)

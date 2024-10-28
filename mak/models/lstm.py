@@ -1,10 +1,12 @@
+from torch import Tensor, load, nn
+
 from mak.models.base_model import Model
-from torch import nn, Tensor
-from torch import load
+
 
 class LSTMModel(Model):
     """Create an LSTM model for next character task."""
-    def __init__(self, num_classes: int, weights = None, *args, **kwargs) -> None:
+
+    def __init__(self, num_classes: int, weights=None, *args, **kwargs) -> None:
         """
         LSTM model for next character prediction task.
 
@@ -35,6 +37,6 @@ class LSTMModel(Model):
             Tensor: Output tensor.
         """
         x = self.embedding(x)
-        h1, (h1_T,c1_T) = self.lstm(x)
+        h1, (h1_T, c1_T) = self.lstm(x)
         out = self.fc(h1_T.squeeze(0))
         return out

@@ -16,10 +16,11 @@
 
 
 import concurrent.futures
+import csv
 import timeit
 from logging import DEBUG, INFO
 from typing import Dict, List, Optional, Tuple, Union
-import csv
+
 from flwr.common import (
     Code,
     DisconnectRes,
@@ -60,8 +61,8 @@ class ServerSaveData:
         *,
         client_manager: ClientManager,
         strategy: Optional[Strategy] = None,
-        out_file_path = None,
-        target_acc = 0.85
+        out_file_path=None,
+        target_acc=0.85,
     ) -> None:
         self._client_manager: ClientManager = client_manager
         self.parameters: Parameters = Parameters(
@@ -153,20 +154,28 @@ class ServerSaveData:
                     history.add_metrics_distributed(
                         server_round=current_round, metrics=evaluate_metrics_fed
                     )
-             # Conclude round
+            # Conclude round
             loss = res_cen[0] if res_cen is not None else None
             acc = res_cen[1] if res_cen is not None else None
-            acc = acc['accuracy'] if acc is not None else None
+            acc = acc["accuracy"] if acc is not None else None
             log(INFO, f"Accuracy: {acc}")
             if self.out_file_path is not None:
-                field_names = ["round","accuracy","loss","time"]
-                dict = {"round": current_round,"accuracy":acc,"loss":loss,"time":timeit.default_timer()-curr_round_start_time}
-                with open(self.out_file_path,'a') as f:
+                field_names = ["round", "accuracy", "loss", "time"]
+                dict = {
+                    "round": current_round,
+                    "accuracy": acc,
+                    "loss": loss,
+                    "time": timeit.default_timer() - curr_round_start_time,
+                }
+                with open(self.out_file_path, "a") as f:
                     dictwriter_object = csv.DictWriter(f, fieldnames=field_names)
                     dictwriter_object.writerow(dict)
                     f.close()
-            if (acc >= float(self.target_acc)):
-                log(INFO, f"Reached target accuracy so stopping further rounds: {self.target_acc}")
+            if acc >= float(self.target_acc):
+                log(
+                    INFO,
+                    f"Reached target accuracy so stopping further rounds: {self.target_acc}",
+                )
                 break
 
         # Bookkeeping

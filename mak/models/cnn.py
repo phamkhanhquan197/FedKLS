@@ -1,7 +1,9 @@
-from torch import nn
-import torch.nn.functional as F
-from mak.models.base_model import Model
 import torch
+import torch.nn.functional as F
+from torch import nn
+
+from mak.models.base_model import Model
+
 
 class CifarNet(Model):
     """
@@ -15,7 +17,10 @@ class CifarNet(Model):
         fc2 (nn.Linear): Second fully connected layer.
         fc3 (nn.Linear): Third fully connected layer.
     """
-    def __init__(self, input_shape: tuple, num_classes: int, weights=None, *args, **kwargs):
+
+    def __init__(
+        self, input_shape: tuple, num_classes: int, weights=None, *args, **kwargs
+    ):
         """
         Initialize the CifarNet model.
 
@@ -34,13 +39,13 @@ class CifarNet(Model):
         self.conv1 = nn.Conv2d(input_shape[0], 6, 5)
         self.pool = nn.MaxPool2d(2, 2)
         self.conv2 = nn.Conv2d(6, 16, 5)
-        
+
         # Calculate the size of the feature map after the convolutional and pooling layers
-        self.feature_size = self._get_conv_output(shape= input_shape)
+        self.feature_size = self._get_conv_output(shape=input_shape)
 
         self.fc1 = nn.Linear(self.feature_size, 120)
         self.fc2 = nn.Linear(120, 84)
-        self.fc3 = nn.Linear(84, num_classes) #use num_classes instead of 10
+        self.fc3 = nn.Linear(84, num_classes)  # use num_classes instead of 10
 
         if weights is not None:
             self.load_state_dict(torch.load(weights), strict=True)
@@ -58,19 +63,20 @@ class CifarNet(Model):
         """
         x = self.pool(F.relu(self.conv1(x)))
         x = self.pool(F.relu(self.conv2(x)))
-        x = torch.flatten(x, 1) # flatten all dimensions except batch
+        x = torch.flatten(x, 1)  # flatten all dimensions except batch
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         x = self.fc3(x)
         return x
 
-    def _get_conv_output(self,shape):
+    def _get_conv_output(self, shape):
         # Create a dummy tensor with the input shape
         with torch.no_grad():
             x = torch.zeros(1, *shape)
             x = self.pool(F.relu(self.conv1(x)))
             x = self.pool(F.relu(self.conv2(x)))
             return x.numel()
+
 
 class Net(Model):
     """
@@ -85,7 +91,9 @@ class Net(Model):
         fc3 (nn.Linear): Third fully connected layer.
     """
 
-    def __init__(self, input_shape: tuple, num_classes: int, weights=None, *args, **kwargs):
+    def __init__(
+        self, input_shape: tuple, num_classes: int, weights=None, *args, **kwargs
+    ):
         """
         Initialize the Net model.
 
@@ -104,7 +112,7 @@ class Net(Model):
         self.conv1 = nn.Conv2d(input_shape[0], 6, 5)
         self.pool = nn.MaxPool2d(2, 2)
         self.conv2 = nn.Conv2d(6, 16, 5)
-        
+
         # Calculate the size of the feature map after the convolutional and pooling layers
         self.feature_size = self._get_conv_output(input_shape)
 
@@ -141,8 +149,11 @@ class Net(Model):
         x = F.relu(self.fc2(x))
         return self.fc3(x)
 
+
 class SimpleCNN(Model):
-    def __init__(self, input_shape: tuple, num_classes: int, weights=None, *args, **kwargs) -> None:
+    def __init__(
+        self, input_shape: tuple, num_classes: int, weights=None, *args, **kwargs
+    ) -> None:
         """
         Simple CNN model with customizable classifier head.
 
@@ -155,10 +166,14 @@ class SimpleCNN(Model):
         """
         super(SimpleCNN, self).__init__(num_classes, *args, **kwargs)
 
-        self.conv1 = nn.Conv2d(in_channels=input_shape[0], out_channels=32, kernel_size=3, padding='same')
+        self.conv1 = nn.Conv2d(
+            in_channels=input_shape[0], out_channels=32, kernel_size=3, padding="same"
+        )
         self.conv2 = nn.Conv2d(in_channels=32, out_channels=32, kernel_size=3)
         self.pool = nn.MaxPool2d(2, 2)
-        self.conv3 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, padding='same')
+        self.conv3 = nn.Conv2d(
+            in_channels=32, out_channels=64, kernel_size=3, padding="same"
+        )
         self.conv4 = nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3)
 
         # Calculate the size of the flattened feature map
@@ -200,8 +215,11 @@ class SimpleCNN(Model):
         x = self.dropout3(F.relu(self.fc1(x)))
         return self.fc2(x)
 
+
 class KerasExpCNN(Model):
-    def __init__(self, input_shape: tuple, num_classes: int, weights=None, *args, **kwargs) -> None:
+    def __init__(
+        self, input_shape: tuple, num_classes: int, weights=None, *args, **kwargs
+    ) -> None:
         """
         Keras-style experimental CNN model with customizable classifier head.
 
@@ -215,7 +233,9 @@ class KerasExpCNN(Model):
         super(KerasExpCNN, self).__init__(num_classes, *args, **kwargs)
 
         # Define the convolutional and pooling layers
-        self.conv1 = nn.Conv2d(in_channels=input_shape[0], out_channels=32, kernel_size=3)
+        self.conv1 = nn.Conv2d(
+            in_channels=input_shape[0], out_channels=32, kernel_size=3
+        )
         self.pool1 = nn.MaxPool2d(2, 2)
         self.conv2 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3)
         self.pool2 = nn.MaxPool2d(2, 2)
@@ -257,8 +277,11 @@ class KerasExpCNN(Model):
         x = self.fc1(x)
         return x
 
+
 class MNISTCNN(Model):
-    def __init__(self, input_shape: tuple, num_classes: int, weights=None, *args, **kwargs) -> None:
+    def __init__(
+        self, input_shape: tuple, num_classes: int, weights=None, *args, **kwargs
+    ) -> None:
         """
         CNN model for MNIST dataset with customizable classifier head.
 
@@ -271,9 +294,11 @@ class MNISTCNN(Model):
         """
         super(MNISTCNN, self).__init__(num_classes, *args, **kwargs)
 
-        self.conv1 = nn.Conv2d(in_channels=input_shape[0], out_channels=64, kernel_size=3)
+        self.conv1 = nn.Conv2d(
+            in_channels=input_shape[0], out_channels=64, kernel_size=3
+        )
         self.pool = nn.MaxPool2d(2, 2)
-        
+
         # Calculate the size of the feature map after the convolutional and pooling layers
         self.feature_size = self._get_conv_output(input_shape)
 
@@ -296,8 +321,11 @@ class MNISTCNN(Model):
         x = F.relu(self.fc1(x))
         return self.fc2(x)
 
+
 class SimpleDNN(Model):
-    def __init__(self, input_shape: tuple, num_classes: int, weights=None, *args, **kwargs) -> None:
+    def __init__(
+        self, input_shape: tuple, num_classes: int, weights=None, *args, **kwargs
+    ) -> None:
         """
         Simple deep neural network (DNN) model with customizable classifier head.
 
@@ -333,9 +361,12 @@ class SimpleDNN(Model):
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
         return self.fc3(x)
-    
+
+
 class FMCNNModel(Model):
-    def __init__(self, input_shape: tuple, num_classes: int, weights=None, *args, **kwargs) -> None:
+    def __init__(
+        self, input_shape: tuple, num_classes: int, weights=None, *args, **kwargs
+    ) -> None:
         """
         Fully convolutional CNN model with customizable classifier head.
 
@@ -348,10 +379,18 @@ class FMCNNModel(Model):
         """
         super(FMCNNModel, self).__init__(num_classes, *args, **kwargs)
 
-        self.conv1 = nn.Conv2d(in_channels=input_shape[0], out_channels=32, kernel_size=5, stride=1, padding='same')
+        self.conv1 = nn.Conv2d(
+            in_channels=input_shape[0],
+            out_channels=32,
+            kernel_size=5,
+            stride=1,
+            padding="same",
+        )
         self.pool = nn.MaxPool2d(2, 2)
-        self.conv2 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=5, stride=1, padding='same')
-        
+        self.conv2 = nn.Conv2d(
+            in_channels=32, out_channels=64, kernel_size=5, stride=1, padding="same"
+        )
+
         # Calculate the size of the flattened feature map
         self.feature_size = self._get_conv_output(input_shape)
 
@@ -378,11 +417,15 @@ class FMCNNModel(Model):
         x = F.relu(self.fc1(x))
         return self.fc2(x)
 
+
 class FedAVGCNN(Model):
     """Architecture of CNN model used in original FedAVG paper with Cifar-10 dataset.
     Paper: https://doi.org/10.48550/arXiv.1602.05629
     """
-    def __init__(self, input_shape: tuple, num_classes: int, weights=None, *args, **kwargs) -> None:
+
+    def __init__(
+        self, input_shape: tuple, num_classes: int, weights=None, *args, **kwargs
+    ) -> None:
         """
         FedAVG CNN model with customizable classifier head.
 
@@ -395,10 +438,14 @@ class FedAVGCNN(Model):
         """
         super(FedAVGCNN, self).__init__(num_classes, *args, **kwargs)
 
-        self.conv1 = nn.Conv2d(in_channels=input_shape[0], out_channels=32, kernel_size=5, padding='same')
+        self.conv1 = nn.Conv2d(
+            in_channels=input_shape[0], out_channels=32, kernel_size=5, padding="same"
+        )
         self.pool = nn.MaxPool2d(2)
-        self.conv2 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=5, padding='same')
-        
+        self.conv2 = nn.Conv2d(
+            in_channels=32, out_channels=64, kernel_size=5, padding="same"
+        )
+
         # Calculate the size of the flattened feature map
         self.feature_size = self._get_conv_output(input_shape)
 

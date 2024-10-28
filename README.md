@@ -107,3 +107,13 @@ If `save_train_res` is set to `true`, all the output data like accuracy, loss, t
 - `num_gpus` : Fraction of GPU assigned to each actor. (num_cpus and num_gpus can only used in simulation mode if `simulation` is set to `True`) For more details on this please refer to https://flower.dev/docs/framework/how-to-run-simulations.html and https://docs.ray.io/en/latest/ray-core/scheduling/resources.html
 
 
+### Code Formatting
+# Installation
+```
+pip install isort black
+```
+# Usage
+```
+isort mak --profile=black
+black mak
+```

@@ -1,9 +1,11 @@
-from torchvision.models import mobilenet_v2, MobileNet_V2_Weights
+from torch import Tensor, nn
+from torchvision.models import MobileNet_V2_Weights, mobilenet_v2
+
 from mak.models.base_model import Model
-from torch import nn, Tensor
+
 
 class MobileNetV2(Model):
-    def __init__(self, num_classes: int, weights = None, *args, **kwargs) -> None:
+    def __init__(self, num_classes: int, weights=None, *args, **kwargs) -> None:
         """
         MobileNetV2 model with customizable classifier head.
 
@@ -15,7 +17,7 @@ class MobileNetV2(Model):
         """
         super().__init__(num_classes, *args, **kwargs)
 
-        if weights == 'DEFAULT':
+        if weights == "DEFAULT":
             self._model = mobilenet_v2(weights=MobileNet_V2_Weights.DEFAULT)
             # change the classifier head for num_classes
             self._model.classifier = nn.Sequential(
@@ -25,7 +27,7 @@ class MobileNetV2(Model):
             self.pretrained = True
         else:
             self._model = mobilenet_v2(num_classes=num_classes)
-    
+
     def forward(self, x: Tensor) -> Tensor:
         """
         Forward pass of the MobileNetV2 model.

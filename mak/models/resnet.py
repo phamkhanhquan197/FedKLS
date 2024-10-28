@@ -1,16 +1,20 @@
 """Implements the Base Resnet model."""
 from typing import Tuple
-from torch import nn, Tensor
+
 import torch.nn.functional as F
+from torch import Tensor, nn
 
 from mak.models.base_model import Model
+
 
 class BasicBlock(nn.Module):
     """Resnet Basic Block. (https://arxiv.org/abs/2103.16257)"""
 
     expansion = 1
 
-    def __init__(self, in_planes: int, planes: int, activation: nn.functional, stride: int=1):
+    def __init__(
+        self, in_planes: int, planes: int, activation: nn.functional, stride: int = 1
+    ):
         """
         Initializes a ResNet basic block.
 
@@ -67,7 +71,9 @@ class Bottleneck(nn.Module):
 
     expansion = 4
 
-    def __init__(self, in_planes: int, planes: int, activation: nn.functional, stride: int=1):
+    def __init__(
+        self, in_planes: int, planes: int, activation: nn.functional, stride: int = 1
+    ):
         """
         Initializes a ResNet bottleneck block.
 
@@ -125,7 +131,16 @@ class Bottleneck(nn.Module):
 class BaseResNet(Model):
     """Resnet Base Model Class."""
 
-    def __init__(self, block: nn.Module, num_blocks: list[int], activation: nn.functional, num_classes: int, input_shape: Tuple,*args, **kwargs):
+    def __init__(
+        self,
+        block: nn.Module,
+        num_blocks: list[int],
+        activation: nn.functional,
+        num_classes: int,
+        input_shape: Tuple,
+        *args,
+        **kwargs
+    ):
         """
         Initializes a ResNet model.
 
@@ -193,14 +208,31 @@ class BaseResNet(Model):
 
 class Resnet18(BaseResNet):
     """Resnet 18 Model Class."""
-    def __init__(self, num_classes: int=10, *args, **kwargs):
-        super().__init__(block=BasicBlock, num_blocks=[2, 2, 2, 2], activation=F.relu, num_classes = num_classes, *args, **kwargs)
 
-        self.__class__.__name__ = 'Resnet18 Custom'
+    def __init__(self, num_classes: int = 10, *args, **kwargs):
+        super().__init__(
+            block=BasicBlock,
+            num_blocks=[2, 2, 2, 2],
+            activation=F.relu,
+            num_classes=num_classes,
+            *args,
+            **kwargs
+        )
+
+        self.__class__.__name__ = "Resnet18 Custom"
+
 
 class Resnet34(BaseResNet):
     """Resnet 34 Model Class."""
-    def __init__(self, num_classes: int=10, *args, **kwargs):
-        super().__init__(block=BasicBlock, num_blocks=[3, 4, 6, 3], activation=F.relu, num_classes = num_classes, *args, **kwargs)
 
-        self.__class__.__name__ = 'Resnet34 Custom'
+    def __init__(self, num_classes: int = 10, *args, **kwargs):
+        super().__init__(
+            block=BasicBlock,
+            num_blocks=[3, 4, 6, 3],
+            activation=F.relu,
+            num_classes=num_classes,
+            *args,
+            **kwargs
+        )
+
+        self.__class__.__name__ = "Resnet34 Custom"
