@@ -20,26 +20,26 @@ Follow these steps to run a multi-node example:
 ### Step 1: Set Up the Head Node
 
 1. **Activate the virtual environment** on the designated head node by running:
-   ```bash
+```bash
    conda activate venv-fedeasy
-   ```
-   > _Note_: Replace `venv-fedeasy` with the name of your virtual environment, if different.
+```
+> _Note_: Replace `venv-fedeasy` with the name of your virtual environment, if different.
 
 2. **Start the Ray cluster** on the head node:
-   ```bash
+```bash
    ray start --head
-   ```
-   The `--head` flag designates this node as the cluster head.
+```
+The `--head` flag designates this node as the cluster head.
 
 3. After execution, you'll see connection details like the **IP:PORT** of the head node. These details will be used to connect other nodes to this cluster:
 
-   ![Ray Head Node Initialization](../../docs/imgs/head_node.png "Initialization of Head Node")
+![Ray Head Node Initialization](./imgs/head_node.png "Initialization of Head Node")
 
 4. (Optional) You can configure the CPU and GPU resources for the head node as follows:
-   ```bash
+```bash
    ray start --head --num_cpus 16 --num_gpus 1
-   ```
-   By default, Ray uses all available resources. Refer to the [Ray Documentation](https://docs.ray.io/en/latest/ray-core/configure.html) for more details.
+```
+By default, Ray uses all available resources. Refer to the [Ray Documentation](https://docs.ray.io/en/latest/ray-core/configure.html) for more details.
 
 5. Verify the Ray dashboard at [http://127.0.0.1:8265](http://127.0.0.1:8265).
 
@@ -48,31 +48,31 @@ Follow these steps to run a multi-node example:
 ### Step 2: Connect Worker Nodes
 
 1. On each worker node (the machines you want to connect to the head node), activate the virtual environment:
-   ```bash
+```bash
    conda activate venv-fedeasy
-   ```
+```
 
 2. Connect to the cluster by specifying the head node's address:
-   ```bash
+```bash
    ray start --address <head-ip>:6379
-   ```
-   Replace `<head-ip>` with the IP address provided during the head node's initialization.
+```
+Replace `<head-ip>` with the IP address provided during the head node's initialization.
 
-   ![Add Node to Cluster](../../docs/imgs/add_node.png "Add a New Node to the Cluster")
+![Add Node to Cluster](./imgs/add_node.png "Add a New Node to the Cluster")
 
 3. (Optional) Configure resources for worker nodes:
-   ```bash
+```bash
    ray start --address <head-ip>:6379 --num_cpus 16 --num_gpus 1
-   ```
-   Here, the worker node will use 16 CPUs and 1 GPU (if available).
+```
+Here, the worker node will use 16 CPUs and 1 GPU (if available).
 
 4. Verify the total resources in the cluster by visiting the Ray dashboard at [http://127.0.0.1:8265/#/overview](http://127.0.0.1:8265/#/overview).
 
-   ![Dashboard Overview](../../docs/imgs/dashboard_overview.png "Overview of Dashboard")
+![Dashboard Overview](./imgs/dashboard_overview.png "Overview of Dashboard")
 
 5. Click the cluster menu in the dashboard to see all connected nodes:
 
-   ![View Nodes in Cluster](../../docs/imgs/dashboard_cluster.png "Cluster View")
+![View Nodes in Cluster](./imgs/dashboard_cluster.png "Cluster View")
 
 ---
 
@@ -86,7 +86,7 @@ On all nodes, including the head node, update the `config.yaml` file by setting 
 
 Finally, to train a model in the multi-node environment, execute the following script on the **head node**:
 ```bash
-./examples/multi-node-simulations/run_cifar10_multi_node.sh
+   ./examples/multi-node-simulations/run_cifar10_multi_node.sh
 ```
 FedEasy will handle the rest of the process automatically.
 
