@@ -57,6 +57,7 @@ def get_device_and_resources(config_sim):
         "num_gpus": config_sim["client"]["num_gpus"] if device.type == "cuda" else 0.0,
     }
     if config_sim["common"]["multi_node"]:
+        ray_init_args = {}
         ray_init_args["address"] = "auto"
         ray_init_args["runtime_env"] = {"py_modules": [mak]}
     return device, ray_init_args, client_res
