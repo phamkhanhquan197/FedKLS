@@ -23,6 +23,11 @@ from torch.utils.data import DataLoader
 
 import mak
 import mak.strategies
+from mak.servers.custom_server import ServerSaveData
+from mak.servers.fednova_server import FedNovaServer
+from mak.servers.scaffold_server import ScaffoldServer
+from mak.strategies.fednova_strategy import FedNovaStrategy
+from mak.strategies.scaffold_strategy import ScaffoldStrategy
 from mak.utils.dataset_info import dataset_info
 from mak.utils.general import set_params, test, weighted_average
 
@@ -116,8 +121,8 @@ def gen_dir_outfile_server(config):
 
     if not os.path.exists(final_dir_path):
         os.mkdir(final_dir_path)
-    # if not os.path.exists(os.path.join(final_dir_path,'models')):
-    #     os.mkdir(os.path.join(final_dir_path,'models'))
+    if not os.path.exists(os.path.join(final_dir_path, "clients")):
+        os.mkdir(os.path.join(final_dir_path, "clients"))
     # models_dir = os.path.join(final_dir_path,'models')
     now = datetime.now()
     current_time = now.strftime("%H-%M-%S")
@@ -133,7 +138,7 @@ def gen_dir_outfile_server(config):
     if not os.path.exists(out_file_path):
         with open(out_file_path, "w", encoding="UTF8") as f:
             # create the csv writer
-            header = ["round", "accuracy", "loss", "time"]
+            header = ["round", "global_accuracy", "global_loss", "processing_time"]
             writer = csv.writer(f)
             writer.writerow(header)
             f.close()
@@ -153,9 +158,12 @@ def get_partitioner(config_sim):
             num_partitions=num_clients,
             partition_by=label,
             alpha=dirchlet_alpha,
-            min_partition_size=5,
+            min_partition_size=2, #minimum number of samples in each partition
             self_balancing=True,
+            shuffle=True,
+            seed=config_sim["common"]["seed"],
         )
+        
     else:
         partitioner = IidPartitioner(num_partitions=num_clients)
     # return train data
@@ -164,7 +172,6 @@ def get_partitioner(config_sim):
 
 def get_dataset(config_sim):
     partitioner = get_partitioner(config_sim=config_sim)
-
     dataset_name = config_sim["common"]["dataset"]
     if dataset_name not in dataset_info.keys():
         raise Exception(f"Dataset name should be among : {list(dataset_info.keys())}")
@@ -173,7 +180,6 @@ def get_dataset(config_sim):
         # get test column name
         test_set = dataset_info[dataset_name]["test_set"]
         centralized_testset = fds.load_split(test_set)
-
         return fds, centralized_testset
 
 
@@ -182,10 +188,19 @@ def get_model(config, shape):
     # get num_classes
     dataset_name = config["common"]["dataset"]
     num_classes = dataset_info[dataset_name]["num_classes"]
+
+    # check if model is from huggingface
+    if model_name in ["distilbert-base-uncased", "albert-base-v2"]:  # Add more as needed
+        from transformers import AutoModelForSequenceClassification
+        return AutoModelForSequenceClassification.from_pretrained(
+            model_name, num_labels=num_classes
+        )
+
     # get model
     model = getattr(__import__("mak.models", fromlist=[model_name]), model_name)(
         num_classes=num_classes, input_shape=shape
     )
+
     return model
 
 
@@ -195,7 +210,7 @@ def get_evaluate_fn(
     device,
     save_model_dir,
     metrics_file,
-    apply_transforms,
+    apply_transforms_test,
 ):
     """Return an evaluation function for centralized evaluation."""
     dataset_name = config_sim["common"]["dataset"]
@@ -209,18 +224,20 @@ def get_evaluate_fn(
         model.to(device)
 
         # Apply transform to dataset
-        testset = centralized_testset.with_transform(apply_transforms)
+        testset = centralized_testset.with_transform(apply_transforms_test)
 
         # Disable tqdm for dataset preprocessing
         disable_progress_bar()
 
-        testloader = DataLoader(testset, batch_size=32)
-        loss, accuracy = test(model, testloader, device=device)
+        testloader = DataLoader(testset, batch_size=config_sim["client"]["test_batch_size"])
+
+        feature_key = dataset_info[dataset_name]["feature_key"]
+        loss, accuracy, f1 = test(model, testloader, device=device, feature_key=feature_key)
         metrics_df = pd.read_csv(metrics_file)
-        if metrics_df["loss"].min() > loss:
+        if metrics_df["global_loss"].min() > loss:
             log(
                 INFO,
-                f" =>>>>> Min Loss improved from {metrics_df['loss'].min()} to : {loss} Saving best model having accuracy : {accuracy}",
+                f" =>>>>> Min Loss improved from {metrics_df['global_loss'].min()} to : {loss} =>>>>> Saving best model with accuracy : {accuracy}, f1_score : {f1}", 
             )
             torch.save(
                 model.state_dict(), os.path.join(save_model_dir, "saved_best_model.pth")
@@ -229,9 +246,9 @@ def get_evaluate_fn(
         if server_round == config_sim["server"]["num_rounds"]:
             torch.save(
                 model.state_dict(),
-                os.path.join(save_model_dir, "saved_model_final.pth"),
+                os.path.join(save_model_dir, "saved_final_model.pth"),
             )
-        return loss, {"accuracy": accuracy}
+        return loss, {"accuracy": accuracy, "f1_score": f1}
 
     return evaluate
 
@@ -248,6 +265,8 @@ def save_simulation_history(hist: fl.server.history.History, path):
     losses_distributed_dict = {}
     accuracy_distributed_dict = {}
     accuracy_centralized_dict = {}
+    f1_score_distributed_dict = {}
+    f1_score_centralized_dict = {}
 
     for loss in losses_centralized:
         c_rnd = loss[0]
@@ -265,16 +284,27 @@ def save_simulation_history(hist: fl.server.history.History, path):
         for acc in metrics_centralized["accuracy"]:
             c_rnd = acc[0]
             accuracy_centralized_dict[c_rnd] = acc[1]
+    if "f1_score" in metrics_distributed.keys():
+        for f1 in metrics_distributed["f1_score"]:
+            c_rnd = f1[0]
+            f1_score_distributed_dict[c_rnd] = f1[1]
+    if "f1_score" in metrics_centralized.keys():
+        for f1 in metrics_centralized["f1_score"]:
+            c_rnd = f1[0]
+            f1_score_centralized_dict[c_rnd] = f1[1]
+
 
     if len(metrics_distributed_fit) != 0:
         pass  # TODO  check its implemetation later
 
     data = {
-        "rounds": rounds,
-        "losses_centralized": losses_centralized_dict,
-        "losses_distributed": losses_distributed_dict,
-        "accuracy_distributed": accuracy_distributed_dict,
-        "accuracy_centralized": accuracy_centralized_dict,
+        "round": rounds,
+        "global_loss": losses_centralized_dict,
+        "local_loss": losses_distributed_dict,
+        "global_accuracy": accuracy_centralized_dict,
+        "local_accuracy": accuracy_distributed_dict,
+        "global_f1_score": f1_score_centralized_dict,
+        "local_f1_score": f1_score_distributed_dict,
     }
 
     # Create an empty DataFrame
@@ -283,20 +313,44 @@ def save_simulation_history(hist: fl.server.history.History, path):
     # Iterate over each key in the data dictionary
     for key in data.keys():
         # If the key is 'rounds', set the 'rounds' column of the DataFrame to the rounds list
-        if key == "rounds":
-            df["rounds"] = data[key]
+        if key == "round":
+            df["round"] = data[key]
         # Otherwise, create a new column in the DataFrame with the key as the column name
         else:
             column_data = []
             # Iterate over each round in the 'rounds' list and add the corresponding value for the current key
-            for round_num in data["rounds"]:
+            for round_num in data["round"]:
                 # If the round number does not exist in the current key's dictionary, set the value to None
                 if round_num not in data[key]:
                     column_data.append(None)
                 else:
                     column_data.append(data[key][round_num])
             df[key] = column_data
-    df.to_csv(os.path.join(path))
+    df.to_csv(os.path.join(path), index=False)
+
+
+def get_server(strategy, client_manager, out_file_path, target_acc):
+    if isinstance(strategy, ScaffoldStrategy):
+        return ScaffoldServer(
+            strategy=strategy,
+            client_manager=client_manager,
+            out_file_path=out_file_path,
+            target_acc=target_acc,
+        )
+    elif isinstance(strategy, FedNovaStrategy):
+        return FedNovaServer(
+            strategy=strategy,
+            client_manager=client_manager,
+            out_file_path=out_file_path,
+            target_acc=target_acc,
+        )
+    else:
+        return ServerSaveData(
+            strategy=strategy,
+            client_manager=client_manager,
+            out_file_path=out_file_path,
+            target_acc=target_acc,
+        )
 
 
 def get_strategy(
@@ -305,7 +359,7 @@ def get_strategy(
     save_model_dir,
     out_file_path,
     device,
-    apply_transforms,
+    apply_transforms_test,
     size_weights,
 ):
     STRATEGY = config["server"]["strategy"]
@@ -313,7 +367,7 @@ def get_strategy(
     shape = dataset_info[dataset_name]["input_shape"]
     model = get_model(config=config, shape=shape)
     MIN_CLIENTS_FIT = config["server"]["min_fit_clients"]
-    MIN_CLIENTS_EVAL = 2
+    MIN_CLIENTS_EVAL = config["server"]["min_evaluate_clients"]
     NUM_CLIENTS = config["server"]["num_clients"]
     FRACTION_FIT = config["server"]["fraction_fit"]
     FRACTION_EVAL = config["server"]["fraction_evaluate"]
@@ -345,7 +399,11 @@ def get_strategy(
             "model": model,
             "test_data": test_data,
             "size_weights": size_weights,
-            "apply_transforms": apply_transforms,
+            "apply_transforms": apply_transforms_test,
+            "apply_transforms_test": apply_transforms_test,
+        },
+        "PowD": {
+            "candidate_client_set": config["powd_config"]["candidate_client_set"],
         },
     }
 
@@ -361,7 +419,7 @@ def get_strategy(
             save_model_dir=save_model_dir,
             metrics_file=out_file_path,
             device=device,
-            apply_transforms=apply_transforms,
+            apply_transforms_test=apply_transforms_test,
         ),
         evaluate_metrics_aggregation_fn=weighted_average,
         on_fit_config_fn=get_fit_config_fn(config_sim=config),
@@ -433,6 +491,16 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="./config.yaml",
         help="path to the config.yaml file.",
+    )
+    parser.add_argument("--strategy", type=str, help="FL Strategy/algorithm")
+    parser.add_argument("--seed", type=int, help="Seed for randomness")
+    parser.add_argument(
+        "--noise", type=float, default=None, help="add dp noise to data or not"
+    )
+    parser.add_argument(
+        "--dirichlet_alpha",
+        type=float,
+        default=None,
     )
 
     args = parser.parse_args()

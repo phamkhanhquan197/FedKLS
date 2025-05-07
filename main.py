@@ -1,34 +1,51 @@
-from mak.utils.helper import get_config, set_seed, parse_args
-args = parse_args()
-config_sim = get_config(args.config) 
-set_seed(seed=config_sim['common']['seed'])
-
 import flwr as fl
 from logging import INFO
 from flwr.common.logger import log
 from datasets.utils.logging import disable_progress_bar
 import os
 from mak.utils.helper import get_device_and_resources
-from mak.utils.helper import gen_dir_outfile_server, get_model, get_strategy,save_simulation_history,get_dataset, get_size_weights
-from mak.utils.pytorch_transformations import get_transformations
+from mak.utils.helper import gen_dir_outfile_server, get_model, get_strategy,get_server, save_simulation_history,get_dataset, get_size_weights
+from mak.utils.pytorch_transformations import TransformationPipeline, TextTransformationPipeline
 from mak.clients import get_client_fn
-from mak.custom_server import ServerSaveData
 from mak.utils.dataset_info import dataset_info
+from mak.utils.helper import get_config, set_seed, parse_args
 
 
-def main(config_sim):
+def main():
+    # Parse arguments and configs
+    args = parse_args()
+    config_sim = get_config(args.config)
+    seed = args.seed if args.seed else config_sim.get('common', {}).get('seed', 42)
+    strategy = args.strategy if args.strategy else config_sim.get('server', {}).get('strategy', '')
+    dirichlet_alpha = args.dirichlet_alpha if args.dirichlet_alpha else config_sim.get('common', {}).get('dirichlet_alpha', '')
+    config_sim['common']['seed'] = seed
+    config_sim['server']['strategy'] = strategy
+    config_sim['common']['dirichlet_alpha'] = dirichlet_alpha
+    set_seed(seed=config_sim['common']['seed'])
+
     fds, centralized_testset = get_dataset(config_sim=config_sim)
-    
+
     if config_sim['server']['strategy'] == 'FedLaw':
         size_weights = get_size_weights(federated_dataset=fds,num_clients=config_sim['server']['num_clients']) #for fedlaw only
     else:
         size_weights = []
     
     dataset_name = fds._dataset_name
+    model_name = config_sim['common']['model']
     shape = dataset_info[dataset_name]["input_shape"]
 
     model = get_model(config_sim,shape = shape)
-    apply_transforms = get_transformations(dataset_name = dataset_name)
+
+    # Check if the dataset is a text dataset and use the appropriate transformation pipeline
+    if dataset_name ==  'SetFit/20_newsgroups' or model_name == 'distilbert-base-uncased':
+        # For text datasets, we need to use a different transformation pipeline
+        transformation_pipeline = TextTransformationPipeline(dataset_name=dataset_name, model_name=model_name)
+    else: 
+        # For image datasets, we can use the existing transformation pipeline
+        transformation_pipeline = TransformationPipeline(dataset_name=dataset_name)
+    # Get the transformations for train and test data
+    apply_transforms, apply_transforms_test = transformation_pipeline.get_transformations()
+
     device, ray_init_args, client_res = get_device_and_resources(config_sim=config_sim)
     generated_info = {"shape" : shape, "device": str(device)}
     config_sim["generated_info"] = generated_info
@@ -47,14 +64,13 @@ def main(config_sim):
     log(INFO,f" =>>>>> Dataset : {dataset_name} Partitoner : {str(fds._partitioners['train']).split('.')[-1]} Alpha : {dir_alpha}")
     log(INFO,f" =>>>>> Ray init args : {ray_init_args} Client Res : {client_res}")
 
-    strategy = get_strategy(config=config_sim,test_data=centralized_testset,save_model_dir=saved_models_path,out_file_path= out_file_path,device=device,apply_transforms=apply_transforms,size_weights=size_weights)
-    server = ServerSaveData(
-        strategy=strategy, client_manager=fl.server.client_manager.SimpleClientManager(),out_file_path=out_file_path,target_acc=config_sim['common']['target_acc'])
+    strategy = get_strategy(config=config_sim,test_data=centralized_testset,save_model_dir=saved_models_path,out_file_path= out_file_path,device=device,apply_transforms_test=apply_transforms_test,size_weights=size_weights)
+    server = get_server(strategy = strategy,client_manager=fl.server.client_manager.SimpleClientManager(),out_file_path=out_file_path,target_acc=config_sim['common']['target_acc'])
     
     log(INFO,f" =>>>>> Using Strategy : {strategy.__class__} Server : {server.__class__}")
     
     hist = fl.simulation.start_simulation(
-        client_fn=get_client_fn(config_sim = config_sim, model=model,dataset=fds,device=device,apply_transforms=apply_transforms),
+        client_fn=get_client_fn(config_sim = config_sim, model=model,dataset=fds,device=device,apply_transforms=apply_transforms, save_dir=saved_models_path),
         num_clients=config_sim['server']['num_clients'],
         client_resources=client_res,
         config=fl.server.ServerConfig(num_rounds=config_sim['server']['num_rounds']),
@@ -70,4 +86,4 @@ def main(config_sim):
     save_simulation_history(hist=hist,path = simu_data_file_path)
 
 if __name__ == "__main__":
-    main(config_sim=config_sim)
+    main()

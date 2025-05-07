@@ -1,6 +1,7 @@
 from .cnn import (
     MNISTCNN,
     CifarNet,
+    ConvNet,
     FedAVGCNN,
     FMCNNModel,
     KerasExpCNN,
