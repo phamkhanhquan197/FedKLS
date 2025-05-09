@@ -2,12 +2,11 @@ import os
 
 import flwr as fl
 from torch.utils.data import DataLoader
-from collections import defaultdict 
 import torch
 from mak.utils.general import set_params, test
 from mak.utils.helper import get_optimizer
 from mak.utils.dataset_info import dataset_info
-
+from collections import OrderedDict
 class BaseClient(fl.client.NumPyClient):
     """flwr base client implementaion"""
 
@@ -39,10 +38,22 @@ class BaseClient(fl.client.NumPyClient):
         return " Flwr base client"
 
     def get_parameters(self, config):
+        if self.config_sim["lora"]["enabled"]:
+            return [val.cpu().numpy() for _, val in self.model.state_dict().items() if "lora" in _]
         return [val.cpu().numpy() for _, val in self.model.state_dict().items()]
 
     def set_parameters(self, parameters):
-        set_params(self.model, parameters)
+        if self.config_sim["lora"]["enabled"]:
+            # Load only LoRA parameters
+            lora_params = {k: v for k, v in zip(self.model.state_dict().keys(), parameters) 
+                        if "lora" in k}
+            self.model.load_state_dict(lora_params, strict=False)
+        else:
+            # Original full parameter loading
+            state_dict = OrderedDict({k: torch.tensor(v) for k, v in zip(self.model.state_dict().keys(), parameters)})
+            self.model.load_state_dict(state_dict, strict=False)
+        # else:
+        #     set_params(self.model, parameters)
 
     def count_class_distribution(self, dataset):
         """Count the class distribution in the dataset."""

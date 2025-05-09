@@ -4,7 +4,7 @@ from flwr.common.logger import log
 from datasets.utils.logging import disable_progress_bar
 import os
 from mak.utils.helper import get_device_and_resources
-from mak.utils.helper import gen_dir_outfile_server, get_model, get_strategy,get_server, save_simulation_history,get_dataset, get_size_weights
+from mak.utils.helper import gen_dir_outfile_server, get_model, get_strategy, get_server, save_simulation_history,get_dataset, get_size_weights
 from mak.utils.pytorch_transformations import TransformationPipeline, TextTransformationPipeline
 from mak.clients import get_client_fn
 from mak.utils.dataset_info import dataset_info

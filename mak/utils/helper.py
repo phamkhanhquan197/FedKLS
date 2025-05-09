@@ -30,6 +30,7 @@ from mak.strategies.fednova_strategy import FedNovaStrategy
 from mak.strategies.scaffold_strategy import ScaffoldStrategy
 from mak.utils.dataset_info import dataset_info
 from mak.utils.general import set_params, test, weighted_average
+from peft import LoraConfig, get_peft_model
 
 
 def get_device_and_resources(config_sim):
@@ -71,7 +72,7 @@ def get_device_and_resources(config_sim):
 def gen_dir_outfile_server(config):
     # generates the basic directory structure for out data and the header for file
     today = date.today()
-    BASE_DIR = "out"
+    BASE_DIR = "output"
     if not os.path.exists(BASE_DIR):
         os.mkdir(BASE_DIR)
 
@@ -138,7 +139,7 @@ def gen_dir_outfile_server(config):
     if not os.path.exists(out_file_path):
         with open(out_file_path, "w", encoding="UTF8") as f:
             # create the csv writer
-            header = ["round", "global_accuracy", "global_loss", "processing_time"]
+            header = ["round", "global_accuracy", "global_f1_score", "global_loss", "local_accuracy", "local_f1", "local_loss", "processing_time", "upload_gb", "download_gb"]
             writer = csv.writer(f)
             writer.writerow(header)
             f.close()
@@ -192,15 +193,41 @@ def get_model(config, shape):
     # check if model is from huggingface
     if model_name in ["distilbert-base-uncased", "albert-base-v2"]:  # Add more as needed
         from transformers import AutoModelForSequenceClassification
-        return AutoModelForSequenceClassification.from_pretrained(
+        base_model = AutoModelForSequenceClassification.from_pretrained(
             model_name, num_labels=num_classes
         )
+        # Print layer names to verify
+        # print([n for n, _ in base_model.named_parameters()])
 
-    # get model
+
+        # Add LoRA if enabled
+        if config["lora"]["enabled"]:
+            lora_config = LoraConfig(
+                r=config["lora"]["rank"],
+                lora_alpha=config["lora"]["alpha"],
+                target_modules=config["lora"]["target_modules"],
+                lora_dropout=config["lora"]["dropout"],
+                bias="none",
+                modules_to_save=["classifier"]  # Keep final layer trainable
+            )
+            return get_peft_model(base_model, lora_config)
+        # Return the base model without LoRA
+        return base_model
+
+    # check custom models 
     model = getattr(__import__("mak.models", fromlist=[model_name]), model_name)(
         num_classes=num_classes, input_shape=shape
     )
-
+    #For CNN models
+    if config["lora"]["enabled"]:
+        lora_config = LoraConfig(
+            r=config["lora"]["rank"],
+            lora_alpha=config["lora"]["alpha"],
+            lora_dropout=config["lora"]["dropout"],
+            bias="none",
+        )
+        return get_pert_model(model, lora_config)
+    # Return the base model without LoRA
     return model
 
 

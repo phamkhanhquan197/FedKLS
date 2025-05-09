@@ -38,6 +38,7 @@ from flwr.server.client_manager import ClientManager
 from flwr.server.client_proxy import ClientProxy
 from flwr.server.history import History
 from flwr.server.strategy import FedAvg, Strategy
+from mak.utils.communication_tracker import CommunicationTracker
 
 FitResultsAndFailures = Tuple[
     List[Tuple[ClientProxy, FitRes]],
@@ -72,6 +73,7 @@ class ServerSaveData:
         self.max_workers: Optional[int] = None
         self.out_file_path = out_file_path
         self.target_acc = target_acc
+        self.comm_tracker = CommunicationTracker()
         st = f"Using Custom Save Data Server with strategy : {self.strategy.__class__}"
         log(INFO, st)
 
@@ -155,33 +157,55 @@ class ServerSaveData:
                         server_round=current_round, metrics=evaluate_metrics_fed
                     )
             # Conclude round
-            loss = res_cen[0] if res_cen is not None else None
-            acc = res_cen[1] if res_cen is not None else None
-            acc = acc["accuracy"] if acc is not None else None
+            # Local results
+            local_loss = res_fed[0] if res_fed is not None else None
+            local_metric = res_fed[1] if res_fed is not None else None
+            local_accuracy = local_metric["accuracy"] if local_metric is not None else None
+            local_f1 = local_metric["f1_score"] if local_metric is not None else None
+            # Global results
+            global_loss = res_cen[0] if res_cen is not None else None
+            global_metric = res_cen[1] if res_cen is not None else None
+            global_accuracy = global_metric["accuracy"] if global_metric is not None else None
+            global_f1 = global_metric["f1_score"] if global_metric is not None else None
             # log(INFO, f"Accuracy: {acc}")
             if self.out_file_path is not None:
-                field_names = ["round", "accuracy", "loss", "time"]
+                field_names = ["round", "global_accuracy", "global_f1_score", "global_loss", "local_accuracy", "local_f1", "local_loss", "processing_time", "upload_gb", "download_gb"]
                 dict = {
                     "round": current_round,
-                    "accuracy": acc,
-                    "loss": loss,
-                    "time": timeit.default_timer() - curr_round_start_time,
+                    "global_accuracy": global_accuracy,
+                    "global_f1_score": global_f1,
+                    "global_loss": global_loss,
+                    "local_accuracy": local_accuracy,
+                    "local_f1": local_f1,
+                    "local_loss": local_loss,
+                    "processing_time": timeit.default_timer() - curr_round_start_time,
+                    "upload_gb": self.comm_tracker.per_round[current_round]["upload"],
+                    "download_gb": self.comm_tracker.per_round[current_round]["download"],
                 }
                 with open(self.out_file_path, "a") as f:
                     dictwriter_object = csv.DictWriter(f, fieldnames=field_names)
                     dictwriter_object.writerow(dict)
                     f.close()
-            if acc >= float(self.target_acc):
+            if global_accuracy >= float(self.target_acc):
                 log(
                     INFO,
                     f"Reached target accuracy so stopping further rounds: {self.target_acc}",
                 )
                 break
 
-        # Bookkeeping
+        # Total communication costs
+        total_cost = self.comm_tracker.get_total_cost()
+        log(INFO, "Total Communication Costs:")
+        log(INFO, f"Upload: {total_cost['total_upload_gb']:.4f} GB = {total_cost['total_upload_gb'] / 1024:.4f} TB")
+        log(INFO, f"Download: {total_cost['total_download_gb']:.4f} GB = {total_cost['total_download_gb'] / 1024:.4f} TB")
+        log(INFO, f"Total: {total_cost['total_communication_gb']:.4f} GB = {total_cost['total_communication_gb'] / 1024:.4f} TB")
+
+        # Total time
         end_time = timeit.default_timer()
         elapsed = end_time - start_time
-        log(INFO, "FL finished in %s", elapsed)
+        log(INFO, "FL finished in %s = %s minutes = %s hours", elapsed, elapsed / 60, elapsed / 3600)
+
+
         return history
 
     def evaluate_round(
@@ -189,9 +213,7 @@ class ServerSaveData:
         server_round: int,
         timeout: Optional[float],
         curr_round_start_time: float,
-    ) -> Optional[
-        Tuple[Optional[float], Dict[str, Scalar], EvaluateResultsAndFailures]
-    ]:
+    ) -> Optional[Tuple[Optional[float], Dict[str, Scalar], EvaluateResultsAndFailures]]:
         """Validate current global model on a number of clients."""
         # Get clients and their respective instructions from strategy
         client_instructions = self.strategy.configure_evaluate(
@@ -260,7 +282,17 @@ class ServerSaveData:
             parameters=self.parameters,
             client_manager=self._client_manager,
         )
+
+        #Track download size (server -> clients)
+        param_size = sum(len(p) for p in self.parameters.tensors) / 1e9 # Convert to GB
+        num_clients = len(client_instructions)
+        self.comm_tracker.log_round(
+            server_round=server_round,
+            upload=0,
+            download=param_size * num_clients)
+
         log(INFO, "======================================Round %s======================================", server_round)
+        log(INFO, f"Model size: {param_size:.4f} GB")
         if not client_instructions:
             log(INFO, "Start trainining: no clients selected, cancel")
             return None
@@ -277,9 +309,27 @@ class ServerSaveData:
             max_workers=self.max_workers,
             timeout=timeout,
         )
+
+        # Track upload size (clients -> server)
+        upload_size = 0.0
+        for client, fit_res in results:
+            client_upload = sum(len(t) for t in fit_res.parameters.tensors) / 1e9
+            self.comm_tracker.per_client[client.cid]["upload"] += client_upload
+            upload_size += client_upload
+
+        #Update tracker
+        self.comm_tracker.per_round[server_round]["upload"] = upload_size
+        self.comm_tracker.total_upload += upload_size
+        self.comm_tracker.per_round[server_round]["download"] = param_size * num_clients
+        
+
+        log(INFO, f"Round {server_round} upload size: {upload_size:.4f} GB, " 
+            f"download size: {param_size * num_clients:.4f} GB, "
+            f"total: {upload_size + param_size * num_clients:.4f} GB")
+
         log(
             DEBUG,
-            "Server evaluation with %s results and %s failures",
+            "Server evaluation with %s results and %s failurefs",
             len(results),
             len(failures),
         )
@@ -478,79 +528,8 @@ def evaluate_clients(
                 # If the entire batch processing fails
                 failures.append(e)
     
-    print(f"Results: {results}")
     return results, failures
 
-# def evaluate_clients(
-#     client_instructions: List[Tuple[ClientProxy, EvaluateIns]],
-#     max_workers: Optional[int],
-#     timeout: Optional[float],
-# ) -> EvaluateResultsAndFailures:
-#     """Evaluate parameters concurrently on all selected clients."""
-#     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-#         submitted_fs = {
-#             executor.submit(evaluate_client, client_proxy, ins, timeout)
-#             for client_proxy, ins in client_instructions
-#         }
-#         finished_fs, _ = concurrent.futures.wait(
-#             fs=submitted_fs,
-#             timeout=None,  # Handled in the respective communication stack
-#         )
-
-#     # Gather results
-#     results: List[Tuple[ClientProxy, EvaluateRes]] = []
-#     failures: List[Union[Tuple[ClientProxy, EvaluateRes], BaseException]] = []
-#     for future in finished_fs:
-#         _handle_finished_future_after_evaluate(
-#             future=future, results=results, failures=failures
-#         )
-#     return results, failures
-
-# def evaluate_clients(
-#     client_instructions: List[Tuple[ClientProxy, EvaluateIns]],
-#     max_workers: Optional[int],
-#     timeout: Optional[float],
-#     num_batches: int = 2  # New dynamic batch parameter
-# ) -> EvaluateResultsAndFailures:
-#     """Evaluate clients in dynamic batches with controlled concurrency."""
-#     def process_batch(batch: List[Tuple[ClientProxy, EvaluateIns]]) -> List[Tuple[ClientProxy, EvaluateRes]]:
-#         """Process a batch of clients sequentially"""
-#         batch_results = []
-#         for client_proxy, ins in batch:
-#             future = evaluate_client(client_proxy, ins, timeout)
-#             result, _ = future.result()  # Get result from Future
-#             batch_results.append((client_proxy, result))
-#         return batch_results
-
-#     # Dynamically calculate batch size
-#     batch_size = max(1, len(client_instructions) // num_batches)
-#     batches = [
-#         client_instructions[i:i + batch_size]
-#         for i in range(0, len(client_instructions), batch_size)
-#     ]
-
-#     # Ensure we don't create more batches than specified
-#     actual_batches = batches[:num_batches]
-#     if len(batches) > num_batches:
-#         actual_batches[-1].extend(batches[num_batches:])
-
-#     with concurrent.futures.ThreadPoolExecutor(max_workers=num_batches) as executor:
-#         submitted_fs = {
-#             executor.submit(process_batch, batch)
-#             for batch in actual_batches
-#         }
-#         finished_fs, _ = concurrent.futures.wait(submitted_fs)
-
-#     # Combine results from all batches
-#     results: List[Tuple[ClientProxy, EvaluateRes]] = []
-#     failures: List[BaseException] = []
-#     for future in finished_fs:
-#         try:
-#             results.extend(future.result())
-#         except Exception as e:
-#             failures.append(e)
-#     print(f"Results: {results}")
-#     return results, failures
 
 
 def evaluate_client(

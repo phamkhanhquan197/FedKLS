@@ -4,7 +4,7 @@
 common:
   data_type : dirichlet_niid # data_type = data distribution one among ['iid','dirichlet_niid']
   dataset : SetFit/20_newsgroups # data_set = data set used  one among ['SetFit/20_newsgroups', 'cifar10', 'cifar100', 'mnist', 'fashion_mnist', 'sasha/dog-food', 'zh-plus/tiny-imagenet', 'Mike0307/MNIST-M', 'flwrlabs/usps']
-  dirichlet_alpha : 0.1 #dirichlet concentration parameter (only used if data_type is dirchlet-niid)
+  dirichlet_alpha : 1.0 #dirichlet concentration parameter (only used if data_type is dirchlet-niid)
   target_acc : 0.95
   model : distilbert-base-uncased # one among [distilbert-base-uncased, Net, CifarNet, SimpleCNN, KerasExpCNN, MNISTCNN, SimpleDNN, FMCNNModel,FedAVGCNN,Resnet18, Resnet34,ResNet18Pretrained, ResNet34Pretrained,ResNet18Small, ResNet20Small,MobileNetV2,EfficientNetB0,LSTMModel]
   optimizer : sgd # one among [sgd,adam]
@@ -13,8 +13,9 @@ common:
   multi_node : False
   save_log : True
 
+
 server:
-  num_rounds : 500
+  num_rounds : 1000
   address : 127.0.0.1
   fraction_fit : 0.3 # fraction of clients to be selected for training
   min_fit_clients: 3 # minimum number of clients to be selected for training
@@ -31,10 +32,17 @@ client:
   lr: 0.01 #  [0.0001,0.001,0.005,0.01,0.1,0.2]
   save_train_res : True
   total_cpus : 36 # no. of CPU cores that are assigned for all simulation
-  total_gpus : 1 # no. of GPU's assigned for whole simulation
+  total_gpus : 12 # no. of GPU's assigned for whole simulation
   gpu : True  # True or False, Use GPU for training or not.
   num_cpus : 2  # no. of CPU cores that are assigned for each actor
   num_gpus : 0.05 #  no. of GPU that are assigned for each actor (it can be fraction value as well)
+
+lora:
+  enabled: False
+  rank: 8
+  alpha: 16
+  dropout: 0.1
+  target_modules: ["q_lin", "v_lin"]  # For DistilBERT
 
 fedlaw_config:
   server_funct : 'exp' #['exp' or 'quad'] #currently exp only is implemented
