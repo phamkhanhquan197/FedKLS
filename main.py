@@ -8,7 +8,7 @@ from mak.utils.helper import gen_dir_outfile_server, get_model, get_strategy, ge
 from mak.utils.pytorch_transformations import TransformationPipeline, TextTransformationPipeline
 from mak.clients import get_client_fn
 from mak.utils.dataset_info import dataset_info
-from mak.utils.helper import get_config, set_seed, parse_args
+from mak.utils.helper import get_config, set_seed, parse_args, apply_svd_to_model, apply_global_lora_freezing_policy
 
 
 def main():
@@ -34,7 +34,6 @@ def main():
     model_name = config_sim['common']['model']
     shape = dataset_info[dataset_name]["input_shape"]
 
-    model = get_model(config_sim,shape = shape)
 
     # Check if the dataset is a text dataset and use the appropriate transformation pipeline
     if dataset_name ==  'SetFit/20_newsgroups' or model_name == 'distilbert-base-uncased':
@@ -47,12 +46,33 @@ def main():
     apply_transforms, apply_transforms_test = transformation_pipeline.get_transformations()
 
     device, ray_init_args, client_res = get_device_and_resources(config_sim=config_sim)
-    generated_info = {"shape" : shape, "device": str(device)}
-    config_sim["generated_info"] = generated_info
     out_file_path, saved_models_path = gen_dir_outfile_server(config=config_sim)
+    
     if config_sim["common"]["save_log"]:
         fl.common.logger.configure(identifier="FLNCLAB", filename=os.path.join(saved_models_path,'log.txt'))
-        
+
+    #Base model
+    model = get_model(config_sim,shape = shape)
+    log(INFO, f"Base model structure: {model}")
+    for name, tensor in model.state_dict().items():
+        log(INFO, f"{name}: shape {tuple(tensor.shape)}")  
+    log(INFO, f"=>>>>>>>>>>>>>>>>>Number of layers: {len(model.state_dict())}")
+
+    log(INFO,"*"*75)
+    # Apply SVD adaptation to specified linear layers
+    model = apply_svd_to_model(model=model, config=config_sim)
+    log(INFO, f"Model after SVD : {model}")
+    for name, tensor in model.state_dict().items():
+        log(INFO, f"{name}: shape {tuple(tensor.shape)}")  
+    log(INFO, f"=>>>>>>>>>>>>>>>>>Number of layers: {len(model.state_dict())}")
+
+    # model = apply_global_lora_freezing_policy(
+    #     model,
+    #     svd_adapter_class_name="SVDAdapter", # Make sure this matches your class name
+    #     train_final_classifier=True # Set to True to train the final classifier
+    # )
+
+
     log(INFO,f" =>>>>> Dataset : {dataset_name} Shape : {shape}") 
 
     try:
@@ -64,13 +84,13 @@ def main():
     log(INFO,f" =>>>>> Dataset : {dataset_name} Partitoner : {str(fds._partitioners['train']).split('.')[-1]} Alpha : {dir_alpha}")
     log(INFO,f" =>>>>> Ray init args : {ray_init_args} Client Res : {client_res}")
 
-    strategy = get_strategy(config=config_sim,test_data=centralized_testset,save_model_dir=saved_models_path,out_file_path= out_file_path,device=device,apply_transforms_test=apply_transforms_test,size_weights=size_weights)
-    server = get_server(strategy = strategy,client_manager=fl.server.client_manager.SimpleClientManager(),out_file_path=out_file_path,target_acc=config_sim['common']['target_acc'])
+    strategy = get_strategy(config=config_sim,test_data=centralized_testset,save_model_dir=saved_models_path,out_file_path= out_file_path,device=device,apply_transforms_test=apply_transforms_test,size_weights=size_weights, model=model)
+    server = get_server(strategy = strategy,client_manager=fl.server.client_manager.SimpleClientManager(),out_file_path=out_file_path,target_acc=config_sim['common']['target_acc'], lora=config_sim['lora']['enabled'])
     
     log(INFO,f" =>>>>> Using Strategy : {strategy.__class__} Server : {server.__class__}")
     
     hist = fl.simulation.start_simulation(
-        client_fn=get_client_fn(config_sim = config_sim, model=model,dataset=fds,device=device,apply_transforms=apply_transforms, save_dir=saved_models_path),
+        client_fn=get_client_fn(config_sim = config_sim, model=model, dataset=fds,device=device,apply_transforms=apply_transforms, save_dir=saved_models_path),
         num_clients=config_sim['server']['num_clients'],
         client_resources=client_res,
         config=fl.server.ServerConfig(num_rounds=config_sim['server']['num_rounds']),

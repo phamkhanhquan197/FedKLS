@@ -6,7 +6,10 @@ import torch
 from mak.utils.general import set_params, test
 from mak.utils.helper import get_optimizer
 from mak.utils.dataset_info import dataset_info
+from mak.models.svd_model import SVDAdapter
+from torch import nn
 from collections import OrderedDict
+
 class BaseClient(fl.client.NumPyClient):
     """flwr base client implementaion"""
 
@@ -34,26 +37,33 @@ class BaseClient(fl.client.NumPyClient):
         self.feature_key = dataset_info[self.dataset_name]["feature_key"]
         self.output_column = dataset_info[self.dataset_name]["output_column"]
 
+        
     def __repr__(self) -> str:
         return " Flwr base client"
 
     def get_parameters(self, config):
-        if self.config_sim["lora"]["enabled"]:
-            return [val.cpu().numpy() for _, val in self.model.state_dict().items() if "lora" in _]
-        return [val.cpu().numpy() for _, val in self.model.state_dict().items()]
+        params_to_send = {name: tensor for name, tensor in self.model.state_dict().items() if "lin" in name}
+        
+        # Print parameter names and shapes
+        # print("\n=== Parameters Sent to Server ===")
+        # for name, tensor in params_to_send.items():
+        #     print(f"{name}: {tuple(tensor.shape)}")
+        # print("=================================\n")
+
+        # Convert to numpy arrays (preserving order)
+        return [tensor.cpu().numpy() for tensor in params_to_send.values()]
+
+        # params_to_send = []
+        # for p in self.model.parameters():
+        #     if p.requires_grad:
+        #         params_to_send.append(p.detach().cpu().numpy()) # Apply .detach() here
+
+        # return params_to_send
+        # Send full parameter to server
+        # return [val.cpu().numpy() for _, val in self.model.state_dict().items()]
 
     def set_parameters(self, parameters):
-        if self.config_sim["lora"]["enabled"]:
-            # Load only LoRA parameters
-            lora_params = {k: v for k, v in zip(self.model.state_dict().keys(), parameters) 
-                        if "lora" in k}
-            self.model.load_state_dict(lora_params, strict=False)
-        else:
-            # Original full parameter loading
-            state_dict = OrderedDict({k: torch.tensor(v) for k, v in zip(self.model.state_dict().keys(), parameters)})
-            self.model.load_state_dict(state_dict, strict=False)
-        # else:
-        #     set_params(self.model, parameters)
+        set_params(self.model, parameters)
 
     def count_class_distribution(self, dataset):
         """Count the class distribution in the dataset."""
@@ -94,9 +104,9 @@ class BaseClient(fl.client.NumPyClient):
             device=self.device,
             config=config,
         )
-        # print(f"Client {self.client_id} class distribution: {self._class_distribution}")
-        return self.get_parameters({}), len(trainloader.dataset), {"client_id": self.client_id, "class_distribution": class_counts}
+        # print(self.evaluate(self.get_parameters({}), config))
 
+        return self.get_parameters({}), len(trainloader.dataset), {"client_id": self.client_id, "class_distribution": class_counts}
 
 
     def evaluate(self, parameters, config):

@@ -30,8 +30,7 @@ from mak.strategies.fednova_strategy import FedNovaStrategy
 from mak.strategies.scaffold_strategy import ScaffoldStrategy
 from mak.utils.dataset_info import dataset_info
 from mak.utils.general import set_params, test, weighted_average
-from peft import LoraConfig, get_peft_model
-
+from mak.models.svd_model import SVDAdapter
 
 def get_device_and_resources(config_sim):
     # Check if GPU is available
@@ -183,6 +182,173 @@ def get_dataset(config_sim):
         centralized_testset = fds.load_split(test_set)
         return fds, centralized_testset
 
+def extract_linear_layers(model):
+    """Return a dict of {layer_name: layer_module} for all linear layers in the model.
+    Optionally skips layers specified in layers_to_skip.
+    """
+    linear_layers = {}
+
+    for name, module in model.named_modules():
+        # Check if the module is a Linear layer
+        if isinstance(module, torch.nn.Linear):
+            if name in ["pre_classifier","classifier"]: # Check if any part of the layer_to_skip is in the current layer's name
+                continue
+            linear_layers[name] = module
+
+    return linear_layers
+
+def apply_svd_to_model(model, config):
+    """
+    Apply SVD to the specified linear layers of the model, replacing them with SVDAdapter.
+    The SVDAdapter class itself ensures W_res is frozen (as a buffer).
+    Args:
+        model (nn.Module): The model to modify.
+        config (dict): Configuration dictionary, must contain config["lora"]["rank"],
+                       config["lora"]["alpha"], and config["lora"]["method"].
+        layers_to_skip_svd (list, optional): List of string name parts of layers
+                                             to skip during SVD adaptation.
+                                             E.g., ["classifier", "pre_classifier"].
+    Returns:
+        nn.Module: The modified model.
+    """    
+    linear_layers = extract_linear_layers(model)
+    log(INFO, f"Found {len(linear_layers)} linear layers to adapt with SVD.")
+
+    for name, layer in linear_layers.items():
+        log(INFO, f"  Adapting layer: {name}")
+        # Get the weight matrix of the linear layer
+        weight_matrix = layer.weight.data
+        # Get the original bias
+        original_bias = layer.bias.data
+
+        # Perform SVD
+        U, S, Vt = torch.linalg.svd(weight_matrix, full_matrices=False)
+        rank = config["lora"]["rank"]
+        alpha = config["lora"]["alpha"]
+        method = config["lora"]["method"]
+
+        max_possible_rank = S.size(0)
+        if rank > max_possible_rank:
+            log(INFO,f"Warning: Requested rank {rank} for layer {name} > max possible rank {max_possible_rank}.")
+            rank = max_possible_rank
+
+        #Select components based on method
+        if method == 'pissa':
+            #Principal component as adapter (PiSSA)
+            U_select = U[:, :rank]
+            S_select = S[:rank]
+            Vt_select = Vt[:rank, :]
+            if rank < S.size(0):
+                W_res = U[:, rank:] @ torch.diag(S[rank:]) @ Vt[rank:, :]
+            else: 
+                W_res = torch.zeros_like(weight_matrix)       
+
+        elif method == 'milora':
+            #Minor component as adapter (MiLoRA)
+            U_select = U[:, -rank:]
+            S_select = S[-rank:]
+            Vt_select = Vt[-rank:, :]
+            if rank < S.size(0):
+                W_res = U[:, :-rank] @ torch.diag(S[:-rank]) @ Vt[:-rank, :]
+            else: 
+                W_res = torch.zeros_like(weight_matrix)
+
+        # Initialize the adapter matrices with SVD components
+        A = U_select @ torch.diag(torch.sqrt(S_select))
+        B = torch.diag(torch.sqrt(S_select)) @ Vt_select
+
+        # 1. Create the original layer with the SVDApapter
+        new_layer = SVDAdapter(W_res=W_res, A=A, B=B, alpha=alpha, rank=rank, original_bias=original_bias)
+        
+        # 2. Split layer name into parent and child components
+        # Example: "transformer.layer.0.attention.q_lin" becomes:
+        # parent_name = "transformer.layer.0.attention"
+        # child_name = "q_lin". 
+
+        # 3. Get the parent module containing the original layer
+        parent_name, child_name = name.rsplit(".", 1)
+        parent = model.get_submodule(parent_name)
+
+        # 4. Replace the original layer with the new layer
+        setattr(parent, child_name, new_layer)  
+    
+    return model
+
+def apply_global_lora_freezing_policy(
+    model, 
+    svd_adapter_class_name: str = "SVDAdapter", 
+    train_final_classifier: bool = True
+):
+    """
+    Applies a global freezing policy for LoRA-style fine-tuning.
+    It freezes all parameters by default, then unfreezes:
+    1. 'A', 'B', and 'bias' nn.Parameters within modules of type svd_adapter_class_name.
+    2. All parameters of the module named 'classifier' if train_final_classifier is True.
+
+    Args:
+        model (nn.Module): The model to apply the policy to.
+        svd_adapter_class_name (str): The string name of your SVD adapter class.
+        train_final_classifier (bool): Whether to make the final classifier head trainable.
+
+    Returns:
+        nn.Module: The model with updated requires_grad flags.
+    """
+    print(f"\nApplying global freezing policy (Adapter class: '{svd_adapter_class_name}', Train classifier: {train_final_classifier})...")
+    
+    num_total_params = 0
+    num_trainable_params = 0
+    trainable_param_names = []
+
+    for name, param in model.named_parameters():
+        num_total_params += param.numel()
+        param.requires_grad = False  # Freeze all parameters by default
+
+        # Check if the parameter belongs to an SVDAdapter module
+        module_path_parts = name.split('.')
+        current_param_short_name = module_path_parts[-1] # e.g., 'A', 'B', 'bias', 'weight'
+        
+        is_svd_adapter_trainable_part = False
+        if len(module_path_parts) > 1: # Indicates a nested parameter
+            parent_module_path = '.'.join(module_path_parts[:-1])
+            try:
+                parent_module = model.get_submodule(parent_module_path)
+                if parent_module.__class__.__name__ == svd_adapter_class_name:
+                    if current_param_short_name in ['A', 'B', 'bias']:
+                        # Ensure the attribute on the parent is this exact parameter object
+                        # and that it's an nn.Parameter (already true from named_parameters)
+                        if getattr(parent_module, current_param_short_name, None) is param:
+                            param.requires_grad = True
+                            is_svd_adapter_trainable_part = True
+            except AttributeError:
+                # This submodule path doesn't exist, should not happen if 'name' is valid from named_parameters
+                pass 
+        
+        # Optionally, make the final classifier head fully trainable
+        # This condition is separate to allow classifier to be trained even if it's not an SVDAdapter
+        if train_final_classifier and name.startswith("classifier."):
+            # If the classifier was already made trainable as an SVDAdapter part, this is fine.
+            # If the classifier is a standard nn.Linear, this will make its .weight and .bias trainable.
+            param.requires_grad = True
+        
+        if param.requires_grad:
+            if not is_svd_adapter_trainable_part and name.startswith("classifier."): # For logging distinct cases
+                 pass # Already handled by train_final_classifier logic
+            num_trainable_params += param.numel()
+            if name not in trainable_param_names: # Avoid duplicates if classifier itself was an SVD adapter
+                trainable_param_names.append(name)
+
+    print(f"  Total model parameters: {num_total_params}")
+    print(f"  Trainable parameters after policy: {num_trainable_params}")
+    if num_total_params > 0 :
+        print(f"  Percentage of trainable parameters: {(num_trainable_params / num_total_params) * 100:.4f}%")
+    if num_trainable_params == 0 and num_total_params > 0 :
+        print("  WARNING: No parameters are trainable after freezing policy! Model will not learn.")
+    # else:
+    #     print("  Trainable parameter names:")
+    #     for tp_name in sorted(trainable_param_names): # Sort for consistent logging
+    #         print(f"    - {tp_name}")
+            
+    return model
 
 def get_model(config, shape):
     model_name = config["common"]["model"]
@@ -196,38 +362,15 @@ def get_model(config, shape):
         base_model = AutoModelForSequenceClassification.from_pretrained(
             model_name, num_labels=num_classes
         )
-        # Print layer names to verify
-        # print([n for n, _ in base_model.named_parameters()])
 
 
-        # Add LoRA if enabled
-        if config["lora"]["enabled"]:
-            lora_config = LoraConfig(
-                r=config["lora"]["rank"],
-                lora_alpha=config["lora"]["alpha"],
-                target_modules=config["lora"]["target_modules"],
-                lora_dropout=config["lora"]["dropout"],
-                bias="none",
-                modules_to_save=["classifier"]  # Keep final layer trainable
-            )
-            return get_peft_model(base_model, lora_config)
-        # Return the base model without LoRA
         return base_model
 
     # check custom models 
     model = getattr(__import__("mak.models", fromlist=[model_name]), model_name)(
         num_classes=num_classes, input_shape=shape
     )
-    #For CNN models
-    if config["lora"]["enabled"]:
-        lora_config = LoraConfig(
-            r=config["lora"]["rank"],
-            lora_alpha=config["lora"]["alpha"],
-            lora_dropout=config["lora"]["dropout"],
-            bias="none",
-        )
-        return get_pert_model(model, lora_config)
-    # Return the base model without LoRA
+
     return model
 
 
@@ -238,15 +381,17 @@ def get_evaluate_fn(
     save_model_dir,
     metrics_file,
     apply_transforms_test,
+    model,
 ):
     """Return an evaluation function for centralized evaluation."""
     dataset_name = config_sim["common"]["dataset"]
-    shape = dataset_info[dataset_name]["input_shape"]
+    # shape = dataset_info[dataset_name]["input_shape"]
 
     def evaluate(
         server_round: int, parameters: fl.common.NDArrays, config: Dict[str, Scalar]
     ):
-        model = get_model(config=config_sim, shape=shape)
+        # model = get_model(config=config_sim, shape=shape)
+        # model = apply_svd_to_model(model=model, config=config_sim)
         set_params(model, parameters)
         model.to(device)
 
@@ -356,7 +501,7 @@ def save_simulation_history(hist: fl.server.history.History, path):
     df.to_csv(os.path.join(path), index=False)
 
 
-def get_server(strategy, client_manager, out_file_path, target_acc):
+def get_server(strategy, client_manager, out_file_path, target_acc, lora):
     if isinstance(strategy, ScaffoldStrategy):
         return ScaffoldServer(
             strategy=strategy,
@@ -377,6 +522,7 @@ def get_server(strategy, client_manager, out_file_path, target_acc):
             client_manager=client_manager,
             out_file_path=out_file_path,
             target_acc=target_acc,
+            lora=lora,
         )
 
 
@@ -388,11 +534,12 @@ def get_strategy(
     device,
     apply_transforms_test,
     size_weights,
+    model,
 ):
     STRATEGY = config["server"]["strategy"]
-    dataset_name = config["common"]["dataset"]
-    shape = dataset_info[dataset_name]["input_shape"]
-    model = get_model(config=config, shape=shape)
+    # dataset_name = config["common"]["dataset"]
+    # shape = dataset_info[dataset_name]["input_shape"]
+    # model = get_model(config=config, shape=shape)
     MIN_CLIENTS_FIT = config["server"]["min_fit_clients"]
     MIN_CLIENTS_EVAL = config["server"]["min_evaluate_clients"]
     NUM_CLIENTS = config["server"]["num_clients"]
@@ -432,7 +579,7 @@ def get_strategy(
         "PowD": {
             "candidate_client_set": config["powd_config"]["candidate_client_set"],
         },
-    }
+    } 
 
     return getattr(__import__("mak.strategies", fromlist=[STRATEGY]), STRATEGY)(
         fraction_fit=FRACTION_FIT,
@@ -447,6 +594,7 @@ def get_strategy(
             metrics_file=out_file_path,
             device=device,
             apply_transforms_test=apply_transforms_test,
+            model=model,
         ),
         evaluate_metrics_aggregation_fn=weighted_average,
         on_fit_config_fn=get_fit_config_fn(config_sim=config),

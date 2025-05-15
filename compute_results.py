@@ -1,5 +1,7 @@
 import pandas as pd
 
+threshold=0.66
+
 def print_min_max_avg_table(csv_file_path):
     df = pd.read_csv(csv_file_path)
     # Select only numeric columns (excluding 'round' if you wish)
@@ -9,10 +11,9 @@ def print_min_max_avg_table(csv_file_path):
         "max": df[numeric_cols].max(),
         "avg": df[numeric_cols].mean()
     })
-    summary.index.name = ""
     print(summary.T) 
 
-def find_first_f1_threshold_round(csv_path: str, threshold: float = 0.57) -> int:
+def find_first_f1_threshold_round(csv_path: str, threshold: float = threshold) -> int:
     """Find first round where global F1-score meets/exceeds threshold."""
     try:
         df = pd.read_csv(csv_path)
@@ -27,7 +28,24 @@ def find_first_f1_threshold_round(csv_path: str, threshold: float = 0.57) -> int
     except FileNotFoundError:
         print(f"Error: CSV file not found at {csv_path}")
         return None
-
-print_min_max_avg_table('/home/quan/FedKL-SVD/FedEasy/out/2025-05-07/FedAvg/dirichlet_niid/FFT_alpha1.0/FedAvg_SetFit_20_newsgroups_dirichlet_niid_32_0.01_1_metrics.csv')
-convergence_round = find_first_f1_threshold_round('/home/quan/FedKL-SVD/FedEasy/out/2025-05-07/FedAvg/dirichlet_niid/FFT_alpha1.0/FedAvg_SetFit_20_newsgroups_dirichlet_niid_32_0.01_1_metrics.csv', threshold=0.57)
-print(f"Convergence round for F1-score >= 0.57: {convergence_round}")
+    
+def calculate_convergence_time(csv_path: str, convergence_round: int) -> float:
+    """Calculate total processing time until (and including) convergence round."""
+    try:
+        df = pd.read_csv(csv_path)
+        filtered_df = df[df['round'] <= convergence_round]
+        total_time = filtered_df['processing_time'].sum()
+        return total_time
+    except FileNotFoundError:
+        print(f"Error: CSV file not found at {csv_path}")
+        return None
+    except KeyError:
+        print("Error: 'processing_time' or 'round' column not found in CSV")
+        return None
+    
+csv_path = '/home/st_group_1/Quan/FedKL-SVD/FedEasy/output/2025-05-10/FedAvg/dirichlet_niid/FFT_alpha0.1 (1)/FedAvg_SetFit_20_newsgroups_dirichlet_niid_32_0.01_1.csv'
+print_min_max_avg_table(csv_path)
+convergence_round = find_first_f1_threshold_round(csv_path)
+print(f"Convergence round for F1-score >= {threshold}: {convergence_round}")
+convergence_time = calculate_convergence_time(csv_path, convergence_round)
+print(f"Total processing time until convergence (round {convergence_round}): {convergence_time:.4f} seconds = {convergence_time/60:.4f} minutes = {convergence_time/3600:.4f} hours")

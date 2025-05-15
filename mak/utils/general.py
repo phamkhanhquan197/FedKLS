@@ -57,12 +57,105 @@ def test(net, testloader, device: str, feature_key: str) -> Tuple[float, float, 
         f1 = f1_score(all_labels, all_preds, average='weighted')
         return loss, accuracy, f1
 
+# def set_params(model: torch.nn.Module, params_to_set: List[fl.common.NDArrays]):
+#     """
+#     Sets model parameters.
+#     If 'params_to_set' matches the count of trainable parameters (requires_grad=True),
+#     it updates only those.
+#     Otherwise, if 'params_to_set' matches the count of all parameters, it attempts a full update.
+#     Ends by calling model.load_state_dict() with the updated state.
+#     """
+    
+#     current_model_state = model.state_dict() # Get a copy to modify
+    
+#     # Get names and references of trainable parameters in the model
+#     trainable_param_names_ordered = []
+#     for name, p in model.named_parameters():
+#         if p.requires_grad:
+#             trainable_param_names_ordered.append(name)
+
+#     if len(params_to_set) == len(trainable_param_names_ordered):
+#         # This is the LoRA/PEFT case: update only the trainable parameters
+#         # print(f"set_params: Updating {len(params_to_set)} trainable parameters.")
+#         if not trainable_param_names_ordered and params_to_set:
+#             print("set_params WARNING: Received parameters to set, but model has no trainable parameters.")
+#             # model.load_state_dict(current_model_state) # Load original state (effectively no change)
+#             return # Or raise error, as this is an inconsistent state
+
+#         updated_trainable_params = OrderedDict()
+#         for name, new_value_np in zip(trainable_param_names_ordered, params_to_set):
+#             # Ensure the tensor is on the correct device and has the correct dtype
+#             # This should ideally match the existing parameter's properties
+#             target_device = current_model_state[name].device
+#             target_dtype = current_model_state[name].dtype
+#             updated_trainable_params[name] = torch.from_numpy(new_value_np).to(target_device).to(target_dtype)
+            
+#             if current_model_state[name].shape != updated_trainable_params[name].shape:
+#                 print(f"set_params ERROR: Shape mismatch for trainable parameter '{name}'. "
+#                       f"Model: {current_model_state[name].shape}, Update: {updated_trainable_params[name].shape}.")
+#                 # This is a critical error, do not proceed with load_state_dict with this inconsistent entry
+#                 # For safety, you might want to return here or raise an exception.
+#                 # As a fallback, load the original state (no change).
+#                 # model.load_state_dict(model.state_dict()) # Re-load original to be safe
+#                 return
+
+
+#         # Update the full state dictionary with the new values for trainable parameters
+#         current_model_state.update(updated_trainable_params)
+#         # Load the modified full state dictionary.
+#         # strict=True is generally safer if you expect all keys to be present,
+#         # which they will be since we started with model.state_dict() and updated parts of it.
+#         model.load_state_dict(current_model_state, strict=True)
+
+#     elif len(params_to_set) == len(current_model_state):
+#         # Full parameter update case
+#         # print(f"set_params: Performing full update with {len(params_to_set)} parameters.")
+#         full_update_state_dict = OrderedDict()
+#         for (name, _), new_value_np in zip(current_model_state.items(), params_to_set):
+#             target_device = current_model_state[name].device
+#             target_dtype = current_model_state[name].dtype
+#             full_update_state_dict[name] = torch.from_numpy(new_value_np).to(target_device).to(target_dtype)
+
+#             if current_model_state[name].shape != full_update_state_dict[name].shape:
+#                 print(f"set_params ERROR: Shape mismatch for full update parameter '{name}'. "
+#                       f"Model: {current_model_state[name].shape}, Update: {full_update_state_dict[name].shape}.")
+#                 return
+#         model.load_state_dict(full_update_state_dict, strict=True)
+#     else:
+#         print(f"set_params ERROR: Mismatch in parameter list lengths. Cannot determine update strategy.")
+#         print(f"  Received {len(params_to_set)} parameters to set.")
+#         print(f"  Model has {len(current_model_state)} total parameters.")
+#         print(f"  Model has {len(trainable_param_names_ordered)} trainable parameters.")
+#         # Not loading anything to prevent potential corruption
+#         # model.load_state_dict(model.state_dict()) # Re-load original to be safe if needed
 
 def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays]):
+
     """Set model weights from a list of NumPy ndarrays."""
-    params_dict = zip(model.state_dict().keys(), params)
-    state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
-    model.load_state_dict(state_dict, strict=True)
+    model_state = model.state_dict()
+    if len(model_state.items()) != len(params): # Handle LoRA parameter update
+        lora_keys = [k for k in model_state.keys() 
+                    if ("lin" in k)]
+
+        # Create state dict with only LoRA parameters
+        lora_params = OrderedDict()
+        for key, array in zip(lora_keys, params):
+            lora_params[key] = torch.from_numpy(array)
+        
+        # Update model with LoRA parameters only
+        model_state.update(lora_params)
+        model.load_state_dict(model_state, strict=True)
+
+        
+    else: #Full parameter update
+        params_dict = zip(model.state_dict().keys(), params)
+        state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
+        model.load_state_dict(state_dict, strict=True)
+
+    ###########################################################################
+    # for name, tensor in model.state_dict().items():
+    #     print(f"{name}: shape {tuple(tensor.shape)}")  
+    # print(f"=>>>>>>>>>>>>>>>>>Number of layers: {len(model.state_dict())}")    
 
 
 def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:

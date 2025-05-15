@@ -39,6 +39,7 @@ from flwr.server.client_proxy import ClientProxy
 from flwr.server.history import History
 from flwr.server.strategy import FedAvg, Strategy
 from mak.utils.communication_tracker import CommunicationTracker
+from flwr.common.parameter import parameters_to_ndarrays, ndarrays_to_parameters
 
 FitResultsAndFailures = Tuple[
     List[Tuple[ClientProxy, FitRes]],
@@ -64,6 +65,7 @@ class ServerSaveData:
         strategy: Optional[Strategy] = None,
         out_file_path=None,
         target_acc=0.85,
+        lora=False,
     ) -> None:
         self._client_manager: ClientManager = client_manager
         self.parameters: Parameters = Parameters(
@@ -73,6 +75,7 @@ class ServerSaveData:
         self.max_workers: Optional[int] = None
         self.out_file_path = out_file_path
         self.target_acc = target_acc
+        self.lora = lora
         self.comm_tracker = CommunicationTracker()
         st = f"Using Custom Save Data Server with strategy : {self.strategy.__class__}"
         log(INFO, st)
@@ -227,7 +230,7 @@ class ServerSaveData:
             return None
         log(
             DEBUG,
-            "Start evaluting: strategy sampled %s clients (out of %s)",
+            "Start evaluating: strategy sampled %s clients (out of %s)",
             len(client_instructions),
             self._client_manager.num_available(),
         )
@@ -271,18 +274,16 @@ class ServerSaveData:
     def fit_round(
         self,
         server_round: int,
-        timeout: Optional[float],
-    ) -> Optional[
-        Tuple[Optional[Parameters], Dict[str, Scalar], FitResultsAndFailures]
-    ]:
+        timeout: Optional[float]) -> Optional[Tuple[Optional[Parameters], Dict[str, Scalar], FitResultsAndFailures]]:
         """Perform a single round of federated averaging."""
+
         # Get clients and their respective instructions from strategy
         client_instructions = self.strategy.configure_fit(
             server_round=server_round,
             parameters=self.parameters,
             client_manager=self._client_manager,
         )
-
+        
         #Track download size (server -> clients)
         param_size = sum(len(p) for p in self.parameters.tensors) / 1e9 # Convert to GB
         num_clients = len(client_instructions)
@@ -292,7 +293,7 @@ class ServerSaveData:
             download=param_size * num_clients)
 
         log(INFO, "======================================Round %s======================================", server_round)
-        log(INFO, f"Model size: {param_size:.4f} GB")
+        log(INFO, f"Model size: {param_size:.4f} GB = {param_size*1e3:.4f} MB")
         if not client_instructions:
             log(INFO, "Start trainining: no clients selected, cancel")
             return None
@@ -310,6 +311,24 @@ class ServerSaveData:
             timeout=timeout,
         )
 
+        # # ------------------- START: Print client weight shapes -------------------
+        # log(INFO, "--- Client Weight Shapes Received (Round %s) ---", server_round)
+        # for client_proxy, fit_res in results:
+        #     # fit_res is of type FitRes
+        #     # fit_res.parameters is of type Parameters
+        #     client_cid = client_proxy.cid # Get client ID for logging
+        #     if fit_res.parameters and fit_res.parameters.tensors:
+        #          # Convert Parameters (bytes) to a list of NumPy ndarrays
+        #         client_weights_ndarrays = parameters_to_ndarrays(fit_res.parameters)
+        #         log(INFO, f"Client {client_cid} (Num examples: {fit_res.num_examples}) sent {len(client_weights_ndarrays)} parameter layers/tensors:")
+        #         for i, layer_weights in enumerate(client_weights_ndarrays):
+        #             log(INFO, f"  Client {client_cid} - Layer {i}: shape {layer_weights.shape}, dtype {layer_weights.dtype}")
+
+        #     else:
+        #         log(INFO, f"Client {client_cid} did not return parameters or parameters.tensors was empty.")
+        # # -------------------- END: Print client weight shapes --------------------
+
+
         # Track upload size (clients -> server)
         upload_size = 0.0
         for client, fit_res in results:
@@ -323,29 +342,33 @@ class ServerSaveData:
         self.comm_tracker.per_round[server_round]["download"] = param_size * num_clients
         
 
-        log(INFO, f"Round {server_round} upload size: {upload_size:.4f} GB, " 
-            f"download size: {param_size * num_clients:.4f} GB, "
-            f"total: {upload_size + param_size * num_clients:.4f} GB")
+        log(INFO, f"Round {server_round} upload size: {upload_size:.4f} GB = {upload_size*1e3:.4f} MB, " 
+            f"download size: {param_size * num_clients:.4f} GB = {param_size * num_clients*1e3:.4f} MB, "
+            f"total: {upload_size + param_size * num_clients:.4f} GB = {(upload_size + param_size * num_clients)*1e3:.4f} MB")
 
         log(
             DEBUG,
-            "Server evaluation with %s results and %s failurefs",
+            "Server evaluation with %s results and %s failures",
             len(results),
             len(failures),
         )
     
-
         for i in range(0, len(results)):
             log(INFO, "Client %s (Total training samples: %s, Class Distribution (%s classes): %s)", results[i][1].metrics["client_id"], results[i][1].num_examples, len(results[i][1].metrics["class_distribution"]), results[i][1].metrics["class_distribution"]) 
 
-        # Aggregate training results
-        aggregated_result: Tuple[
-            Optional[Parameters],
-            Dict[str, Scalar],
-        ] = self.strategy.aggregate_fit(server_round, results, failures)
+        # Standard aggregation for non-LoRA models
+        parameters_aggregated, metrics_aggregated = self.strategy.aggregate_fit(
+            server_round, results, failures
+        )
+        ##Check how many tensor the model performs aggregating
+        # aggregated_ndarrays = parameters_to_ndarrays(parameters_aggregated)
+        # log(INFO, f"Aggregated parameters ({len(aggregated_ndarrays)} tensors):")
+        # for i, arr in enumerate(aggregated_ndarrays):
+        #     log(INFO, f"  Aggregated Tensor {i}: shape {arr.shape}")
 
-        parameters_aggregated, metrics_aggregated = aggregated_result
+
         return parameters_aggregated, metrics_aggregated, (results, failures)
+
 
     def disconnect_all_clients(self, timeout: Optional[float]) -> None:
         """Send shutdown signal to all clients."""
@@ -375,6 +398,7 @@ class ServerSaveData:
         ins = GetParametersIns(config={})
         get_parameters_res = random_client.get_parameters(ins=ins, timeout=timeout)
         log(INFO, "Received initial parameters from one random client")
+        
         return get_parameters_res.parameters
 
 
