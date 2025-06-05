@@ -1,52 +1,12 @@
 import flwr as fl
 from flwr_datasets import FederatedDataset
-
 from mak.clients.fedavg_client import FedAvgClient
 from mak.clients.fednova_client import FedNovaClient
 from mak.clients.fedprox_client import FedProxClient
 from mak.clients.scaffold_client import ScaffoldClient
-from collections import Counter
+from mak.clients.fedklsvd_client import FedKLSVDClient
 from logging import INFO
 from flwr.common.logger import log
-from mak.utils.dataset_info import dataset_info
-import math
-
-
-def compute_KL_divergence(client_distributions: dict, num_classes: int) -> dict:
-    # Step 1: Compute global/ideal IID label distribution
-    global_prob = 1/num_classes
-
-    # Step 2: Compute local distribution on each client
-    local_prob = {}
-    for client, dist in client_distributions.items():
-        total_sample = sum([s for s in dist.values()])
-        local_prob[client] = {cls: s/total_sample for cls, s in dist.items()}
-
-    # Step 3: Compute KL divergence per client
-    kl_values = {}
-    for client, dist in local_prob.items():
-        kl = 0
-        for c in range(num_classes):
-            p_ic = dist.get(c, 0) # P_i(c), 0 if class c not present
-            q_c = global_prob     # Q(c), ideal IID distribution
-
-            if p_ic > 0: # skip zero to avoid log(0)
-                kl += p_ic * math.log(p_ic/q_c)
-        kl_values[client] = kl
-
-    # Step 4: Normalize using Min-Max
-    kl_min = min(kl_values.values())
-    kl_max = max(kl_values.values())
-    # Prevent divide-by-zero in case all KLs are the same
-    if kl_max == kl_min:
-        kl_normalized = {client: 0.0 for client in kl_values}
-    else:
-        kl_normalized = {
-            client: (kl - kl_min) / (kl_max - kl_min)
-            for client, kl in kl_values.items()
-        }
-
-    return kl_normalized  
 
 def get_client_fn(
     config_sim: dict,
@@ -55,26 +15,36 @@ def get_client_fn(
     device,
     apply_transforms,
     save_dir,
+    kl_norm_dict: dict = None, #Precomputed KL divergence values from server, if available
 ):
     strategy = config_sim["server"]["strategy"].lower()
     client_class = get_client_class(strategy)
     num_clients = config_sim["server"]["num_clients"]
-    dataset_name = config_sim["common"]["dataset"]
-    num_classes = dataset_info[dataset_name]["num_classes"]
+    method = config_sim["lora"]["method"]
     
+    # Use precomputed kl_norm values if provided by server, otherwise compute them
+    if method == "fedkl_svd" and kl_norm_dict is None:
+        log(INFO, "No precomputed KL divergence values provided. Computing client distributions and kl_norm...")
+        from mak.utils.helper import compute_KL_divergence, compute_client_distributions
+        from mak.utils.dataset_info import dataset_info
 
-    # Precompute distributions once (thread-safe for Flower simulations)
-    client_distributions = {}
-    log(INFO, "=>>>>> CLASS DISTRIBUTIONS OF ALL CLIENTS <<<<<<=")
-    for cid in range(num_clients):
-        client_data = dataset.load_partition(cid)
-        labels = [item['label'] for item in client_data]
-        client_distributions[cid] = dict(sorted(Counter(labels).items()))
-        log(INFO, f"Client {cid} ({len(client_distributions[cid])} classes, {len(client_data)} samples) : {client_distributions[cid]}")
-    log(INFO, "*"*200)
-    kl_normalized_per_client  = compute_KL_divergence(client_distributions, num_classes)
-    for cid_int, kl_norm_val in kl_normalized_per_client.items():
-        log(INFO, f"Client {cid_int}: Normalized KL Divergence = {kl_norm_val:.4f}")
+        dataset_name = config_sim["common"]["dataset"]
+        num_classes = dataset_info[dataset_name]["num_classes"]
+
+        # Precompute distributions once (thread-safe for Flower simulations)
+        client_distributions = compute_client_distributions(dataset, num_clients)
+        kl_normalized_per_client = compute_KL_divergence(client_distributions, num_classes)
+        for cid, kl_norm_val in kl_normalized_per_client.items():
+            log(INFO, f"Client {cid}: Normalized KL Divergence = {kl_norm_val:.4f}")
+
+    elif method == "fedkl_svd" and kl_norm_dict is not None:
+        kl_normalized_per_client = kl_norm_dict
+        # log(INFO, "Using precomputed kl_norm values for clients from server.")
+    else:
+        # log(INFO, f"Method is {method}. Skipping KL divergence computation.")
+        pass
+
+
 
     def client_fn(cid: str) -> fl.client.Client:
         #Access precomputed client partitions
@@ -84,15 +54,20 @@ def get_client_fn(
         trainset = client_dataset_splits["train"].with_transform(apply_transforms)
         valset = client_dataset_splits["test"].with_transform(apply_transforms)
 
-        return client_class(
+        #Pass the normalized KL divergence to the client
+        kl_norm = kl_normalized_per_client[int(cid)] if method == "fedkl_svd" else 0.0
+        client = client_class(
             client_id=int(cid),
-            model=model,
+            model=model, 
             trainset=trainset,
             valset=valset,
-            config_sim=config_sim,
+            config_sim=config_sim, 
             device=device,
             save_dir=save_dir,
-        ).to_client()
+            kl_norm=kl_norm,  
+        )
+        return client.to_client()
+    
 
     return client_fn
 
@@ -104,5 +79,7 @@ def get_client_class(strategy: str):
         return ScaffoldClient
     elif strategy == "fednova":
         return FedNovaClient
+    elif strategy == "fedklsvd":
+        return FedKLSVDClient
     else:
         return FedAvgClient

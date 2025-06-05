@@ -16,7 +16,6 @@ class FocalLoss(nn.Module):
             self.gamma,
         )
 
-
 def focal_loss(input_values, gamma):
     """Computes the focal loss"""
     p = torch.exp(-input_values)

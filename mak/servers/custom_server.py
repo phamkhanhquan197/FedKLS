@@ -64,8 +64,7 @@ class ServerSaveData:
         client_manager: ClientManager,
         strategy: Optional[Strategy] = None,
         out_file_path=None,
-        target_acc=0.85,
-        lora=False,
+        target_acc=0.99,
     ) -> None:
         self._client_manager: ClientManager = client_manager
         self.parameters: Parameters = Parameters(
@@ -75,7 +74,6 @@ class ServerSaveData:
         self.max_workers: Optional[int] = None
         self.out_file_path = out_file_path
         self.target_acc = target_acc
-        self.lora = lora
         self.comm_tracker = CommunicationTracker()
         st = f"Using Custom Save Data Server with strategy : {self.strategy.__class__}"
         log(INFO, st)
@@ -149,7 +147,7 @@ class ServerSaveData:
                 )
 
             # Evaluate model on a sample of available clients
-            res_fed = self.evaluate_round(server_round=current_round, timeout=timeout, curr_round_start_time=curr_round_start_time )
+            res_fed = self.evaluate_round(server_round=current_round, timeout=timeout, curr_round_start_time=curr_round_start_time)
             if res_fed is not None:
                 loss_fed, evaluate_metrics_fed, _ = res_fed
                 if loss_fed is not None:
@@ -208,7 +206,6 @@ class ServerSaveData:
         elapsed = end_time - start_time
         log(INFO, "FL finished in %s = %s minutes = %s hours", elapsed, elapsed / 60, elapsed / 3600)
 
-
         return history
 
     def evaluate_round(
@@ -234,6 +231,8 @@ class ServerSaveData:
             len(client_instructions),
             self._client_manager.num_available(),
         )
+        import time
+        time1 = timeit.default_timer()
 
         # Collect `evaluate` results from all clients participating in this round
         results, failures = evaluate_clients(
@@ -241,8 +240,9 @@ class ServerSaveData:
             max_workers=self.max_workers,
             timeout=timeout,
             num_batches=2,  # Number of concurrent batches
-           
         )
+
+        log(INFO, "Check evaluate time on clients: %s seconds", timeit.default_timer() - time1)
         log(
             DEBUG,
             "Client evaluation with %s results and %s failures",
@@ -251,8 +251,16 @@ class ServerSaveData:
         )
 
         for i in range(len(results)):
-            log(INFO, "Client %s (Total validation samples: %s, Accuracy: %s, F1_Score: %s, Loss: %s, Class Distribution (%s classes): %s)", results[i][1].metrics["client_id"], results[i][1].num_examples,
-                results[i][1].metrics["accuracy"], results[i][1].metrics["f1_score"], results[i][1].loss, len(results[i][1].metrics["class_distribution"]), results[i][1].metrics["class_distribution"])      
+            client_id = results[i][1].metrics["client_id"]
+            val_samples = results[i][1].num_examples
+            acc = results[i][1].metrics["accuracy"]
+            f1 = results[i][1].metrics["f1_score"]
+            loss = results[i][1].loss
+            num_class =  len(results[i][1].metrics["class_distribution"])
+            class_dist = results[i][1].metrics["class_distribution"]
+
+            log(INFO, "Client %s (Total validation samples: %s, Accuracy: %s, F1_Score: %s, Loss: %s, Class Distribution (%s classes): %s)", 
+                client_id, val_samples, acc, f1, loss, num_class, class_dist)      
 
         # Aggregate the evaluation results
         aggregated_result: Tuple[
@@ -276,7 +284,6 @@ class ServerSaveData:
         server_round: int,
         timeout: Optional[float]) -> Optional[Tuple[Optional[Parameters], Dict[str, Scalar], FitResultsAndFailures]]:
         """Perform a single round of federated averaging."""
-
         # Get clients and their respective instructions from strategy
         client_instructions = self.strategy.configure_fit(
             server_round=server_round,
@@ -293,7 +300,7 @@ class ServerSaveData:
             download=param_size * num_clients)
 
         log(INFO, "======================================Round %s======================================", server_round)
-        log(INFO, f"Model size: {param_size:.4f} GB = {param_size*1e3:.4f} MB")
+        log(INFO, f"Model size: {param_size:.4f} GB = {param_size*1024:.4f} MB")
         if not client_instructions:
             log(INFO, "Start trainining: no clients selected, cancel")
             return None
@@ -342,9 +349,9 @@ class ServerSaveData:
         self.comm_tracker.per_round[server_round]["download"] = param_size * num_clients
         
 
-        log(INFO, f"Round {server_round} upload size: {upload_size:.4f} GB = {upload_size*1e3:.4f} MB, " 
-            f"download size: {param_size * num_clients:.4f} GB = {param_size * num_clients*1e3:.4f} MB, "
-            f"total: {upload_size + param_size * num_clients:.4f} GB = {(upload_size + param_size * num_clients)*1e3:.4f} MB")
+        log(INFO, f"Round {server_round} upload size: {upload_size:.4f} GB = {upload_size*1024:.4f} MB, " 
+            f"download size: {param_size * num_clients:.4f} GB = {param_size * num_clients*1024:.4f} MB, "
+            f"total: {upload_size + param_size * num_clients:.4f} GB = {(upload_size + param_size * num_clients)*1024:.4f} MB")
 
         log(
             DEBUG,
@@ -353,8 +360,14 @@ class ServerSaveData:
             len(failures),
         )
     
-        for i in range(0, len(results)):
-            log(INFO, "Client %s (Total training samples: %s, Class Distribution (%s classes): %s)", results[i][1].metrics["client_id"], results[i][1].num_examples, len(results[i][1].metrics["class_distribution"]), results[i][1].metrics["class_distribution"]) 
+        for i in range(len(results)):
+            client_id = results[i][1].metrics["client_id"]
+            train_samples = results[i][1].num_examples
+            num_class =  len(results[i][1].metrics["class_distribution"])
+            class_dist = results[i][1].metrics["class_distribution"]
+
+            log(INFO, "Client %s (Total training samples: %s, Class Distribution (%s classes): %s)", 
+                client_id, train_samples, num_class, class_dist) 
 
         # Standard aggregation for non-LoRA models
         parameters_aggregated, metrics_aggregated = self.strategy.aggregate_fit(
@@ -450,6 +463,7 @@ def fit_clients(
     timeout: Optional[float],
 ) -> FitResultsAndFailures:
     """Refine parameters concurrently on all selected clients."""
+    
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         submitted_fs = {
             executor.submit(fit_client, client_proxy, ins, timeout)

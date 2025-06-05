@@ -6,9 +6,8 @@ import torch
 from mak.utils.general import set_params, test
 from mak.utils.helper import get_optimizer
 from mak.utils.dataset_info import dataset_info
-from mak.models.svd_model import SVDAdapter
-from torch import nn
-from collections import OrderedDict
+
+
 
 class BaseClient(fl.client.NumPyClient):
     """flwr base client implementaion"""
@@ -16,7 +15,7 @@ class BaseClient(fl.client.NumPyClient):
     def __init__(
         self,
         client_id,
-        model,
+        model, 
         trainset,
         valset,
         config_sim,
@@ -37,11 +36,12 @@ class BaseClient(fl.client.NumPyClient):
         self.feature_key = dataset_info[self.dataset_name]["feature_key"]
         self.output_column = dataset_info[self.dataset_name]["output_column"]
 
-        
+
     def __repr__(self) -> str:
         return " Flwr base client"
 
     def get_parameters(self, config):
+        #Only send the A, B and bias parameters to the server with 108 layers
         params_to_send = {name: tensor for name, tensor in self.model.state_dict().items() if "lin" in name}
         
         # Print parameter names and shapes
@@ -52,6 +52,8 @@ class BaseClient(fl.client.NumPyClient):
 
         # Convert to numpy arrays (preserving order)
         return [tensor.cpu().numpy() for tensor in params_to_send.values()]
+    
+        # return [p.detach().cpu().numpy() for p in self.model.parameters() if p.requires_grad]
 
         # params_to_send = []
         # for p in self.model.parameters():
@@ -104,7 +106,6 @@ class BaseClient(fl.client.NumPyClient):
             device=self.device,
             config=config,
         )
-        # print(self.evaluate(self.get_parameters({}), config))
 
         return self.get_parameters({}), len(trainloader.dataset), {"client_id": self.client_id, "class_distribution": class_counts}
 
@@ -146,6 +147,7 @@ class BaseClient(fl.client.NumPyClient):
                 # Backpropagation    
                 loss.backward()
                 optim.step()
+
 
     def test(self, net, testloader, device: str):
         return test(net=net, testloader=testloader, device=device, feature_key=self.feature_key)

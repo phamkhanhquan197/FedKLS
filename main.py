@@ -8,8 +8,9 @@ from mak.utils.helper import gen_dir_outfile_server, get_model, get_strategy, ge
 from mak.utils.pytorch_transformations import TransformationPipeline, TextTransformationPipeline
 from mak.clients import get_client_fn
 from mak.utils.dataset_info import dataset_info
-from mak.utils.helper import get_config, set_seed, parse_args, apply_svd_to_model, apply_global_lora_freezing_policy
-
+from mak.utils.helper import get_config, set_seed, parse_args, apply_svd_to_model
+from mak.utils.helper import compute_client_distributions, compute_KL_divergence
+import copy
 
 def main():
     # Parse arguments and configs
@@ -34,7 +35,6 @@ def main():
     model_name = config_sim['common']['model']
     shape = dataset_info[dataset_name]["input_shape"]
 
-
     # Check if the dataset is a text dataset and use the appropriate transformation pipeline
     if dataset_name ==  'SetFit/20_newsgroups' or model_name == 'distilbert-base-uncased':
         # For text datasets, we need to use a different transformation pipeline
@@ -52,25 +52,83 @@ def main():
         fl.common.logger.configure(identifier="FLNCLAB", filename=os.path.join(saved_models_path,'log.txt'))
 
     #Base model
-    model = get_model(config_sim,shape = shape)
-    log(INFO, f"Base model structure: {model}")
-    for name, tensor in model.state_dict().items():
+    base_model = get_model(config_sim,shape = shape)
+    log(INFO, f"Base model structure: {base_model}")
+    for name, tensor in base_model.state_dict().items():
         log(INFO, f"{name}: shape {tuple(tensor.shape)}")  
-    log(INFO, f"=>>>>>>>>>>>>>>>>>Number of layers: {len(model.state_dict())}")
+    log(INFO, f"=>>>>>>>>>>>>>>>>>Number of layers: {len(base_model.state_dict())}")
 
+    
     log(INFO,"*"*75)
-    # Apply SVD adaptation to specified linear layers
-    model = apply_svd_to_model(model=model, config=config_sim)
-    log(INFO, f"Model after SVD : {model}")
-    for name, tensor in model.state_dict().items():
-        log(INFO, f"{name}: shape {tuple(tensor.shape)}")  
-    log(INFO, f"=>>>>>>>>>>>>>>>>>Number of layers: {len(model.state_dict())}")
+    #Prepare the server and client models based on the strategy and method
+    lora_enabled = config_sim['lora']['enabled']
+    lora_method =  config_sim['lora']['method']
+    
+    
+    #Apply SVD if LoRA is enabled
+    if lora_enabled:
+        #Decide the client model based on the LoRA method
+        if lora_method == "fedkl_svd":
+            #Compute client distributions and kl_norm values
+            client_distributions = compute_client_distributions(dataset=fds,num_clients=config_sim['server']['num_clients'])
+            kl_normalized_per_client = compute_KL_divergence(client_distributions, num_classes=dataset_info[dataset_name]["num_classes"])
+            # kl_normalized_per_client = {0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.1, 6: 0.1, 7: 0.1, 8: 0.1, 9:0.1}  # Set a default value for client 0, as it is required by the client_fn,
+            # kl_normalized_per_client = {0: 1.0, 1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0, 5: 1.0, 6: 1.0, 7: 1.0, 8: 1.0, 9:1.0} # Set a default value for client 0, as it is required by the client_fn,
+            # kl_normalized_per_client = {0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, 6: 0.0, 7: 0.0, 8: 0.0, 9:0.0} # Set a default value for client 0, as it is required by the client_fn,
+            # kl_normalized_per_client = {0:1.0, 1:1.0, 2:1.0, 3:1.0, 4:1.0, 5:0.9, 6:0.9, 7:0.9, 8:0.9, 9:0.9} # Set a default value for client 0, as it is required by the client_fn,
+            print(f"KL Normalized per client: {kl_normalized_per_client}")
+            print("Mean KL Normalized per client: ", sum(kl_normalized_per_client.values())/len(kl_normalized_per_client))
+            for cid, kl_norm_val in kl_normalized_per_client.items():
+                log(INFO, f"Client {cid}: Normalized KL Divergence = {kl_norm_val:.4f}")
 
-    # model = apply_global_lora_freezing_policy(
-    #     model,
-    #     svd_adapter_class_name="SVDAdapter", # Make sure this matches your class name
-    #     train_final_classifier=True # Set to True to train the final classifier
-    # )
+            #Pre-apply SVD to each client's model using their KL_norm value
+            client_models = {}
+            for cid in range(config_sim['server']['num_clients']):
+                kl_norm = kl_normalized_per_client[cid]
+                client_model = copy.deepcopy(base_model)  # Create a copy for each client
+                client_model = apply_svd_to_model(model=client_model, config=config_sim, kl_norm=kl_norm, client_id=cid)
+                client_models[cid] = client_model
+            log(INFO, "fedkl_svd method enabled: Applied SVD to client models with client-specific kl_norm.")
+
+            log(INFO, "Applying SVD to create svd model for server...")
+            # Create a deep copy of base_model to avoid modifying it
+            model_for_svd = copy.deepcopy(base_model)
+            svd_model = apply_svd_to_model(model=model_for_svd, config=config_sim, kl_norm= sum(kl_normalized_per_client.values())/len(kl_normalized_per_client))
+            log(INFO, f"Model after SVD: {svd_model}")
+            for name, tensor in svd_model.state_dict().items():
+                log(INFO, f"{name}: shape {tuple(tensor.shape)}")  
+            log(INFO, f"=>>>>>>>>>>>>>>>>>Number of layers: {len(svd_model.state_dict())}")
+            #Server always needs the SVD-adapted model when LoRA is enabled
+            server_model = svd_model
+            
+        elif lora_method in ["pissa", "milora", "middle", "lora"]:
+            log(INFO, "Applying SVD to create svd model for server...")
+            # Create a deep copy of base_model to avoid modifying it
+            model_for_svd = copy.deepcopy(base_model)
+            svd_model = apply_svd_to_model(model=model_for_svd, config=config_sim)
+            log(INFO, f"Model after SVD: {svd_model}")
+            for name, tensor in svd_model.state_dict().items():
+                log(INFO, f"{name}: shape {tuple(tensor.shape)}")  
+            log(INFO, f"=>>>>>>>>>>>>>>>>>Number of layers: {len(svd_model.state_dict())}")
+            #Server always needs the SVD-adapted model when LoRA is enabled
+            server_model = svd_model
+
+            _ = compute_client_distributions(dataset=fds,num_clients=config_sim['server']['num_clients'])
+            client_model = svd_model
+            client_models = None
+            kl_normalized_per_client = None
+            log(INFO, f"LoRA method {lora_method}: Sending svd_model to clients.")
+        else:
+            log(INFO, f"Unknown LoRA method {lora_method}. Defaulting to base_model for clients.")
+            import sys
+            sys.exit(0)  # Exit if an unknown LoRA method is specified
+
+    else: # If LoRA is not enabled, use the base model for both server and clients (Full fine-tuning)
+        log(INFO, "LoRA is not enabled: Using base_model for both server and clients.")
+        server_model = base_model
+        client_model = base_model
+        client_models = None
+        kl_normalized_per_client = None
 
 
     log(INFO,f" =>>>>> Dataset : {dataset_name} Shape : {shape}") 
@@ -80,17 +138,49 @@ def main():
     except (AttributeError):
         dir_alpha = "NA"
 
-    log(INFO,f" =>>>>> Model : {model._get_name()} Device : {device}")
+    log(INFO,f" =>>>>> Model : {base_model._get_name()} Device : {device}")
     log(INFO,f" =>>>>> Dataset : {dataset_name} Partitoner : {str(fds._partitioners['train']).split('.')[-1]} Alpha : {dir_alpha}")
     log(INFO,f" =>>>>> Ray init args : {ray_init_args} Client Res : {client_res}")
 
-    strategy = get_strategy(config=config_sim,test_data=centralized_testset,save_model_dir=saved_models_path,out_file_path= out_file_path,device=device,apply_transforms_test=apply_transforms_test,size_weights=size_weights, model=model)
-    server = get_server(strategy = strategy,client_manager=fl.server.client_manager.SimpleClientManager(),out_file_path=out_file_path,target_acc=config_sim['common']['target_acc'], lora=config_sim['lora']['enabled'])
+    strategy = get_strategy(
+        config=config_sim,
+        test_data=centralized_testset,
+        save_model_dir=saved_models_path,
+        out_file_path= out_file_path,
+        device=device,
+        apply_transforms_test=apply_transforms_test,
+        size_weights=size_weights,
+        model=server_model)
+    
+    server = get_server(
+        strategy = strategy,
+        client_manager=fl.server.client_manager.SimpleClientManager(),
+        out_file_path=out_file_path,
+        target_acc=config_sim['common']['target_acc'])
     
     log(INFO,f" =>>>>> Using Strategy : {strategy.__class__} Server : {server.__class__}")
+    #Update client_fn to pass kl_norm along with the model
+    def client_fn_with_models(cid):
+        cid = int(cid)
+        if client_models is not None:
+            model = client_models[cid]
+            kl_norm = kl_normalized_per_client[cid] if kl_normalized_per_client is not None else None
+        else:
+            model = client_model
+            kl_norm = None
+        return get_client_fn(
+            config_sim=config_sim,
+            dataset=fds,
+            model=model,
+            device=device,
+            apply_transforms=apply_transforms,
+            save_dir=saved_models_path,
+            kl_norm_dict=kl_normalized_per_client if client_models is not None else None,  # Pass precomputed kl_norms
+        )(cid)
+
     
     hist = fl.simulation.start_simulation(
-        client_fn=get_client_fn(config_sim = config_sim, model=model, dataset=fds,device=device,apply_transforms=apply_transforms, save_dir=saved_models_path),
+        client_fn=client_fn_with_models,
         num_clients=config_sim['server']['num_clients'],
         client_resources=client_res,
         config=fl.server.ServerConfig(num_rounds=config_sim['server']['num_rounds']),

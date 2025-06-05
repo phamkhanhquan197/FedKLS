@@ -32,7 +32,7 @@ class SVDAdapter(nn.Module):
                           Shape: [batch_size, ..., out_features]
                           where out_features is self.W_res.shape[0], self.A.shape[0].
         """
-        effective_weight = self.W_res + (self.alpha/self.rank) * (self.A @ self.B)
+        effective_weight = self.W_res + self.scaling * (self.A @ self.B)
         output = F.linear(x, effective_weight, self.bias)
         return output
     
@@ -42,7 +42,6 @@ class SVDAdapter(nn.Module):
         bias_trainable = self.bias.requires_grad
         bias_info = f", bias={bias_shape} (trainable: {bias_trainable})"
 
-            
         return (
             f"{self.__class__.__name__}("
             f"W_res: {list(self.W_res.shape)} (buffer, frozen), "

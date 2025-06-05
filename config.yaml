@@ -9,7 +9,7 @@ common:
   model : distilbert-base-uncased # one among [distilbert-base-uncased, Net, CifarNet, SimpleCNN, KerasExpCNN, MNISTCNN, SimpleDNN, FMCNNModel,FedAVGCNN,Resnet18, Resnet34,ResNet18Pretrained, ResNet34Pretrained,ResNet18Small, ResNet20Small,MobileNetV2,EfficientNetB0,LSTMModel]
   optimizer : sgd # one among [sgd,adam]
   sgd_momentum : 0.9
-  seed : 789  #123 456 8911
+  seed : 456  #123 456 789
   multi_node : False
   save_log : True
 
@@ -17,11 +17,11 @@ server:
   num_rounds : 1000
   address : 127.0.0.1
   fraction_fit : 0.3 # fraction of clients to be selected for training
-  min_fit_clients: 3 # minimum number of clients to be selected for training
+  min_fit_clients: 3 # minimum number of clients to be9 selected for training
   num_clients : 10  # total number of clients participating in training
   fraction_evaluate : 1 # fraction of clients to be selected for evaluation
-  min_evaluate_clients: 3 # minimum number of clients to be selected for evaluation
-  strategy : FedAvg  #[FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, FedAvg, PowD, Scaffold, FedNova]
+  min_evaluate_clients: 10 # minimum number of clients to be selected for evaluation
+  strategy : FedAvg #[FedKLSVD, FedAvg, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova]
 
 client:
   loss: FocalLoss # [CrossEntropyLoss, FocalLoss]
@@ -37,11 +37,10 @@ client:
   num_gpus : 0.05 #  no. of GPU that are assigned for each actor (it can be fraction value as well)
 
 lora:
-  enabled: False
+  enabled: False #False = FFT, do not set method = fedkl_Svd when running FFT
   rank: 32
   alpha: 32 #Equal to the rank
-  method: 'pissa' # ['pissa', 'milora', 'fedkl-svd']
-  target_modules: ["q_lin", "v_lin"]  # For DistilBERT
+  method: 'pissa' # ['pissa', 'milora', 'middle', 'fedkl_svd', 'lora']
 
 fedlaw_config:
   server_funct : 'exp' #['exp' or 'quad'] #currently exp only is implemented

@@ -1,6 +1,6 @@
 import pandas as pd
 
-threshold=0.66
+threshold=0.77
 
 def print_min_max_avg_table(csv_file_path):
     df = pd.read_csv(csv_file_path)
@@ -17,12 +17,12 @@ def find_first_f1_threshold_round(csv_path: str, threshold: float = threshold) -
     """Find first round where global F1-score meets/exceeds threshold."""
     try:
         df = pd.read_csv(csv_path)
-        if 'global_f1_score' not in df.columns:
-            print("Error: 'global_f1_score' column not found in CSV")
+        if 'local_f1' not in df.columns:
+            print("Error: 'local_f1' column not found in CSV")
             return None
             
         for _, row in df.iterrows():
-            if row['global_f1_score'] >= threshold:
+            if row['local_f1'] >= threshold:
                 return int(row['round'])
         return None
     except FileNotFoundError:
@@ -43,7 +43,7 @@ def calculate_convergence_time(csv_path: str, convergence_round: int) -> float:
         print("Error: 'processing_time' or 'round' column not found in CSV")
         return None
     
-csv_path = '/home/st_group_1/Quan/FedKL-SVD/FedEasy/output/2025-05-10/FedAvg/dirichlet_niid/FFT_alpha0.1 (1)/FedAvg_SetFit_20_newsgroups_dirichlet_niid_32_0.01_1.csv'
+csv_path = '/home/st_group_1/Quan/FedKL-SVD/FedEasy/output/2025-06-05/FedAvg/dirichlet_niid/FFT_0.1_123/FedAvg_SetFit_20_newsgroups_dirichlet_niid_32_0.01_1.csv'
 print_min_max_avg_table(csv_path)
 convergence_round = find_first_f1_threshold_round(csv_path)
 print(f"Convergence round for F1-score >= {threshold}: {convergence_round}")

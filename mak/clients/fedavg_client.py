@@ -1,8 +1,4 @@
-from torch.utils.data import DataLoader
-
 from mak.clients.base_client import BaseClient
-from mak.utils.helper import get_optimizer
-import torch
 
 class FedAvgClient(BaseClient):
     """
@@ -10,7 +6,7 @@ class FedAvgClient(BaseClient):
     """
 
     def __init__(
-        self, client_id, model, trainset, valset, config_sim, device, save_dir
+        self, client_id, model, trainset, valset, config_sim, device, save_dir, kl_norm=None
     ):
         super().__init__(
             client_id, model, trainset, valset, config_sim, device, save_dir
