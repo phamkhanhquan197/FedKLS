@@ -62,7 +62,7 @@ mpmath==1.3.0
 msgpack==1.0.8
 multidict==6.0.5
 multiprocess==0.70.16
-myst-parser==4.0.0
+myst-parser==3.0.0
 networkx==3.2.1
 numpy==1.26.4
 nvidia-cublas-cu12==12.1.3.1
@@ -83,8 +83,6 @@ opencensus-context==0.1.3
 packaging==24.0
 pandas==2.2.1
 pathspec==0.12.1
-peft==0.15.2
-pert==2019.11
 pillow==10.2.0
 platformdirs==3.11.0
 prometheus_client==0.21.0
@@ -113,7 +111,7 @@ rpds-py==0.18.0
 rsa==4.9
 safetensors==0.5.3
 scikit-learn==1.5.2
-scipy==1.14.1
+scipy==1.13.1
 seaborn==0.13.2
 six==1.17.0
 smart-open==7.0.5
