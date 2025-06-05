@@ -11,7 +11,7 @@ class SVDAdapter(nn.Module):
         self.scaling = alpha/rank
         self.bias = nn.Parameter(original_bias.clone().detach())
         self.W_res = W_res.cuda()
-        self.W_res.require_grad = False #Freeze the residual matrix
+        self.W_res.requires_grad = False #Freeze the residual matrix
 
     def forward(self, x):
         """
