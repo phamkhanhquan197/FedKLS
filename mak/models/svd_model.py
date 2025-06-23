@@ -1,5 +1,6 @@
 from torch import nn
 import torch.nn.functional as F
+import torch
 
 class SVDAdapter(nn.Module):
     def __init__(self, W_res, A, B, alpha, rank, original_bias=None):
@@ -9,7 +10,7 @@ class SVDAdapter(nn.Module):
         self.alpha = alpha # LoRA scaling factor
         self.rank = rank
         self.scaling = alpha/rank
-        self.bias = nn.Parameter(original_bias.clone().detach())
+        self.bias = None if original_bias is None else nn.Parameter(original_bias.clone().detach())
         self.W_res = W_res.cuda()
         self.W_res.requires_grad = False #Freeze the residual matrix
 
@@ -33,15 +34,11 @@ class SVDAdapter(nn.Module):
                           where out_features is self.W_res.shape[0], self.A.shape[0].
         """
         effective_weight = self.W_res + self.scaling * (self.A @ self.B)
-        output = F.linear(x, effective_weight, self.bias)
+        output = F.linear(x, effective_weight, bias=self.bias if self.bias is not None else None)
         return output
     
-
     def __repr__(self):
-        bias_shape = list(self.bias.shape)
-        bias_trainable = self.bias.requires_grad
-        bias_info = f", bias={bias_shape} (trainable: {bias_trainable})"
-
+        bias_info = f", bias=None" if self.bias is None else f", bias={list(self.bias.shape)} (trainable: {self.bias.requires_grad})"
         return (
             f"{self.__class__.__name__}("
             f"W_res: {list(self.W_res.shape)} (buffer, frozen), "
@@ -50,4 +47,3 @@ class SVDAdapter(nn.Module):
             f"rank={self.rank}, alpha={self.alpha}, scaling={self.scaling:.4f}"
             f"{bias_info})"
         )
-

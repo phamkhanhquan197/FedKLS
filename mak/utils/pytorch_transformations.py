@@ -18,6 +18,9 @@ class TextTransformationPipeline:
         self.dataset_name = dataset_name
         self.model_name = model_name
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        # Set pad_token to eos_token if not already set
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
         self.feature_key = dataset_info[self.dataset_name]["feature_key"]
         self.max_sequence_length = dataset_info[self.dataset_name]["max_sequence_length"]
 
@@ -32,7 +35,7 @@ class TextTransformationPipeline:
             return_tensors="pt",
         )
         # Convert labels to tensor and rename key
-        encodings["labels"] = torch.tensor(batch["label"])  # "label" → "labels"
+        encodings["labels"] = torch.tensor(batch["label"]) # "label" → "labels"
         return encodings
 
     def get_transformations(self):
@@ -41,7 +44,6 @@ class TextTransformationPipeline:
         return self.apply_transform, self.apply_transform
 
 
-        
 class TransformationPipeline:
     def __init__(self, dataset_name):
         self.dataset_name = dataset_name

@@ -65,6 +65,8 @@ class ServerSaveData:
         strategy: Optional[Strategy] = None,
         out_file_path=None,
         target_acc=0.99,
+        num_train_thread=1,
+        num_test_thread=1,
     ) -> None:
         self._client_manager: ClientManager = client_manager
         self.parameters: Parameters = Parameters(
@@ -74,9 +76,9 @@ class ServerSaveData:
         self.max_workers: Optional[int] = None
         self.out_file_path = out_file_path
         self.target_acc = target_acc
+        self.num_train_thread = num_train_thread
+        self.num_test_thread = num_test_thread
         self.comm_tracker = CommunicationTracker()
-        st = f"Using Custom Save Data Server with strategy : {self.strategy.__class__}"
-        log(INFO, st)
 
     def set_max_workers(self, max_workers: Optional[int]) -> None:
         """Set the max_workers used by ThreadPoolExecutor."""
@@ -231,18 +233,15 @@ class ServerSaveData:
             len(client_instructions),
             self._client_manager.num_available(),
         )
-        import time
-        time1 = timeit.default_timer()
 
         # Collect `evaluate` results from all clients participating in this round
         results, failures = evaluate_clients(
             client_instructions,
             max_workers=self.max_workers,
             timeout=timeout,
-            num_batches=2,  # Number of concurrent batches
+            num_threads=self.num_test_thread,  # Number of concurrent threads
         )
 
-        log(INFO, "Check evaluate time on clients: %s seconds", timeit.default_timer() - time1)
         log(
             DEBUG,
             "Client evaluation with %s results and %s failures",
@@ -316,6 +315,7 @@ class ServerSaveData:
             client_instructions=client_instructions,
             max_workers=self.max_workers,
             timeout=timeout,
+            num_threads=self.num_train_thread,
         )
 
         # # ------------------- START: Print client weight shapes -------------------
@@ -378,7 +378,6 @@ class ServerSaveData:
         # log(INFO, f"Aggregated parameters ({len(aggregated_ndarrays)} tensors):")
         # for i, arr in enumerate(aggregated_ndarrays):
         #     log(INFO, f"  Aggregated Tensor {i}: shape {arr.shape}")
-
 
         return parameters_aggregated, metrics_aggregated, (results, failures)
 
@@ -461,26 +460,52 @@ def fit_clients(
     client_instructions: List[Tuple[ClientProxy, FitIns]],
     max_workers: Optional[int],
     timeout: Optional[float],
-) -> FitResultsAndFailures:
-    """Refine parameters concurrently on all selected clients."""
+    num_threads: int = 1  # Parameter to control number of concurrent batches
+) -> Tuple[List[Tuple[ClientProxy, FitRes]], List[Union[Tuple[ClientProxy, FitRes], BaseException]]]:
+    """Refine parameters on clients with dynamic batching."""
+    # Calculate batch size based on number of clients and desired batches
+    batch_size = max(1, len(client_instructions) // num_threads)
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        submitted_fs = {
-            executor.submit(fit_client, client_proxy, ins, timeout)
-            for client_proxy, ins in client_instructions
-        }
-        finished_fs, _ = concurrent.futures.wait(
-            fs=submitted_fs,
-            timeout=None,  # Handled in the respective communication stack
-        )
-
-    # Gather results
+    # Create batches of client instructions
+    batches = [
+        client_instructions[i:i + batch_size]
+        for i in range(0, len(client_instructions), batch_size)
+    ]
+    
+    # Limit to num_threads (combine any extra batches into the last one)
+    if len(batches) > num_threads and len(batches) > 1:
+        last_batch = []
+        for i in range(num_threads - 1, len(batches)):
+            last_batch.extend(batches[i])
+        batches = batches[:num_threads-1] + [last_batch]
+    
+    # Process each client in a batch sequentially, but run batches concurrently
+    def process_batch(batch: List[Tuple[ClientProxy, FitIns]]) -> Tuple[List[Tuple[ClientProxy, FitRes]], List[Union[Tuple[ClientProxy, FitRes], BaseException]]]:
+        batch_results = []
+        batch_failures = []
+        for client_proxy, ins in batch:
+            try:
+                result = client_proxy.fit(ins, timeout=timeout)
+                batch_results.append((client_proxy, result))
+            except Exception as e:
+                batch_failures.append((client_proxy, e))
+        return batch_results, batch_failures
+    
+    # Use ThreadPoolExecutor to run batches concurrently
     results: List[Tuple[ClientProxy, FitRes]] = []
     failures: List[Union[Tuple[ClientProxy, FitRes], BaseException]] = []
-    for future in finished_fs:
-        _handle_finished_future_after_fit(
-            future=future, results=results, failures=failures
-        )
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+        future_to_batch = {executor.submit(process_batch, batch): batch for batch in batches}
+        for future in concurrent.futures.as_completed(future_to_batch):
+            try:
+                batch_results, batch_failures = future.result()
+                results.extend(batch_results)
+                failures.extend(batch_failures)
+            except Exception as e:
+                # If the entire batch processing fails
+                failures.append(e)
+    
     return results, failures
 
 
@@ -520,11 +545,11 @@ def evaluate_clients(
     client_instructions: List[Tuple[ClientProxy, EvaluateIns]],
     max_workers: Optional[int],
     timeout: Optional[float],
-    num_batches: int = 2  # Parameter to control number of concurrent batches
+    num_threads: int = 1  # Parameter to control number of concurrent batches
 ) -> EvaluateResultsAndFailures:
     """Evaluate parameters on clients with dynamic batching."""
     # Calculate batch size based on number of clients and desired batches
-    batch_size = max(1, len(client_instructions) // num_batches)
+    batch_size = max(1, len(client_instructions) // num_threads)
     
     # Create batches of client instructions
     batches = [
@@ -532,12 +557,12 @@ def evaluate_clients(
         for i in range(0, len(client_instructions), batch_size)
     ]
     
-    # Limit to num_batches (combine any extra batches into the last one)
-    if len(batches) > num_batches and len(batches) > 1:
+    # Limit to num_threads (combine any extra batches into the last one)
+    if len(batches) > num_threads and len(batches) > 1:
         last_batch = []
-        for i in range(num_batches - 1, len(batches)):
+        for i in range(num_threads - 1, len(batches)):
             last_batch.extend(batches[i])
-        batches = batches[:num_batches-1] + [last_batch]
+        batches = batches[:num_threads-1] + [last_batch]
     
     # Process each client in a batch sequentially, but run batches concurrently
     def process_batch(batch: List[Tuple[ClientProxy, EvaluateIns]]) -> List[Tuple[ClientProxy, EvaluateRes]]:
@@ -555,7 +580,7 @@ def evaluate_clients(
     results: List[Tuple[ClientProxy, EvaluateRes]] = []
     failures: List[Union[Tuple[ClientProxy, EvaluateRes], BaseException]] = []
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=num_batches) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
         future_to_batch = {executor.submit(process_batch, batch): batch for batch in batches}
         for future in concurrent.futures.as_completed(future_to_batch):
             try:
@@ -567,8 +592,6 @@ def evaluate_clients(
                 failures.append(e)
     
     return results, failures
-
-
 
 def evaluate_client(
     client: ClientProxy,

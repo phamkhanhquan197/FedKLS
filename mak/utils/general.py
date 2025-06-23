@@ -20,7 +20,7 @@ def test(net, testloader, device: str, feature_key: str) -> Tuple[float, float, 
     # Set the network to evaluation mode
     net.eval()
 
-    if feature_key == "text":
+    if feature_key == "text" or feature_key == "content":
         #for text datasets, we need to use a different loss function
         with torch.no_grad():
             for batch in testloader:
@@ -57,13 +57,20 @@ def test(net, testloader, device: str, feature_key: str) -> Tuple[float, float, 
         f1 = f1_score(all_labels, all_preds, average='weighted')
         return loss, accuracy, f1
 
-def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays]):
+def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays], device: str = "cuda"):
 
     """Set model weights from a list of NumPy ndarrays."""
     model_state = model.state_dict()
     if len(model_state.items()) != len(params): # Handle LoRA parameter update
-        lora_keys = [k for k in model_state.keys() 
-                    if ("lin" in k)]
+        if any(key.startswith("distilbert.") for key in model_state.keys()):
+            lora_keys = [k for k in model_state.keys() 
+                        if ("lin" in k)]
+        elif any(key.startswith("bert.") for key in model_state.keys()):
+            lora_keys = [k for k in model_state.keys() 
+                        if ("self" in k or "dense" in k)]
+        elif any(key.startswith("model.") for key in model_state.keys()):
+            lora_keys = [k for k in model_state.keys() 
+                        if ("self_attn" in k or "mlp" in k)]
 
         # Create state dict with only LoRA parameters
         lora_params = OrderedDict()
@@ -77,8 +84,11 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays]):
 
     else: #Full parameter update
         params_dict = zip(model_state.keys(), params)
-        state_dict = OrderedDict({k: torch.tensor(v) for k, v in params_dict})
+        # state_dict = OrderedDict({k: torch.tensor(v, device=device).clone().detach() for k, v in params_dict})
+        state_dict = OrderedDict({k: v.clone().detach().to(device) if isinstance(v, torch.Tensor) else torch.tensor(v, device=device)
+                                  for k, v in params_dict})
         model.load_state_dict(state_dict, strict=True)
+
 
 
 def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
@@ -92,42 +102,3 @@ def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
     # Aggregate and return custom metric (weighted average)
     return {"accuracy": sum(accuracies) / sum(examples),
             "f1_score": sum(f1_scores) / sum(examples)}
-
-
-def get_unique_classes(dataloader):
-    all_labels = []
-    for batch in dataloader:
-        keys = list(batch.keys())
-        x_label, y_label = keys[0], keys[1]
-        labels = batch[y_label]
-        all_labels.extend(labels.numpy())  # Assuming labels are in tensor format
-
-    unique_classes = list(set(all_labels))
-    return unique_classes
-
-
-def random_pertube(model, gamma):
-    new_model = copy.deepcopy(model)
-    for p in new_model.parameters():
-        gauss = torch.normal(mean=torch.zeros_like(p), std=1)
-        if p.grad is None:
-            p.grad = gauss
-        else:
-            p.grad.data.copy_(gauss.data)
-
-    norm = torch.norm(
-        torch.stack(
-            [p.grad.norm(p=2) for p in new_model.parameters() if p.grad is not None]
-        ),
-        p=2,
-    )
-
-    with torch.no_grad():
-        scale = gamma / (norm + 1e-12)
-        scale = torch.clamp(scale, max=1.0)
-        for p in new_model.parameters():
-            if p.grad is not None:
-                e_w = 1.0 * p.grad * scale.to(p)
-                p.add_(e_w)
-
-    return new_model

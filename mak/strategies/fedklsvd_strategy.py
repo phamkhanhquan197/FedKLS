@@ -31,7 +31,6 @@ from flwr.server.strategy.aggregate import aggregate
 from functools import reduce
 import numpy as np
 
-
 class FedKLSVDStrategy(FedAvg):
     """Implement custom strategy for FedKL-SVD based on FedAvg class."""
     def __init__(
@@ -84,8 +83,6 @@ class FedKLSVDStrategy(FedAvg):
             log(WARNING, f"Round {server_round}: {len(failures)} client failures during fit")
             return None, {}
         log(INFO, f"Round {server_round}: Aggregated parameters from {len(results)} clients")
-        
-
         
 
         #Extract parameters, num_examples, and kl_norm from results

@@ -35,12 +35,12 @@ from mak.models.svd_model import SVDAdapter
 import math
 from collections import Counter
 
+
 def get_device_and_resources(config_sim):
     # Check if GPU is available
     device = torch.device(
         "cuda" if torch.cuda.is_available() and config_sim["client"]["gpu"] else "cpu"
     )
-
     # Assign GPU and CPU resources
     if device.type == "cuda":
         # Assign GPU resources
@@ -152,17 +152,18 @@ def get_partitioner(config_sim):
     num_clients = config_sim["server"]["num_clients"]
     if config_sim["common"]["data_type"] == "dirichlet_niid":
         # alpha value
-        dirchlet_alpha = config_sim["common"]["dirichlet_alpha"]
+        dirichlet_alpha = config_sim["common"]["dirichlet_alpha"]
         # dataset
         dataset_name = config_sim["common"]["dataset"]
         # dataset's label column
         label = dataset_info[dataset_name]["output_column"]
+        # create partitioner
         partitioner = DirichletPartitioner(
             num_partitions=num_clients,
             partition_by=label,
-            alpha=dirchlet_alpha,
-            min_partition_size=2, #minimum number of samples in each partition
-            self_balancing=True,
+            alpha=dirichlet_alpha,
+            min_partition_size=1,  # minimum number of samples in each partition
+            self_balancing=False,
             shuffle=True,
             seed=config_sim["common"]["seed"],
         )
@@ -194,7 +195,7 @@ def extract_linear_layers(model):
     for name, module in model.named_modules():
         # Check if the module is a Linear layer
         if isinstance(module, torch.nn.Linear):
-            if name in ["pre_classifier","classifier"]: # Check if any part of the layer_to_skip is in the current layer's name
+            if name in ["pre_classifier","classifier", "model.norm", "score"]: # Check if any part of the layer_to_skip is in the current layer's name
                 continue
             linear_layers[name] = module
 
@@ -206,8 +207,8 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
     The SVDAdapter class itself ensures W_res is frozen (as a buffer).
     Args:
         model (nn.Module): The model to modify.
-        config (dict): Configuration dictionary, must contain config["lora"]["rank"],
-                       config["lora"]["alpha"], and config["lora"]["method"].
+        config (dict): Configuration dictionary, must contain config["peft"]["rank"],
+                       config["peft"]["alpha"], and config["peft"]["method"].
         layers_to_skip_svd (list, optional): List of string name parts of layers
                                              to skip during SVD adaptation.
                                              E.g., ["classifier", "pre_classifier"].
@@ -220,9 +221,9 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
     for name, layer in linear_layers.items():
         weight_matrix = layer.weight.data
         original_bias = layer.bias.data if layer.bias is not None else None
-        rank = config["lora"]["rank"]
-        alpha = config["lora"]["alpha"]
-        method = config["lora"]["method"]
+        rank = config["peft"]["rank"]
+        alpha = config["peft"]["alpha"]
+        method = config["peft"]["method"]
 
         if method == 'lora':
             # Original LoRA: Random initialization without SVD
@@ -259,7 +260,7 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
                 S_select = S[middle_index_start:middle_index_end]
                 Vt_select = Vt[middle_index_start:middle_index_end, :]
 
-            elif method == 'fedkl_svd':
+            elif method == 'fedkls':
                 index_start = math.floor(kl_norm * (max_possible_rank - rank)) if kl_norm is not None else 0
                 index_end = index_start + rank
                 if client_id is not None:
@@ -280,6 +281,7 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
         
         # Split layer name and replace the original layer
         parent_name, child_name = name.rsplit(".", 1)
+        
         parent = model.get_submodule(parent_name)
         setattr(parent, child_name, new_layer)  
     
@@ -322,7 +324,7 @@ def compute_KL_divergence(client_distributions: dict, num_classes: int) -> dict:
     return kl_normalized  
 
 
-def compute_client_distributions(dataset, num_clients: int) -> dict:
+def compute_client_distributions(config, dataset, num_clients: int) -> dict:
     """
     Compute the label distribution for each client in the federated dataset.
     
@@ -338,104 +340,14 @@ def compute_client_distributions(dataset, num_clients: int) -> dict:
     log(INFO, "=>>>>> CLASS DISTRIBUTIONS OF ALL CLIENTS <<<<<<=")
     for cid in range(num_clients):
         client_data = dataset.load_partition(cid)
-        labels = [item['label'] for item in client_data]
+        dataset_name = config["common"]["dataset"]
+        output_column = dataset_info[dataset_name]["output_column"]
+        labels = [item[output_column] for item in client_data]
         client_distributions[cid] = dict(sorted(Counter(labels).items()))
         log(INFO, f"Client {cid} ({len(client_distributions[cid])} classes, {len(client_data)} samples) : {client_distributions[cid]}")
     log(INFO, "*" * 150)
     
     return client_distributions
-
-# def compute_class_weights(trainset, num_classes: int):
-#     class_counts = np.zeros(num_classes)
-#     for batch in trainset:
-#         # Extract labels from the dictionary
-#         target = batch["labels"]
-#         # If target is a tensor, convert to numpy or handle as needed
-#         if isinstance(target, torch.Tensor):
-#             target = target.numpy()
-#         # Handle batched or single labels
-#         target = np.array(target).flatten()
-#         for label in target:
-#             class_counts[int(label)] += 1
-#     class_weights = 1.0 / (class_counts + 1e-10)
-#     class_weights = class_weights / class_weights.sum() * num_classes
-#     return torch.tensor(class_weights, dtype=torch.float)
-
-# def apply_global_lora_freezing_policy(
-#     model, 
-#     svd_adapter_class_name: str = "SVDAdapter", 
-#     train_final_classifier: bool = True
-# ):
-#     """
-#     Applies a global freezing policy for LoRA-style fine-tuning.
-#     It freezes all parameters by default, then unfreezes:
-#     1. 'A', 'B', and 'bias' nn.Parameters within modules of type svd_adapter_class_name.
-#     2. All parameters of the module named 'classifier' if train_final_classifier is True.
-
-#     Args:
-#         model (nn.Module): The model to apply the policy to.
-#         svd_adapter_class_name (str): The string name of your SVD adapter class.
-#         train_final_classifier (bool): Whether to make the final classifier head trainable.
-
-#     Returns:
-#         nn.Module: The model with updated requires_grad flags.
-#     """
-#     print(f"\nApplying global freezing policy (Adapter class: '{svd_adapter_class_name}', Train classifier: {train_final_classifier})...")
-    
-#     num_total_params = 0
-#     num_trainable_params = 0
-#     trainable_param_names = []
-
-#     for name, param in model.named_parameters():
-#         num_total_params += param.numel()
-#         param.requires_grad = False  # Freeze all parameters by default
-
-#         # Check if the parameter belongs to an SVDAdapter module
-#         module_path_parts = name.split('.')
-#         current_param_short_name = module_path_parts[-1] # e.g., 'A', 'B', 'bias', 'weight'
-        
-#         is_svd_adapter_trainable_part = False
-#         if len(module_path_parts) > 1: # Indicates a nested parameter
-#             parent_module_path = '.'.join(module_path_parts[:-1])
-#             try:
-#                 parent_module = model.get_submodule(parent_module_path)
-#                 if parent_module.__class__.__name__ == svd_adapter_class_name:
-#                     if current_param_short_name in ['A', 'B', 'bias']:
-#                         # Ensure the attribute on the parent is this exact parameter object
-#                         # and that it's an nn.Parameter (already true from named_parameters)
-#                         if getattr(parent_module, current_param_short_name, None) is param:
-#                             param.requires_grad = True
-#                             is_svd_adapter_trainable_part = True
-#             except AttributeError:
-#                 # This submodule path doesn't exist, should not happen if 'name' is valid from named_parameters
-#                 pass 
-        
-#         # Optionally, make the final classifier head fully trainable
-#         # This condition is separate to allow classifier to be trained even if it's not an SVDAdapter
-#         if train_final_classifier and name.startswith("classifier."):
-#             # If the classifier was already made trainable as an SVDAdapter part, this is fine.
-#             # If the classifier is a standard nn.Linear, this will make its .weight and .bias trainable.
-#             param.requires_grad = True
-        
-#         if param.requires_grad:
-#             if not is_svd_adapter_trainable_part and name.startswith("classifier."): # For logging distinct cases
-#                  pass # Already handled by train_final_classifier logic
-#             num_trainable_params += param.numel()
-#             if name not in trainable_param_names: # Avoid duplicates if classifier itself was an SVD adapter
-#                 trainable_param_names.append(name)
-
-#     print(f"  Total model parameters: {num_total_params}")
-#     print(f"  Trainable parameters after policy: {num_trainable_params}")
-#     if num_total_params > 0 :
-#         print(f"  Percentage of trainable parameters: {(num_trainable_params / num_total_params) * 100:.4f}%")
-#     if num_trainable_params == 0 and num_total_params > 0 :
-#         print("  WARNING: No parameters are trainable after freezing policy! Model will not learn.")
-#     # else:
-#     #     print("  Trainable parameter names:")
-#     #     for tp_name in sorted(trainable_param_names): # Sort for consistent logging
-#     #         print(f"    - {tp_name}")
-            
-#     return model
 
 def get_model(config, shape):
     model_name = config["common"]["model"]
@@ -444,11 +356,30 @@ def get_model(config, shape):
     num_classes = dataset_info[dataset_name]["num_classes"]
 
     # check if model is from huggingface
-    if model_name in ["distilbert-base-uncased", "albert-base-v2"]:  # Add more as needed
-        from transformers import AutoModelForSequenceClassification
-        base_model = AutoModelForSequenceClassification.from_pretrained(
-            model_name, num_labels=num_classes
-        )
+    if model_name in ["distilbert-base-uncased", "bert-base-uncased", "meta-llama/Llama-3.2-1B", "Qwen/Qwen1.5-0.5B"]:  # Add more as needed
+        from transformers import AutoModelForSequenceClassification, BitsAndBytesConfig
+        if model_name == "Qwen/Qwen1.5-0.5B": #Need to check again when applying the quantization -> still error
+            quantization_8_bit_config = BitsAndBytesConfig(
+                load_in_8bit=True,
+                bnb_8bit_compute_dtype=torch.bfloat16,
+            )
+            quantization_4_bit_config = BitsAndBytesConfig(
+                    load_in_4bit=True,  # Use 4-bit quantization
+                    bnb_4bit_quant_type="nf4",  # Normal float 4-bit quantization
+                    bnb_4bit_compute_dtype=torch.bfloat16,  # Optimize compute dtype
+                    bnb_4bit_use_double_quant=True,  # Enable double quantization
+                )
+            base_model = AutoModelForSequenceClassification.from_pretrained(
+                model_name,
+                num_labels=num_classes,
+                # quantization_config=quantization_8_bit_config,
+                device_map="auto",
+            )
+            # Set pad_token_id to eos_token_id
+            if base_model.config.pad_token_id is None:
+                base_model.config.pad_token_id = base_model.config.eos_token_id
+        else:
+            base_model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=num_classes, device_map="auto")
 
 
         return base_model
@@ -459,7 +390,6 @@ def get_model(config, shape):
     )
 
     return model
-
 
 def get_evaluate_fn(
     centralized_testset: Dataset,
@@ -480,6 +410,8 @@ def get_evaluate_fn(
         ## model = get_model(config=config_sim, shape=shape)
         ## model = apply_svd_to_model(model=model, config=config_sim)
         set_params(model, parameters)
+
+        
         model.to(device)
 
         # Apply transform to dataset
@@ -508,9 +440,6 @@ def get_evaluate_fn(
                 os.path.join(save_model_dir, "saved_final_model.pth"),
             )
         return loss, {"accuracy": accuracy, "f1_score": f1}
-    
-        
-
     return evaluate
 
 
@@ -590,7 +519,7 @@ def save_simulation_history(hist: fl.server.history.History, path):
     df.to_csv(os.path.join(path), index=False)
 
 
-def get_server(strategy, client_manager, out_file_path, target_acc):
+def get_server(strategy, client_manager, out_file_path, target_acc, num_train_thread, num_test_thread):
     if isinstance(strategy, ScaffoldStrategy):
         return ScaffoldServer(
             strategy=strategy,
@@ -618,6 +547,8 @@ def get_server(strategy, client_manager, out_file_path, target_acc):
             client_manager=client_manager,
             out_file_path=out_file_path,
             target_acc=target_acc,
+            num_train_thread=num_train_thread,
+            num_test_thread=num_test_thread,
         )
 
 
@@ -668,11 +599,16 @@ def get_strategy(
             "apply_transforms": apply_transforms_test,
             "apply_transforms_test": apply_transforms_test,
         },
+        "FedAWA": {
+            "config": config,
+            "model": model,
+            "test_data": test_data,
+            "apply_transforms_test": apply_transforms_test,
+        },
         "PowD": {
             "candidate_client_set": config["powd_config"]["candidate_client_set"],
         },
     } 
-    print(getattr(__import__("mak.strategies", fromlist=[STRATEGY]), STRATEGY))
     return getattr(__import__("mak.strategies", fromlist=[STRATEGY]), STRATEGY)(
         fraction_fit=FRACTION_FIT,
         fraction_evaluate=FRACTION_EVAL,
@@ -698,12 +634,14 @@ def get_strategy(
 
 def set_seed(seed: int = 13):
     torch.manual_seed(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-    # Set the seed for CUDA operations (if using GPU)
     torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    os.environ["PL_GLOBAL_SEED"] = str(seed)
+    np.random.seed(seed)
+    random.seed(seed)
     log(INFO, f"All random seeds set to {seed}")
 
 

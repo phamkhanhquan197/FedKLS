@@ -1,6 +1,6 @@
 import pandas as pd
 
-threshold=0.77
+threshold=0.89
 
 def print_min_max_avg_table(csv_file_path):
     df = pd.read_csv(csv_file_path)
@@ -42,8 +42,13 @@ def calculate_convergence_time(csv_path: str, convergence_round: int) -> float:
     except KeyError:
         print("Error: 'processing_time' or 'round' column not found in CSV")
         return None
-    
-csv_path = '/home/st_group_1/Quan/FedKL-SVD/FedEasy/output/2025-06-05/FedAvg/dirichlet_niid/FFT_0.1_123/FedAvg_SetFit_20_newsgroups_dirichlet_niid_32_0.01_1.csv'
+
+#Relative path to the CSV file
+import os
+csv_path = os.path.join(os.getcwd(), 'output', '2025-06-11', 'FedAvg', 'dirichlet_niid', 'lora_Banking77_1.0', 'FedAvg_legacy-datasets_banking77_dirichlet_niid_32_0.01_1.csv')
+#Print only the name of method and dataset
+print(f"CSV file path: {csv_path}")
+
 print_min_max_avg_table(csv_path)
 convergence_round = find_first_f1_threshold_round(csv_path)
 print(f"Convergence round for F1-score >= {threshold}: {convergence_round}")

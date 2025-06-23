@@ -57,7 +57,8 @@ dataset_info = {  # Image datasets
         "test_set": "test",
         "input_shape": (1, 32, 32),  # resize this from 16 to 32
     },
-    #text datasets
+    ########################################################################
+    #Text datasets
     "SetFit/20_newsgroups": {
         "num_classes": 20,
         "feature_key": "text",
@@ -66,4 +67,24 @@ dataset_info = {  # Image datasets
         "input_shape": (128,), #Placeholder for text sequence length
         "max_sequence_length": 128, #For transformer models
     },
+
+    "fancyzhx/dbpedia_14": {
+        "num_classes": 14,
+        "feature_key": "content",
+        "output_column": "label",
+        "test_set": "test",
+        "input_shape": (128,), #Placeholder for text sequence length
+        "max_sequence_length": 128, #For transformer models
+    },
+
+    "legacy-datasets/banking77": {
+        "num_classes": 77,
+        "feature_key": "text",
+        "output_column": "label",
+        "test_set": "test",
+        "input_shape": (128,), #Placeholder for text sequence length
+        "max_sequence_length": 128, #For transformer models
+    },
+
+
 }
