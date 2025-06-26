@@ -107,11 +107,9 @@ def main():
             log(INFO, f"=>>>>>>>>>>>>>>>>>Number of layers: {len(svd_model.state_dict())}")
             #Server always needs the SVD-adapted model when LoRA is enabled
             server_model = svd_model
-
+            
             _ = compute_client_distributions(config = config_sim, dataset=fds,num_clients=config_sim['server']['num_clients'])
             client_model = svd_model
-            client_models = None
-            kl_normalized_per_client = None
             log(INFO, f"=>>>>> Method {lora_method.upper()}: Sending svd_model to clients.")
         else:
             log(INFO, f"Unknown LoRA method {lora_method}. Defaulting to base_model for clients.")
@@ -124,8 +122,6 @@ def main():
         _ = compute_client_distributions(config = config_sim, dataset=fds,num_clients=config_sim['server']['num_clients'])
         server_model = base_model
         client_model = base_model
-        client_models = None
-        kl_normalized_per_client = None
 
     try:
         dir_alpha = fds._partitioners['train']._alpha[0]
@@ -160,9 +156,9 @@ def main():
     #Update client_fn to pass kl_norm along with the model
     def client_fn_with_models(cid):
         cid = int(cid)
-        if client_models is not None:
+        if lora_method == "fedkls":
             model = client_models[cid]
-            kl_norm = kl_normalized_per_client[cid] if kl_normalized_per_client is not None else None
+            kl_norm = kl_normalized_per_client[cid]
         else:
             model = client_model
             kl_norm = None
@@ -173,7 +169,7 @@ def main():
             device=device,
             apply_transforms=apply_transforms,
             save_dir=saved_models_path,
-            kl_norm_dict=kl_normalized_per_client if client_models is not None else None,  # Pass precomputed kl_norms
+            kl_norm_dict=kl_normalized_per_client if lora_method == "fedkls" else None,  # Pass precomputed kl_norms
         )(cid)
 
     
