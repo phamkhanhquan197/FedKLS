@@ -11,6 +11,9 @@ from mak.utils.dataset_info import dataset_info
 from mak.utils.helper import get_config, set_seed, parse_args, apply_svd_to_model
 from mak.utils.helper import compute_client_distributions, compute_KL_divergence
 import copy
+import ray
+import gc
+import torch
 
 def main():
     # Parse arguments and configs
@@ -54,6 +57,9 @@ def main():
 
     #Base model
     base_model = get_model(config_sim,shape = shape)
+    # Move base_model to CPU to reduce GPU memory usage
+    base_model = base_model.cpu()  ### CHANGE ###: Ensure base_model is on CPU
+
     log(INFO, f"Base model structure: {base_model}")
     for name, tensor in base_model.state_dict().items():
         log(INFO, f"{name}: shape {tuple(tensor.shape)}")  
@@ -77,18 +83,27 @@ def main():
                 log(INFO, f"Client {cid}: Normalized KL Divergence = {kl_norm_val:.4f}")
 
             #Pre-apply SVD to each client's model using their KL_norm value
-            client_models = {}
+            client_models = {} ### CHANGE ###: Dictionary to store file paths instead of models
+            os.makedirs(os.path.join(saved_models_path, 'client_models'), exist_ok=True)  ### CHANGE ###: Create directory for model files
             for cid in range(config_sim['server']['num_clients']):
                 kl_norm = kl_normalized_per_client[cid]
                 client_model = copy.deepcopy(base_model)  # Create a copy for each client
                 client_model = apply_svd_to_model(model=client_model, config=config_sim, kl_norm=kl_norm, client_id=cid)
-                client_models[cid] = client_model
+
+                #Save model to disk
+                model_path = os.path.join(saved_models_path, 'client_models', f'client_{cid}_model.pt')
+                torch.save(client_model, model_path)  ### CHANGE ###: Save full model to disk
+                client_models[cid] = model_path  # Store file path instead of model
+                del client_model  # Free memory
+                gc.collect()
+
             log(INFO, "FedKLS method enabled: Applied SVD to client models with client-specific kl_norm.")
 
             log(INFO, "Applying SVD to create svd model for server...")
             # Create a deep copy of base_model to avoid modifying it
             model_for_svd = copy.deepcopy(base_model)
             svd_model = apply_svd_to_model(model=model_for_svd, config=config_sim, kl_norm= sum(kl_normalized_per_client.values())/len(kl_normalized_per_client))
+            svd_model = svd_model.cpu()  ### CHANGE ###: Ensure svd_model is on CPU
             log(INFO, f"Model after SVD: {svd_model}")
             for name, tensor in svd_model.state_dict().items():
                 log(INFO, f"{name}: shape {tuple(tensor.shape)}")  
@@ -100,16 +115,15 @@ def main():
             log(INFO, "Applying SVD to create svd model for server...")
             # Create a deep copy of base_model to avoid modifying it
             model_for_svd = copy.deepcopy(base_model)
-            svd_model = apply_svd_to_model(model=model_for_svd, config=config_sim)
+            svd_model = apply_svd_to_model(model=model_for_svd, config=config_sim)            
             log(INFO, f"Model after SVD: {svd_model}")
             for name, tensor in svd_model.state_dict().items():
                 log(INFO, f"{name}: shape {tuple(tensor.shape)}")  
             log(INFO, f"=>>>>>>>>>>>>>>>>>Number of layers: {len(svd_model.state_dict())}")
             #Server always needs the SVD-adapted model when LoRA is enabled
             server_model = svd_model
-            
-            _ = compute_client_distributions(config = config_sim, dataset=fds,num_clients=config_sim['server']['num_clients'])
             client_model = svd_model
+            _ = compute_client_distributions(config = config_sim, dataset=fds,num_clients=config_sim['server']['num_clients'])
             log(INFO, f"=>>>>> Method {lora_method.upper()}: Sending svd_model to clients.")
         else:
             log(INFO, f"Unknown LoRA method {lora_method}. Defaulting to base_model for clients.")
@@ -157,8 +171,14 @@ def main():
     def client_fn_with_models(cid):
         cid = int(cid)
         if lora_method == "fedkls":
-            model = client_models[cid]
-            kl_norm = kl_normalized_per_client[cid]
+            # model = client_models[cid]
+            # kl_norm = kl_normalized_per_client[cid]
+            # Load model from disk
+            model_path = client_models[cid]
+            model = torch.load(model_path, map_location=device, weights_only = False)  # Load model from file
+            model = model.to(device)  # Move model to the correct device
+            kl_norm = kl_normalized_per_client[cid]  # Get the KL norm for this client
+            
         else:
             model = client_model
             kl_norm = None
