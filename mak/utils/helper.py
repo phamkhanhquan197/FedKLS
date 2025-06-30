@@ -356,7 +356,7 @@ def get_model(config, shape):
     num_classes = dataset_info[dataset_name]["num_classes"]
 
     # check if model is from huggingface
-    if model_name in ["distilbert-base-uncased", "bert-base-uncased", "meta-llama/Llama-3.2-1B", "Qwen/Qwen1.5-0.5B"]:  # Add more as needed
+    if model_name in ["distilbert-base-uncased", "Qwen/Qwen1.5-0.5B"]:  # Add more as needed
         from transformers import AutoModelForSequenceClassification, BitsAndBytesConfig
         if model_name == "Qwen/Qwen1.5-0.5B": #Need to check again when applying the quantization -> still error
             quantization_8_bit_config = BitsAndBytesConfig(
@@ -381,10 +381,9 @@ def get_model(config, shape):
         else:
             base_model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=num_classes, device_map="auto")
 
-
         return base_model
 
-    # check custom models 
+    # check custom models
     model = getattr(__import__("mak.models", fromlist=[model_name]), model_name)(
         num_classes=num_classes, input_shape=shape
     )
@@ -411,7 +410,6 @@ def get_evaluate_fn(
         ## model = apply_svd_to_model(model=model, config=config_sim)
         set_params(model, parameters)
 
-        
         model.to(device)
 
         # Apply transform to dataset
@@ -705,6 +703,30 @@ def parse_args() -> argparse.Namespace:
         "--dirichlet_alpha",
         type=float,
         default=None,
+    )
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=None,
+        help="Learning rate for the optimizer",
+    )
+    parser.add_argument(
+        "--method",
+        type=str,
+        default=None,
+        help="Method for SVD adaptation (e.g., 'lora', 'pissa', 'milora', 'middle', 'fedkls')",
+    )
+    parser.add_argument(
+        "--enabled",
+        type=bool,
+        default=None,
+        help="Enable or disable the method",
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default=None,
+        help="Dataset name to be used for the simulation",
     )
 
     args = parser.parse_args()
