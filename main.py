@@ -22,9 +22,18 @@ def main():
     seed = args.seed if args.seed else config_sim.get('common', {}).get('seed', 42)
     strategy = args.strategy if args.strategy else config_sim.get('server', {}).get('strategy', '')
     dirichlet_alpha = args.dirichlet_alpha if args.dirichlet_alpha else config_sim.get('common', {}).get('dirichlet_alpha', '')
+    dataset_name = args.dataset if args.dataset else config_sim.get('common', {}).get('dataset', 'SetFit/20_newsgroups')
+    method = args.method if args.method else config_sim.get('peft', {}).get('method', 'lora')
+    enabled = args.enabled if args.enabled else config_sim.get('peft', {}).get('enabled', False)
+    lr = args.lr if args.lr else config_sim.get('client', {}).get('lr', 0.001)
+
     config_sim['common']['seed'] = seed
     config_sim['server']['strategy'] = strategy
     config_sim['common']['dirichlet_alpha'] = dirichlet_alpha
+    config_sim['common']['dataset'] = dataset_name
+    config_sim['peft']['method'] = method
+    config_sim['peft']['enabled'] = enabled
+    config_sim['client']['lr'] = lr
     
     set_seed(seed=config_sim['common']['seed'])
     
