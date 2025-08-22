@@ -13,8 +13,8 @@ common:
   seed : 123  #123 456 789
   multi_node : False
   save_log : True
-  num_train_thread: 1 #Save the most memory when setting to 1
-  num_test_thread: 2
+  num_train_thread: 10 #Save the most memory when setting to 1
+  num_test_thread: 5
 
 server:
   num_rounds : 1000
@@ -24,16 +24,16 @@ server:
   num_clients : 10 # total number of clients participating in training
   fraction_evaluate : 1 # fraction of clients to be selected for evaluation
   min_evaluate_clients: 10 # minimum number of clients to be selected for evaluation
-  strategy : FedAvg #[FedAWA, FedKLSVD, FedAvg, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova]
+  strategy : FedAWA #[FedAWA, FedKLSVD, FedAvg, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova]
 
 client:
   loss: FocalLoss # [CrossEntropyLoss, FocalLoss]
   epochs : 1
   batch_size : 32
   test_batch_size : 32
-  lr: 0.001 #  [0.00002, 0.0001,0.001, 0.005, 0.01, 0.1, 0.2] 0.005->distilbert-base-uncased, 0.001->bert-base-uncased, 0.0001->Qwen/Qwen1.5-0.5B
+  lr: 0.005 #  [0.00002, 0.0001,0.001, 0.005, 0.01, 0.1, 0.2] 0.005->distilbert-base-uncased, 0.001->bert-base-uncased, 0.0001->Qwen/Qwen1.5-0.5B
   save_train_res : True
-  total_cpus : 36 # no. of CPU cores that are assigned for all simulation
+  total_cpus : 20 # no. of CPU cores that are assigned for all simulation
   total_gpus : 1 # no. of GPU's assigned for whole simulation
   gpu : True  # True or False, Use GPU for training or not.
   num_cpus : 2  # no. of CPU cores that are assigned for each actor
@@ -46,10 +46,10 @@ peft:
   method: lora # ['pissa', 'milora', 'middle', 'fedkls', 'lora']
 
 fedawa_config:
-  server_valid_ratio: 0.02 
-  server_epochs: 10       
+  server_valid_ratio: 0.2 
+  server_epochs: 1       
   server_optimizer: adam   
-  server_lr: 0.01
+  server_lr: 0.005
   gamma: 1.0            
   reg_distance: cos       
 
