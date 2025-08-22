@@ -80,6 +80,8 @@ class FedAWAStrategy(FedAvg):
         if initial_parameters is not None:
             self.global_parameters = fl.common.parameters_to_ndarrays(initial_parameters)
             log(INFO, "Initialized global parameters from provided initial_parameters")
+            self.param_names = list(self.model.state_dict().keys())
+            print(f"FedAWA Strategy initialized with {len(self.param_names)} parameters")
 
     def __repr__(self) -> str:
         return "FedAWA Strategy"
@@ -93,7 +95,7 @@ class FedAWAStrategy(FedAvg):
         valset = valset.with_transform(self.apply_transforms)
         return DataLoader(valset, batch_size=self.config["batch_size"], shuffle=True)
 
-    def _filter_adapter_parameters(self): ###ERROR
+    def _filter_adapter_parameters(self):
         """Filter global parameters to include only adapters (A, B, biases)."""
         if not self.config["peft_enabled"]:
             return
@@ -121,28 +123,6 @@ class FedAWAStrategy(FedAvg):
             self.param_names = filtered_names
             log(INFO, f"Filtered global parameters for PEFT: {len(self.global_parameters)} parameters")
 
-    # def initialize_parameters(self, client_manager: fl.server.client_manager.ClientManager) -> Optional[Parameters]:
-    #         """Initialize global parameters and store them."""
-    #         if self.global_parameters is not None:
-    #             log(INFO, "Returning pre-initialized global parameters")
-    #             return fl.common.ndarrays_to_parameters(self.global_parameters)
-            
-    #         params = super().initialize_parameters(client_manager)
-    #         if params is None:
-    #             log(INFO, "No initial parameters from strategy, requesting from a random client")
-    #             random_client = client_manager.sample(1)[0]
-    #             ins = GetParametersIns(config={})
-    #             try:
-    #                 get_parameters_res = random_client.get_parameters(ins=ins, timeout=None)
-    #                 params = get_parameters_res.parameters
-    #             except Exception as e:
-    #                 log(WARNING, f"Failed to get parameters from client: {e}")
-    #                 return None
-    #         if params is not None:
-    #             self.global_parameters = fl.common.parameters_to_ndarrays(params)
-    #             log(INFO, "Global parameters initialized from client")
-    #         return params
-
     def initialize_parameters(self, client_manager: fl.server.client_manager.ClientManager) -> Optional[Parameters]:
         """Initialize global parameters, restricting to adapters for PEFT."""
         if self.global_parameters is not None:
@@ -162,7 +142,6 @@ class FedAWAStrategy(FedAvg):
                 return None
         if params is not None:
             self.global_parameters = fl.common.parameters_to_ndarrays(params)
-            self._filter_adapter_parameters()
             log(INFO, "Global parameters initialized from client")
         return params
 
@@ -187,6 +166,9 @@ class FedAWAStrategy(FedAvg):
         initial_weights = [size / total_size for size in dataset_sizes]
 
         # Compute client vectors: τ_k = θ_k - θ_g
+        if server_round == 1 and self.config["peft_enabled"] == True:
+            self._filter_adapter_parameters()
+
         client_vectors = [
             [local - global_p for local, global_p in zip(c_params, self.global_parameters)]
             for c_params in client_params
@@ -194,7 +176,7 @@ class FedAWAStrategy(FedAvg):
 
         # Optimize aggregation weights
         optimized_weights = self.optimize_weights(client_vectors, client_params, initial_weights)
-
+ 
         # Aggregate parameters: θ_g = Σ λ_k θ_k
         aggregated_params = [np.zeros_like(p) for p in client_params[0]]
         for lambda_k, c_params in zip(optimized_weights, client_params):
@@ -254,7 +236,9 @@ class FedAWAStrategy(FedAvg):
                         else:
                             model_params = [mp + weight * cp for mp, cp in zip(model_params, c_params)]
 
-                    set_params(self.model, model_params)
+                    #Convert model_params to NumPy arrays before passing to set_params
+                    model_params_np = [param.detach().cpu().numpy() for param in model_params]
+                    set_params(self.model, model_params_np)
 
                     optimizer.zero_grad()
                     output = self.model(input_ids=input_ids, attention_mask=attention_mask).logits
