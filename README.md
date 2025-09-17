@@ -3,7 +3,7 @@
 <!-- ![FedKLS radar chart](placeholder-for-logo.png) -->
 
 
-FedKLS is an intuitive and powerful yet simple-to-use research framework for KL-guided, SVD-based low-rank personalization in federated learning, built on top of [Flower](https://flower.ai/) and [FedEasy](https://github.com/nclabteam/FedEasy) frameworks. It enables scalable, communication-efficient experiments for non-IID federated scenarios featuring advanced parameter-efficient adaptation (e.g., LoRA, PiSSA, MiLoRA, and FedKLS).
+FedKLS is an intuitive and powerful yet simple-to-use research framework for KL-guided, SVD-based low-rank personalization in federated learning, built on top of [Flower](https://flower.ai/) and [FedEasy](https://fedeasy.readthedocs.io/) frameworks. It enables scalable, communication-efficient experiments for non-IID federated scenarios featuring advanced parameter-efficient adaptation (e.g., LoRA, PiSSA, MiLoRA, and FedKLS).
 
 This repository provides an easy-to-use Federated Learning framework based on Flower and PyTorch. It's designed to simplify the process of setting up and running federated learning experiments.
 
