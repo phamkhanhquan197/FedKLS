@@ -31,9 +31,10 @@ from mak.strategies.scaffold_strategy import ScaffoldStrategy
 from mak.strategies.fedklsvd_strategy import FedKLSVDStrategy
 from mak.utils.dataset_info import dataset_info
 from mak.utils.general import set_params, test, weighted_average
-from mak.models.svd_model import SVDAdapter
+from mak.models.svd_model import SVDAdapter, ConvAdapter
 import math
 from collections import Counter
+import torch.nn.init as init
 
 
 def get_device_and_resources(config_sim):
@@ -201,6 +202,13 @@ def extract_linear_layers(model):
 
     return linear_layers
 
+def extract_conv2_layers(model):
+    conv2_layers = {}
+    for name, module in model.named_modules():
+        if isinstance(module, torch.nn.Conv2d) and (name.endswith("conv2") or name.endswith(".conv1")):
+            conv2_layers[name] = module
+    return conv2_layers
+
 def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
     """
     Apply SVD to the specified linear layers of the model, replacing them with SVDAdapter.
@@ -215,73 +223,146 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
     Returns:
         nn.Module: The modified model.
     """    
-    linear_layers = extract_linear_layers(model)
-    log(INFO, f"Found {len(linear_layers)} linear layers to adapt with SVD.")
+    if config["common"]["model"] in ["Resnet18", "ResNet18Pretrained", "ResNet34", "ResNet34Pretrained"]:
+        layers_to_svd = extract_conv2_layers(model) 
+        log(INFO, f"Found {len(layers_to_svd)} conv2 layers to adapt with SVD.")
+    else:
+        layers_to_svd = extract_linear_layers(model) 
+        log(INFO, f"Found {len(layers_to_svd)} linear layers to adapt with SVD.")
 
-    for name, layer in linear_layers.items():
+    rank = config["peft"]["rank"]
+    alpha = config["peft"]["alpha"]
+    method = config["peft"]["method"]
+
+    for name, layer in layers_to_svd.items():
         weight_matrix = layer.weight.data
         original_bias = layer.bias.data if layer.bias is not None else None
-        rank = config["peft"]["rank"]
-        alpha = config["peft"]["alpha"]
-        method = config["peft"]["method"]
+
 
         if method == 'lora':
             # Original LoRA: Random initialization without SVD
-            d_out, d_in = weight_matrix.shape
-            A = torch.randn(d_out, rank, device=weight_matrix.device) * 0.01  # Gaussian init
-            B = torch.zeros(rank, d_in, device=weight_matrix.device)  # Zero init
-            W_res = weight_matrix
+            if isinstance(layer, torch.nn.Conv2d):
+                c_out, c_in, k1, k2 = weight_matrix.shape
+                A = torch.randn(c_out, rank, device=weight_matrix.device) * 0.01  # Gaussian init
+                B = torch.zeros(rank, c_in * k1 * k2, device=weight_matrix.device)  # Zero init
+                W_res = weight_matrix
+            else:
+                d_out, d_in = weight_matrix.shape
+                A = torch.randn(d_out, rank, device=weight_matrix.device) * 0.01  # Gaussian init
+                B = torch.zeros(rank, d_in, device=weight_matrix.device)  # Zero init
+                W_res = weight_matrix
             log(INFO, f"Layer {name}: Applied LoRA with rank {rank}.")
         else:
-            # Perform SVD for other methods
-            U, S, Vt = torch.linalg.svd(weight_matrix, full_matrices=False)
-            max_possible_rank = S.size(0)
-            if rank > max_possible_rank:
-                log(INFO, f"Warning: Requested rank {rank} for layer {name} > max possible rank {max_possible_rank}.")
-                rank = max_possible_rank
+            if isinstance(layer, torch.nn.Conv2d): #Conv2d layer SVD
+                # weight_matrix = weight_matrix.view(weight_matrix.size(0), -1)  # Flatten Conv2d weights
+                c_out, c_in, k1, k2 = weight_matrix.shape
+                W_flat = weight_matrix.view(c_out, -1)  # Shape: [c_out, c_in * k1 * k2]
 
-            # Select components based on method
-            if method == 'pissa':
-                # Principal component as adapter (PiSSA)
-                U_select = U[:, :rank]
-                S_select = S[:rank]
-                Vt_select = Vt[:rank, :]
-
-            elif method == 'milora':
-                # Minor component as adapter (MiLoRA)
-                U_select = U[:, -rank:]
-                S_select = S[-rank:]
-                Vt_select = Vt[-rank:, :]
-
-            elif method == 'middle':
-                middle_index_start = math.floor(max_possible_rank/2)
-                middle_index_end = middle_index_start + rank
-                U_select = U[:, middle_index_start:middle_index_end]
-                S_select = S[middle_index_start:middle_index_end]
-                Vt_select = Vt[middle_index_start:middle_index_end, :]
-
-            elif method == 'fedkls':
-                index_start = math.floor(kl_norm * (max_possible_rank - rank)) if kl_norm is not None else 0
-                index_end = index_start + rank
-                if client_id is not None:
-                    log(INFO, f"Client {client_id}: SVD applied with index range {index_start} to {index_end} with rank {rank} for layer {name}.")
-                U_select = U[:, index_start:index_end]
-                S_select = S[index_start:index_end]
+                # SVD decompistion
+                U, S, Vt = torch.linalg.svd(W_flat, full_matrices=False)
+                max_possible_rank = S.size(0)
+                if rank > max_possible_rank:
+                    log(INFO, f"Warning: Requested rank {rank} for layer {name} > max possible rank {max_possible_rank}.")
+                    rank = max_possible_rank
                 
-                Vt_select = Vt[index_start:index_end, :]
-            else:
-                raise ValueError(f"Unknown method: {method}")
 
-            W_res = weight_matrix - (U_select @ torch.diag(S_select) @ Vt_select)
-            A = U_select @ torch.diag(torch.sqrt(S_select))
-            B = torch.diag(torch.sqrt(S_select)) @ Vt_select
+                # Select components based on method
+                if method == 'pissa':
+                    # Principal component as adapter (PiSSA)
+                    U_select = U[:, :rank]
+                    S_select = S[:rank]
+                    Vt_select = Vt[:rank, :]
 
-        # Create the SVDAdapter
-        new_layer = SVDAdapter(W_res=W_res, A=A, B=B, alpha=alpha, rank=rank, original_bias=original_bias)
+                elif method == 'milora':
+                    # Minor component as adapter (MiLoRA)
+                    U_select = U[:, -rank:]
+                    S_select = S[-rank:]
+                    Vt_select = Vt[-rank:, :]
+
+                elif method == 'middle':
+                    middle_index_start = math.floor(max_possible_rank/2)
+                    middle_index_end = middle_index_start + rank
+                    U_select = U[:, middle_index_start:middle_index_end]
+                    S_select = S[middle_index_start:middle_index_end]
+                    Vt_select = Vt[middle_index_start:middle_index_end, :]
+
+                elif method == 'fedkls':
+                    index_start = math.floor(kl_norm * (max_possible_rank - rank)) if kl_norm is not None else 0
+                    index_end = index_start + rank
+                    if client_id is not None:
+                        log(INFO, f"Client {client_id}: SVD applied with index range {index_start} to {index_end} with rank {rank} for layer {name}.")
+                    U_select = U[:, index_start:index_end]
+                    S_select = S[index_start:index_end]
+                    Vt_select = Vt[index_start:index_end, :]
+
+                else:
+                    raise ValueError(f"Unknown method: {method}")
+            
+                # Construct A and B for this (i,j) position
+                W_res = weight_matrix - (U_select @ torch.diag(S_select) @ Vt_select).view(c_out, c_in, k1, k2)
+                A = U_select @ torch.diag(torch.sqrt(S_select))  # Shape: [c_out, rank]
+                B = torch.diag(torch.sqrt(S_select)) @ Vt_select  # Shape: [rank, c_in * k1 * k2]
+
+                # ----- Compute relative differences -----
+                rel_recon_error = torch.norm(weight_matrix - (A @ B).view(c_out, c_in, k1, k2)) / torch.norm(weight_matrix)
+                print(f"Relative reconstruction error (W vs ΔW): {rel_recon_error:.6f}")
+
+            else: #Linear layer SVD
+                U, S, Vt = torch.linalg.svd(weight_matrix, full_matrices=False) 
+                max_possible_rank = S.size(0)
+                if rank > max_possible_rank:
+                    log(INFO, f"Warning: Requested rank {rank} for layer {name} > max possible rank {max_possible_rank}.")
+                    rank = max_possible_rank
+
+                # Select components based on method
+                if method == 'pissa':
+                    # Principal component as adapter (PiSSA)
+                    U_select = U[:, :rank]
+                    S_select = S[:rank]
+                    Vt_select = Vt[:rank, :]
+
+                elif method == 'milora':
+                    # Minor component as adapter (MiLoRA)
+                    U_select = U[:, -rank:]
+                    S_select = S[-rank:]
+                    Vt_select = Vt[-rank:, :]
+
+                elif method == 'middle':
+                    middle_index_start = math.floor(max_possible_rank/2)
+                    middle_index_end = middle_index_start + rank
+                    U_select = U[:, middle_index_start:middle_index_end]
+                    S_select = S[middle_index_start:middle_index_end]
+                    Vt_select = Vt[middle_index_start:middle_index_end, :]
+
+                elif method == 'fedkls':
+                    index_start = math.floor(kl_norm * (max_possible_rank - rank)) if kl_norm is not None else 0
+                    index_end = index_start + rank
+                    if client_id is not None:
+                        log(INFO, f"Client {client_id}: SVD applied with index range {index_start} to {index_end} with rank {rank} for layer {name}.")
+                    U_select = U[:, index_start:index_end]
+                    S_select = S[index_start:index_end]
+                    Vt_select = Vt[index_start:index_end, :]
+                else:
+                    raise ValueError(f"Unknown method: {method}")
+
+                W_res = weight_matrix - (U_select @ torch.diag(S_select) @ Vt_select)
+                A = U_select @ torch.diag(torch.sqrt(S_select))
+                B = torch.diag(torch.sqrt(S_select)) @ Vt_select
+
+                rel_recon_error = torch.norm(weight_matrix - A @ B) / torch.norm(weight_matrix)
+                log(INFO, f"Layer {name}: Relative reconstruction error (W vs ΔW): {rel_recon_error:.6f}")
+
+
+            log(INFO, f"Layer {name}: Applied {method} with rank {rank}.")
+
+        # Create appropriate adapter
+        if isinstance(layer, torch.nn.Conv2d):
+            new_layer = ConvAdapter(original_conv=layer, W_res=W_res, A=A, B=B, alpha=alpha, rank=rank)
+        else:
+            new_layer = SVDAdapter(W_res=W_res, A=A, B=B, alpha=alpha, rank=rank, original_bias=original_bias)
         
         # Split layer name and replace the original layer
         parent_name, child_name = name.rsplit(".", 1)
-        
         parent = model.get_submodule(parent_name)
         setattr(parent, child_name, new_layer)  
     
@@ -407,7 +488,6 @@ def get_evaluate_fn(
         server_round: int, parameters: fl.common.NDArrays, config: Dict[str, Scalar]
     ):  
         ## model = get_model(config=config_sim, shape=shape)
-        ## model = apply_svd_to_model(model=model, config=config_sim)
         set_params(model, parameters)
 
         model.to(device)
@@ -428,15 +508,15 @@ def get_evaluate_fn(
                 INFO,
                 f" =>>>>> Min Loss improved from {metrics_df['global_loss'].min()} to : {loss} =>>>>> Saving best model with accuracy : {accuracy}, f1_score : {f1}", 
             )
-            torch.save(
-                model.state_dict(), os.path.join(save_model_dir, "saved_best_model.pth")
-            )
+        #     torch.save(
+        #         model.state_dict(), os.path.join(save_model_dir, "saved_best_model.pth")
+        #     )
 
-        if server_round == config_sim["server"]["num_rounds"]:
-            torch.save(
-                model.state_dict(),
-                os.path.join(save_model_dir, "saved_final_model.pth"),
-            )
+        # if server_round == config_sim["server"]["num_rounds"]:
+        #     torch.save(
+        #         model.state_dict(),
+        #         os.path.join(save_model_dir, "saved_final_model.pth"),
+        #     )
         return loss, {"accuracy": accuracy, "f1_score": f1}
     return evaluate
 
