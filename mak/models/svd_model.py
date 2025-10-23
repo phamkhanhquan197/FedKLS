@@ -47,3 +47,44 @@ class SVDAdapter(nn.Module):
             f"rank={self.rank}, alpha={self.alpha}, scaling={self.scaling:.4f}"
             f"{bias_info})"
         )
+
+class ConvAdapter(nn.Module):
+    """Adapter for Conv2d layers using LoRA, without bias."""
+    def __init__(self, original_conv, W_res, A, B, alpha, rank):
+        super().__init__()
+        self.W_res = W_res.cuda()
+        self.W_res.requires_grad = False  # Freeze the residual matrix
+        self.A = nn.Parameter(A.clone().detach())  # Trainable
+        self.B = nn.Parameter(B.clone().detach())  # Trainable
+        self.lora_scale = alpha / rank if rank > 0 else 0.0
+        self.out_channels = original_conv.out_channels
+        self.in_channels = original_conv.in_channels
+        self.kernel_size = original_conv.kernel_size
+        self.stride = original_conv.stride
+        self.padding = original_conv.padding
+        self.dilation = original_conv.dilation
+        self.groups = original_conv.groups
+        self.rank = rank
+        self.alpha = alpha
+
+    def forward(self, x):
+         # A [Cout, r] @ B [r, Cin*k1*k2] = [Cout, Cin*k1*k2]
+        delta_w_flat = torch.matmul(self.A, self.B) * self.lora_scale
+        # Reshape back to [Cout, Cin, k1, k2]
+        delta_w = delta_w_flat.view(
+            self.out_channels,
+            self.in_channels,
+            self.kernel_size[0],
+            self.kernel_size[1]
+        )
+        # Effective weight = W_res (frozen) + ΔW (trainable)
+        effective_weight = self.W_res + delta_w
+
+        return F.conv2d(x, effective_weight, bias=None, stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups)
+
+    def __repr__(self):
+        return (f"ConvAdapter(W_res: {list(self.W_res.shape)} (buffer, frozen), "
+                f"A: {list(self.A.shape)} (trainable: {self.A.requires_grad}), "
+                f"B: {list(self.B.shape)} (trainable: {self.B.requires_grad}), "
+                f"rank={self.rank}, alpha={self.alpha}, scaling={self.lora_scale:.4f}, "
+                f"bias=None (trainable: False))")
