@@ -85,6 +85,19 @@ dataset_info = {  # Image datasets
         "input_shape": (128,), #Placeholder for text sequence length
         "max_sequence_length": 128, #For transformer models
     },
-
+    ########################################################################
+    # Multimodal datasets
+    "pranavmr/MM-IMDb": {
+        "num_classes": 10,
+        "feature_key": ["image", "text"],
+        "output_column": "labels",
+        "test_set": None,  # only 'train' split is provided
+        "input_shape": {
+            "image": (3, 224, 224),
+            "text": (128,)
+        },  
+        "max_sequence_length": 128,  # For transformer models
+        "multi_label": True, # each movice can have multiple genres
+    },
 
 }
