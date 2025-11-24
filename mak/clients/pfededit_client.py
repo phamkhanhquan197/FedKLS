@@ -5,6 +5,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from mak.clients.base_client import BaseClient
+from mak.utils.general import set_params
 
 
 class PFedEditClient(BaseClient):
@@ -38,15 +39,21 @@ class PFedEditClient(BaseClient):
             save_dir=save_dir,
         )
         self.num_layer = num_layer
-        self.module_name_list = self.get_model_list(model=model)
+        self.module_name_list = self.get_model_list(model=self.model)
         self.previous_iter_model_weight = copy.deepcopy(self.model)
+        # storage for forward hook outputs
+        self.model_hook: Dict[str, Any] = {}
 
     def set_parameters(self, parameters):
+        # Snapshot current local weights, pick private layers, then recover those modules
         self.set_previous_local_weights()
-        layers = self.casual_trace(self.valset)
-        for k in range(len(layers)):
-            print(f" round {round+1} user {i} repalced layer: {layers[k]}")
-            self.model = self.recover_from_clean_model(self.model, layers[k])
+        # Use DataLoader for validation set when tracing layers
+        val_loader = DataLoader(self.valset, batch_size=self.test_batch_size)
+        layers = self.casual_trace(val_loader) or []
+        for layer_name in layers:
+            print(f"Client {self.client_id} will keep layer: {layer_name}")
+            self.model = self.recover_from_clean_model(self.model, layer_name)
+        # Finally set global parameters onto model (after module replacement)
         set_params(self.model, parameters)
 
     def set_previous_local_weights(self):
@@ -149,22 +156,18 @@ class PFedEditClient(BaseClient):
         self.layer_name = chosen
         return chosen
 
-    # Helper to snapshot previous local weights
-    def set_previous_local_weights(self):
-        for key, value in self.model.state_dict().items():
-            self.previous_iter_model_weight.state_dict()[key].data.copy_(self.model.state_dict()[key])
+    # (set_previous_local_weights already defined above)
 
-    @staticmethod
-    def get_model_list(model):
+    def get_model_list(self, model):
         model_name = model.__class__.__name__
         if "vit" in model_name.lower():
-            module_name_list = get_sub_ViT_module_name(model)
-        elif "resnet18" in model_name.lower():
-            module_name_list = get_sub_ResNet_module_name(model)
+            module_name_list = self.get_sub_ViT_module_name(model)
+        elif "resnet" in model_name.lower():
+            module_name_list = self.get_sub_ResNet_module_name(model)
         elif "mlp" in model_name.lower():
-            module_name_list = get_MLP_module_name(model)
+            module_name_list = self.get_MLP_module_name(model)
         elif "vgg_11" in model_name.lower():
-            module_name_list = get_sub_VGG_module_name(model)
+            module_name_list = self.get_sub_VGG_module_name(model)
         else:
             module_name_list = []
             print("No matching model found for pfededit_client module extraction.")
