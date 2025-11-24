@@ -168,3 +168,6 @@ dataset/
 *.sh
 ./config.yaml
 config.yaml
+
+
+output/
