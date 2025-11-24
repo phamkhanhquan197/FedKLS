@@ -26,7 +26,6 @@ class PFedEditClient(BaseClient):
         device,
         save_dir,
         num_layer: int = 1,
-        module_name_list: List[str] = None,
         **kwargs: Any,
     ):
         super().__init__(
@@ -39,8 +38,10 @@ class PFedEditClient(BaseClient):
             save_dir=save_dir,
         )
         self.num_layer = num_layer
-        self.module_name_list = module_name_list or []
-        self.previous_iter_model_weight = None
+        self.module_name_list = self.get_model_list(
+            model_name=config_sim["model"]["name"], model=model
+        )
+        self.previous_iter_model_weight = copy.deepcopy(self.model)
 
     def set_parameters(self, parameters):
         self.set_previous_local_weights()
@@ -155,13 +156,64 @@ class PFedEditClient(BaseClient):
         for key, value in self.model.state_dict().items():
             self.previous_iter_model_weight.state_dict()[key].data.copy_(self.model.state_dict()[key])
 
+    @staticmethod
     def get_model_list(model_name, model):
-        if model_name == "vit":
+        if "vit" in model_name.lower():
             module_name_list = get_sub_ViT_module_name(model)
-        elif model_name == "ResNet18":
+        elif "resnet18" in model_name.lower():
             module_name_list = get_sub_ResNet_module_name(model)
-        elif model_name == "MLP":
+        elif "mlp" in model_name.lower():
             module_name_list = get_MLP_module_name(model)
-        elif model_name == "VGG_11":
+        elif "vgg_11" in model_name.lower():
             module_name_list = get_sub_VGG_module_name(model)
+        else:
+            module_name_list = []
+            print("No matching model found for pfededit_client module extraction.")
         return module_name_list
+    
+    @staticmethod
+    def get_sub_ViT_module_name(model):
+        name_list = []
+        for i, _ in model.named_modules():
+            if i == "model.conv_proj" or i == "model.encoder.ln" or i == "model.heads.head":
+                name_list.append(i)
+            elif len(i.split(".")) > 4 and "dropout" not in i:    #and "dropout" not in i
+                if i.split(".")[-1]!= "mlp":name_list.append(i)
+        return name_list
+
+    @staticmethod
+    def get_sub_ResNet_module_name(model):
+        name_list = []
+        for i, _ in model.named_modules():
+            if len(i.split(".")) < 4:
+                if i in ["backbone.avgpool", "backbone.conv1", "backbone.bn1", "backbone.relu", "backbone.maxpool"]:
+                    name_list.append(i)
+            else:
+                name_list.append(i)
+        return name_list
+
+    @staticmethod
+    def get_sub_VGG_module_name(model):
+        name_list = []
+        for i,_ in model.named_modules():
+            if i not in ["", "network", "linear_layers"]:
+                name_list.append(i)
+        return name_list
+
+    @staticmethod
+    def get_MLP_module_name(model):
+        name_list = []
+        for x, _ in model.named_modules():
+            if x != "": name_list.append(x)
+        return name_list
+
+    @staticmethod
+    def get_top_VIT_module_name(model):
+        name_list = []
+        for i, _ in model.named_modules():
+            if len(i.split(".")) <= 4:
+                if i not in ["", "model", "model.encoder.dropout", "model.heads.head", "model.encoder.ln","model.encoder.layers"]:
+                    name_list.append(i)
+            elif i.split(".")[-1] == "mlp":
+                name_list.append(i)
+        return name_list
