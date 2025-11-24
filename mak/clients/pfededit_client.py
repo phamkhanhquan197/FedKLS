@@ -38,9 +38,7 @@ class PFedEditClient(BaseClient):
             save_dir=save_dir,
         )
         self.num_layer = num_layer
-        self.module_name_list = self.get_model_list(
-            model_name=config_sim["model"], model=model
-        )
+        self.module_name_list = self.get_model_list(model=model)
         self.previous_iter_model_weight = copy.deepcopy(self.model)
 
     def set_parameters(self, parameters):
@@ -157,7 +155,8 @@ class PFedEditClient(BaseClient):
             self.previous_iter_model_weight.state_dict()[key].data.copy_(self.model.state_dict()[key])
 
     @staticmethod
-    def get_model_list(model_name, model):
+    def get_model_list(model):
+        model_name = model.__class__.__name__
         if "vit" in model_name.lower():
             module_name_list = get_sub_ViT_module_name(model)
         elif "resnet18" in model_name.lower():
