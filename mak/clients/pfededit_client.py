@@ -39,7 +39,7 @@ class PFedEditClient(BaseClient):
         )
         self.num_layer = num_layer
         self.module_name_list = self.get_model_list(
-            model_name=config_sim["model"]["name"], model=model
+            model_name=config_sim["model"], model=model
         )
         self.previous_iter_model_weight = copy.deepcopy(self.model)
 
