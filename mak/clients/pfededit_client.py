@@ -1,5 +1,6 @@
 import copy
-from typing import List, Dict, Any
+import math
+from typing import Any, Dict, List
 
 import torch
 from torch.utils.data import DataLoader
@@ -26,7 +27,6 @@ class PFedEditClient(BaseClient):
         config_sim,
         device,
         save_dir,
-        num_layer: int = 1,
         **kwargs: Any,
     ):
         super().__init__(
@@ -38,8 +38,11 @@ class PFedEditClient(BaseClient):
             device=device,
             save_dir=save_dir,
         )
-        self.num_layer = num_layer
+        percent_replace_layer = 3
         self.module_name_list = self.get_model_list(model=self.model)
+        self.num_layer = math.ceil(
+            (percent_replace_layer) / 100 * len(self.module_name_list)
+        )
         self.previous_iter_model_weight = copy.deepcopy(self.model)
         # storage for forward hook outputs
         self.model_hook: Dict[str, Any] = {}
@@ -59,7 +62,9 @@ class PFedEditClient(BaseClient):
     def set_previous_local_weights(self):
         # record previous local training weights
         for key, value in self.model.state_dict().items():
-            self.previous_iter_model_weight.state_dict()[key].data.copy_(self.model.state_dict()[key])
+            self.previous_iter_model_weight.state_dict()[key].data.copy_(
+                self.model.state_dict()[key]
+            )
 
     def recover_from_clean_model(self, model, module_name):
         module = self.get_module(module_name)
@@ -67,8 +72,9 @@ class PFedEditClient(BaseClient):
         return model
 
     def get_module(self, name):
-        for n,m in self.previous_iter_model_weight.named_modules():
-            if n == name:return m.to(self.device)      #same if using copy.deepcopy() or not
+        for n, m in self.previous_iter_model_weight.named_modules():
+            if n == name:
+                return m.to(self.device)  # same if using copy.deepcopy() or not
         raise LookupError(name)
 
     def hook_to_cpu(self):
@@ -82,7 +88,14 @@ class PFedEditClient(BaseClient):
             elif val is not None and hasattr(val, "detach"):
                 self.model_hook[key] = val.detach().cpu()
 
-    def eval_model_with_hook(self, model: torch.nn.Module, test_loader: DataLoader, bias: List[float], recover: bool, recovered_name: str = None):
+    def eval_model_with_hook(
+        self,
+        model: torch.nn.Module,
+        test_loader: DataLoader,
+        bias: List[float],
+        recover: bool,
+        recovered_name: str = None,
+    ):
         model.to(self.device)
         model.eval()
 
@@ -93,14 +106,85 @@ class PFedEditClient(BaseClient):
             gt_match_list = []
 
         with torch.no_grad():
-            for x, y in test_loader:
-                x, y = x.to(self.device), y.to(self.device)
-                logits, y_pred = model(x)
-                bias.append(self.compute_st_bias(y_pred, y))
-                if recover:
-                    for a, b in zip(y_pred, y):
-                        gt_match_list.append(True) if torch.argmax(a) == b else gt_match_list.append(False)
-                del y_pred, logits
+            for batch in test_loader:
+                # Text / content datasets: models expect input_ids, attention_mask, labels
+                if self.feature_key == "text" or self.feature_key == "content":
+                    if isinstance(batch, dict):
+                        input_ids = batch.get("input_ids")
+                        attention_mask = batch.get("attention_mask")
+                        labels = batch.get("labels")
+                        if (
+                            input_ids is None
+                            or attention_mask is None
+                            or labels is None
+                        ):
+                            raise TypeError(
+                                "Text batch dict must contain 'input_ids', 'attention_mask', 'labels'"
+                            )
+                        input_ids = input_ids.to(self.device)
+                        attention_mask = attention_mask.to(self.device)
+                        labels = labels.to(self.device)
+                    elif isinstance(batch, (list, tuple)) and len(batch) >= 3:
+                        input_ids = batch[0].to(self.device)
+                        attention_mask = batch[1].to(self.device)
+                        labels = batch[2].to(self.device)
+                    else:
+                        raise TypeError(
+                            f"Unsupported text batch format in eval_model_with_hook: {type(batch)}"
+                        )
+
+                    outputs = model(
+                        input_ids, attention_mask=attention_mask, labels=labels
+                    )
+                    logits = getattr(
+                        outputs,
+                        "logits",
+                        outputs[0] if isinstance(outputs, (list, tuple)) else outputs,
+                    )
+                    probs = torch.softmax(logits, dim=-1)
+                    bias.append(self.compute_st_bias(probs, labels))
+                    if recover:
+                        for a, b in zip(probs, labels):
+                            (
+                                gt_match_list.append(True)
+                                if torch.argmax(a) == b
+                                else gt_match_list.append(False)
+                            )
+                    del logits, probs
+                else:
+                    # Image / dict batches: follow BaseClient convention
+                    if isinstance(batch, dict):
+                        keys = list(batch.keys())
+                        x_label, y_label = keys[0], keys[1]
+                        x, y = batch[x_label].to(self.device), batch[y_label].to(
+                            self.device
+                        )
+                    elif isinstance(batch, (list, tuple)) and len(batch) >= 2:
+                        x, y = batch[0].to(self.device), batch[1].to(self.device)
+                    else:
+                        raise TypeError(
+                            f"Unsupported image batch format in eval_model_with_hook: {type(batch)}"
+                        )
+
+                    outputs = model(x)
+                    # model may return (logits, probs) or just logits
+                    if isinstance(outputs, (list, tuple)) and len(outputs) >= 2:
+                        logits, y_pred = outputs[0], outputs[1]
+                    else:
+                        logits = outputs
+                        y_pred = None
+                    probs = (
+                        y_pred if y_pred is not None else torch.softmax(logits, dim=-1)
+                    )
+                    bias.append(self.compute_st_bias(probs, y))
+                    if recover:
+                        for a, b in zip(probs, y):
+                            (
+                                gt_match_list.append(True)
+                                if torch.argmax(a) == b
+                                else gt_match_list.append(False)
+                            )
+                    del logits, probs
         model.to("cpu")
         if recover:
             return bias, gt_match_list
@@ -126,13 +210,27 @@ class PFedEditClient(BaseClient):
         if not self.module_name_list:
             return
 
-        clean_local_bias = self.eval_model_with_hook(model=self.previous_iter_model_weight, test_loader=data_loader, recover=False, bias=[])
+        clean_local_bias = self.eval_model_with_hook(
+            model=self.previous_iter_model_weight,
+            test_loader=data_loader,
+            recover=False,
+            bias=[],
+        )
 
         total_effect = {}
         for i, name in enumerate(self.module_name_list):
-            recovered_bias, gt_match_list = self.eval_model_with_hook(model=copy.deepcopy(self.model), test_loader=data_loader, recover=True, bias=[], recovered_name=name)
+            recovered_bias, gt_match_list = self.eval_model_with_hook(
+                model=copy.deepcopy(self.model),
+                test_loader=data_loader,
+                recover=True,
+                bias=[],
+                recovered_name=name,
+            )
             # ratio differences
-            total_effect[name] = [recovered_bias[x] / clean_local_bias[x] - 1 for x in range(len(clean_local_bias))]
+            total_effect[name] = [
+                recovered_bias[x] / clean_local_bias[x] - 1
+                for x in range(len(clean_local_bias))
+            ]
 
             tf_list = {"A": 0, "B": 0, "C": 0, "D": 0, "E": 0}
             for val, mask in zip(total_effect[name], gt_match_list):
@@ -149,7 +247,13 @@ class PFedEditClient(BaseClient):
 
         # sort by tuple (A,B,C,D,E)
         def custom_sort(data):
-            return (data[1]["A"], data[1]["B"], data[1]["C"], data[1]["D"], data[1]["E"])
+            return (
+                data[1]["A"],
+                data[1]["B"],
+                data[1]["C"],
+                data[1]["D"],
+                data[1]["E"],
+            )
 
         sorted_effect = sorted(total_effect.items(), key=custom_sort, reverse=True)
         chosen = [name for name, _ in sorted_effect[: self.num_layer]]
@@ -172,15 +276,20 @@ class PFedEditClient(BaseClient):
             module_name_list = []
             print("No matching model found for pfededit_client module extraction.")
         return module_name_list
-    
+
     @staticmethod
     def get_sub_ViT_module_name(model):
         name_list = []
         for i, _ in model.named_modules():
-            if i == "model.conv_proj" or i == "model.encoder.ln" or i == "model.heads.head":
+            if (
+                i == "model.conv_proj"
+                or i == "model.encoder.ln"
+                or i == "model.heads.head"
+            ):
                 name_list.append(i)
-            elif len(i.split(".")) > 4 and "dropout" not in i:    #and "dropout" not in i
-                if i.split(".")[-1]!= "mlp":name_list.append(i)
+            elif len(i.split(".")) > 4 and "dropout" not in i:  # and "dropout" not in i
+                if i.split(".")[-1] != "mlp":
+                    name_list.append(i)
         return name_list
 
     @staticmethod
@@ -188,7 +297,13 @@ class PFedEditClient(BaseClient):
         name_list = []
         for i, _ in model.named_modules():
             if len(i.split(".")) < 4:
-                if i in ["backbone.avgpool", "backbone.conv1", "backbone.bn1", "backbone.relu", "backbone.maxpool"]:
+                if i in [
+                    "backbone.avgpool",
+                    "backbone.conv1",
+                    "backbone.bn1",
+                    "backbone.relu",
+                    "backbone.maxpool",
+                ]:
                     name_list.append(i)
             else:
                 name_list.append(i)
@@ -197,7 +312,7 @@ class PFedEditClient(BaseClient):
     @staticmethod
     def get_sub_VGG_module_name(model):
         name_list = []
-        for i,_ in model.named_modules():
+        for i, _ in model.named_modules():
             if i not in ["", "network", "linear_layers"]:
                 name_list.append(i)
         return name_list
@@ -206,7 +321,8 @@ class PFedEditClient(BaseClient):
     def get_MLP_module_name(model):
         name_list = []
         for x, _ in model.named_modules():
-            if x != "": name_list.append(x)
+            if x != "":
+                name_list.append(x)
         return name_list
 
     @staticmethod
@@ -214,7 +330,14 @@ class PFedEditClient(BaseClient):
         name_list = []
         for i, _ in model.named_modules():
             if len(i.split(".")) <= 4:
-                if i not in ["", "model", "model.encoder.dropout", "model.heads.head", "model.encoder.ln","model.encoder.layers"]:
+                if i not in [
+                    "",
+                    "model",
+                    "model.encoder.dropout",
+                    "model.heads.head",
+                    "model.encoder.ln",
+                    "model.encoder.layers",
+                ]:
                     name_list.append(i)
             elif i.split(".")[-1] == "mlp":
                 name_list.append(i)
