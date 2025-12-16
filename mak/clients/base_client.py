@@ -21,6 +21,7 @@ class BaseClient(fl.client.NumPyClient):
         config_sim,
         device,
         save_dir,
+        **kwargs
     ):
         self.client_id = client_id
         self.config_sim = config_sim
