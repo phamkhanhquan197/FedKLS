@@ -163,13 +163,23 @@ class ServerSaveData:
             # Local results
             local_loss = res_fed[0] if res_fed is not None else None
             local_metric = res_fed[1] if res_fed is not None else None
-            local_accuracy = local_metric["accuracy"] if local_metric is not None else None
-            local_f1 = local_metric["f1_score"] if local_metric is not None else None
+            # Safely extract metrics - handle both dict and non-dict types
+            if isinstance(local_metric, dict):
+                local_accuracy = local_metric.get("accuracy")
+                local_f1 = local_metric.get("f1_score")
+            else:
+                local_accuracy = None
+                local_f1 = None
             # Global results
             global_loss = res_cen[0] if res_cen is not None else None
             global_metric = res_cen[1] if res_cen is not None else None
-            global_accuracy = global_metric["accuracy"] if global_metric is not None else None
-            global_f1 = global_metric["f1_score"] if global_metric is not None else None
+            # Safely extract metrics - handle both dict and non-dict types
+            if isinstance(global_metric, dict):
+                global_accuracy = global_metric.get("accuracy")
+                global_f1 = global_metric.get("f1_score")
+            else:
+                global_accuracy = None
+                global_f1 = None
             # log(INFO, f"Accuracy: {acc}")
             if self.out_file_path is not None:
                 field_names = ["round", "global_accuracy", "global_f1_score", "global_loss", "local_accuracy", "local_f1", "local_loss", "processing_time", "upload_gb", "download_gb"]
@@ -250,13 +260,22 @@ class ServerSaveData:
         )
 
         for i in range(len(results)):
-            client_id = results[i][1].metrics["client_id"]
+            client_metrics = results[i][1].metrics
+            # Safely extract metrics - handle both dict and non-dict types
+            if isinstance(client_metrics, dict):
+                client_id = client_metrics.get("client_id")
+                acc = client_metrics.get("accuracy")
+                f1 = client_metrics.get("f1_score")
+                num_class = len(client_metrics.get("class_distribution", []))
+                class_dist = client_metrics.get("class_distribution")
+            else:
+                client_id = None
+                acc = None
+                f1 = None
+                num_class = 0
+                class_dist = None
             val_samples = results[i][1].num_examples
-            acc = results[i][1].metrics["accuracy"]
-            f1 = results[i][1].metrics["f1_score"]
             loss = results[i][1].loss
-            num_class =  len(results[i][1].metrics["class_distribution"])
-            class_dist = results[i][1].metrics["class_distribution"]
 
             log(INFO, "Client %s (Total validation samples: %s, Accuracy: %s, F1_Score: %s, Loss: %s, Class Distribution (%s classes): %s)", 
                 client_id, val_samples, acc, f1, loss, num_class, class_dist)      
