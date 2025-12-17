@@ -24,6 +24,7 @@ def get_client_fn(
     method = config_sim["peft"]["method"]
     
     # Use precomputed kl_norm values if provided by server, otherwise compute them
+    kl_normalized_per_client = {}  # Initialize to avoid NameError
     if method == "fedkls" and kl_norm_dict is None:
         log(INFO, "No precomputed KL divergence values provided. Computing client distributions and kl_norm...")
         from mak.utils.helper import compute_KL_divergence, compute_client_distributions
