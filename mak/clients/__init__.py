@@ -64,7 +64,9 @@ def get_client_fn(
             config_sim=config_sim, 
             device=device,
             save_dir=save_dir,
-            kl_norm=kl_norm,  
+            kl_norm=kl_norm,
+            dataset=dataset,                 # NEW: Pass dataset reference
+            apply_transforms=apply_transforms, # NEW: Pass transform function
         )
         return client.to_client()
     

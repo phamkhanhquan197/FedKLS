@@ -739,6 +739,7 @@ def get_fit_config_fn(config_sim):
         """
         config = {
             "round": server_round,
+            "current_round": server_round,  # NEW: Add current_round for dynamic data updates
             "batch_size": config_sim["client"]["batch_size"],
             "epochs": config_sim["client"]["epochs"],
             "lr": config_sim["client"]["lr"],

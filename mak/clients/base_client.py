@@ -1,7 +1,7 @@
 import os
 
 import flwr as fl
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, ConcatDataset
 import torch
 from mak.utils.general import set_params, test
 from mak.utils.helper import get_optimizer
@@ -21,6 +21,8 @@ class BaseClient(fl.client.NumPyClient):
         config_sim,
         device,
         save_dir,
+        dataset=None,            # NEW: FederatedDataset reference
+        apply_transforms=None,   # NEW: transform function
     ):
         self.client_id = client_id
         self.config_sim = config_sim
@@ -34,6 +36,11 @@ class BaseClient(fl.client.NumPyClient):
         self.dataset_name = self.config_sim["common"]["dataset"]
         self.feature_key = dataset_info[self.dataset_name]["feature_key"]
         self.output_column = dataset_info[self.dataset_name]["output_column"]
+        
+        # NEW: Store dataset reference and transform function for dynamic reload
+        self.dataset = dataset
+        self.apply_transforms = apply_transforms
+        self.partition_id = client_id
         
         self.optimizer = None
         self.scheduler = None
@@ -68,6 +75,37 @@ class BaseClient(fl.client.NumPyClient):
     def set_parameters(self, parameters):
         set_params(self.model, parameters)
 
+    def reload_dataset(self, mode: str = "replace"):
+        """
+        Reload client-side dataset without touching model parameters.
+
+        Args:
+            mode: "replace" | "append"
+                - "replace": Drop toàn bộ dataset cũ, load dataset mới từ nguồn dữ liệu
+                - "append": Giữ dataset cũ và thêm dữ liệu mới
+        """
+        if self.dataset is None or self.apply_transforms is None:
+            raise RuntimeError("Dataset reference or transform function not provided.")
+
+        client_dataset_total = self.dataset.load_partition(
+            partition_id=self.partition_id
+        )
+
+        splits = client_dataset_total.train_test_split(
+            test_size=0.2,
+            seed=self.config_sim["common"]["seed"],
+        )
+
+        new_trainset = splits["train"].with_transform(self.apply_transforms)
+        new_valset = splits["test"].with_transform(self.apply_transforms)
+
+        if mode == "append":
+            self.trainset = ConcatDataset([self.trainset, new_trainset])
+            self.valset = ConcatDataset([self.valset, new_valset])
+        else:
+            self.trainset = new_trainset
+            self.valset = new_valset
+
     def count_class_distribution(self, dataset):
         """Count the class distribution in the dataset."""
         class_counts = {}
@@ -87,15 +125,36 @@ class BaseClient(fl.client.NumPyClient):
         return dict(sorted(class_counts.items()))
 
     def fit(self, parameters, config):
+        """
+        Fit with dynamic dataset updates and strict model inheritance.
+        """
+        # Always inherit model parameters (NO reset)
         self.set_parameters(parameters)
 
-        batch, epochs, learning_rate = (
+        # Read dynamic data config
+        dyn_cfg = self.config_sim.get("dynamic_data", {})
+        enabled = dyn_cfg.get("enabled", False)
+        mode = dyn_cfg.get("mode", "incremental")
+        round_step = dyn_cfg.get("round_step", None)
+
+        current_round = config.get("current_round", 0)
+
+        # Decide whether to update dataset
+        if enabled and round_step is not None:
+            if current_round % round_step == 0:
+                if mode == "reset":
+                    self.reload_dataset(mode="replace")
+                elif mode == "incremental":
+                    self.reload_dataset(mode="append")
+
+        # Normal training (no reset, no re-init)
+        batch, epochs, _ = (
             config["batch_size"],
             config["epochs"],
             config["lr"],
         )
         # Create a DataLoader for the training set
-        trainloader  = DataLoader(self.trainset, batch_size=batch, shuffle=True)
+        trainloader = DataLoader(self.trainset, batch_size=batch, shuffle=True)
         # Count the class distribution in the training set
         class_counts = self.count_class_distribution(trainloader)
         # # Reuse or initialize optimizer
