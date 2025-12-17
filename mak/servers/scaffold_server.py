@@ -166,8 +166,12 @@ class ScaffoldServer(ServerSaveData):
                     )
             # Conclude round
             loss = res_cen[0] if res_cen is not None else None
-            acc = res_cen[1] if res_cen is not None else None
-            acc = acc["accuracy"] if acc is not None else None
+            acc_metric = res_cen[1] if res_cen is not None else None
+            # Safely extract accuracy - handle both dict and non-dict types
+            if isinstance(acc_metric, dict):
+                acc = acc_metric.get("accuracy")
+            else:
+                acc = None
             log(INFO, f"Accuracy: {acc}")
             if self.out_file_path is not None:
                 field_names = ["round", "accuracy", "loss", "time"]
