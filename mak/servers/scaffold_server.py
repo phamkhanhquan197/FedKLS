@@ -99,7 +99,7 @@ class ScaffoldServer(ServerSaveData):
         return get_parameters_res.parameters
 
     # pylint: disable=too-many-locals
-    def fit(self, num_rounds: int, timeout: Optional[float]) -> History:
+    def fit(self, num_rounds: int, timeout: Optional[float]) -> Tuple[History, float]:
         """Run federated averaging for a number of rounds."""
         history = History()
 
@@ -171,7 +171,7 @@ class ScaffoldServer(ServerSaveData):
             log(INFO, f"Accuracy: {acc}")
             if self.out_file_path is not None:
                 field_names = ["round", "accuracy", "loss", "time"]
-                dict = {
+                row_dict = {
                     "round": current_round,
                     "accuracy": acc,
                     "loss": loss,
@@ -179,7 +179,7 @@ class ScaffoldServer(ServerSaveData):
                 }
                 with open(self.out_file_path, "a") as f:
                     dictwriter_object = csv.DictWriter(f, fieldnames=field_names)
-                    dictwriter_object.writerow(dict)
+                    dictwriter_object.writerow(row_dict)
                     f.close()
             if acc >= float(self.target_acc):
                 log(
@@ -192,7 +192,7 @@ class ScaffoldServer(ServerSaveData):
         end_time = timeit.default_timer()
         elapsed = end_time - start_time
         log(INFO, "FL finished in %s", elapsed)
-        return history
+        return history, elapsed
 
     # pylint: disable=too-many-locals
     def fit_round(
