@@ -60,6 +60,8 @@ def test(net, testloader, device: str, feature_key: str) -> Tuple[float, float, 
 def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays], device: str = "cuda"):
 
     """Set model weights from a list of NumPy ndarrays."""
+    if params is None:
+        return  # Skip if parameters is None
     model_state = model.state_dict()
     if len(model_state.items()) != len(params): # Handle LoRA parameter update
         if any(key.startswith("distilbert.") for key in model_state.keys()):
