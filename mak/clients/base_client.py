@@ -58,6 +58,10 @@ class BaseClient(fl.client.NumPyClient):
                 params_to_send = {name: tensor for name, tensor in self.model.state_dict().items() if "self" in name or "dense" in name}
             elif any(key.startswith("model.") for key in self.model.state_dict().keys()):
                 params_to_send = {name: tensor for name, tensor in self.model.state_dict().items() if "self_attn" in name or "mlp" in name}
+            else:
+                # For other models (e.g., ResNet, CNN), send all parameters if PEFT is enabled
+                # This handles cases where the model doesn't match the above patterns
+                params_to_send = {name: tensor for name, tensor in self.model.state_dict().items()}
 
             # Print parameter names and shapes
             # print("\n=== Parameters Sent to Server ===")
