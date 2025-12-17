@@ -93,7 +93,7 @@ class ServerSaveData:
         return self._client_manager
 
     # pylint: disable=too-many-locals
-    def fit(self, num_rounds: int, timeout: Optional[float]) -> History:
+    def fit(self, num_rounds: int, timeout: Optional[float]) -> Tuple[History, float]:
         """Run federated averaging for a number of rounds."""
         history = History()
 
@@ -163,13 +163,13 @@ class ServerSaveData:
             # Local results
             local_loss = res_fed[0] if res_fed is not None else None
             local_metric = res_fed[1] if res_fed is not None else None
-            local_accuracy = local_metric.get("accuracy") if local_metric is not None else None
-            local_f1 = local_metric.get("f1_score") if local_metric is not None else None
+            local_accuracy = local_metric["accuracy"] if local_metric is not None else None
+            local_f1 = local_metric["f1_score"] if local_metric is not None else None
             # Global results
             global_loss = res_cen[0] if res_cen is not None else None
             global_metric = res_cen[1] if res_cen is not None else None
-            global_accuracy = global_metric.get("accuracy") if global_metric is not None else None
-            global_f1 = global_metric.get("f1_score") if global_metric is not None else None
+            global_accuracy = global_metric["accuracy"] if global_metric is not None else None
+            global_f1 = global_metric["f1_score"] if global_metric is not None else None
             # log(INFO, f"Accuracy: {acc}")
             if self.out_file_path is not None:
                 field_names = ["round", "global_accuracy", "global_f1_score", "global_loss", "local_accuracy", "local_f1", "local_loss", "processing_time", "upload_gb", "download_gb"]
@@ -208,7 +208,7 @@ class ServerSaveData:
         elapsed = end_time - start_time
         log(INFO, "FL finished in %s = %s minutes = %s hours", elapsed, elapsed / 60, elapsed / 3600)
 
-        return history
+        return history, elapsed
 
     def evaluate_round(
         self,
