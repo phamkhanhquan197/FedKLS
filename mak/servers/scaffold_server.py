@@ -99,7 +99,7 @@ class ScaffoldServer(ServerSaveData):
         return get_parameters_res.parameters
 
     # pylint: disable=too-many-locals
-    def fit(self, num_rounds: int, timeout: Optional[float]) -> Tuple[History, float]:
+    def fit(self, num_rounds: int, timeout: Optional[float]) -> History:
         """Run federated averaging for a number of rounds."""
         history = History()
 
@@ -166,12 +166,8 @@ class ScaffoldServer(ServerSaveData):
                     )
             # Conclude round
             loss = res_cen[0] if res_cen is not None else None
-            acc_metric = res_cen[1] if res_cen is not None else None
-            # Safely extract accuracy - handle both dict and non-dict types
-            if isinstance(acc_metric, dict):
-                acc = acc_metric.get("accuracy")
-            else:
-                acc = None
+            acc = res_cen[1] if res_cen is not None else None
+            acc = acc["accuracy"] if acc is not None else None
             log(INFO, f"Accuracy: {acc}")
             if self.out_file_path is not None:
                 field_names = ["round", "accuracy", "loss", "time"]
@@ -196,7 +192,7 @@ class ScaffoldServer(ServerSaveData):
         end_time = timeit.default_timer()
         elapsed = end_time - start_time
         log(INFO, "FL finished in %s", elapsed)
-        return history, elapsed
+        return history
 
     # pylint: disable=too-many-locals
     def fit_round(

@@ -120,17 +120,10 @@ class FedKLSVDServer(ServerSaveData):
 
         #Log client training details
         for i in range(len(results)):
-            client_metrics = results[i][1].metrics
-            # Safely extract metrics - handle both dict and non-dict types
-            if isinstance(client_metrics, dict):
-                client_id = client_metrics.get("client_id")
-                num_class = len(client_metrics.get("class_distribution", []))
-                class_dist = client_metrics.get("class_distribution")
-            else:
-                client_id = None
-                num_class = 0
-                class_dist = None
+            client_id = results[i][1].metrics["client_id"]
             train_samples = results[i][1].num_examples
+            num_class =  len(results[i][1].metrics["class_distribution"])
+            class_dist = results[i][1].metrics["class_distribution"]
 
             log(INFO, "Client %s (Total training samples: %s, Class Distribution (%s classes): %s)", 
                 client_id, train_samples, num_class, class_dist) 
