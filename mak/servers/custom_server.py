@@ -93,7 +93,7 @@ class ServerSaveData:
         return self._client_manager
 
     # pylint: disable=too-many-locals
-    def fit(self, num_rounds: int, timeout: Optional[float]) -> History:
+    def fit(self, num_rounds: int, timeout: Optional[float]) -> Tuple[History, float]:
         """Run federated averaging for a number of rounds."""
         history = History()
 
@@ -163,17 +163,36 @@ class ServerSaveData:
             # Local results
             local_loss = res_fed[0] if res_fed is not None else None
             local_metric = res_fed[1] if res_fed is not None else None
-            local_accuracy = local_metric["accuracy"] if local_metric is not None else None
-            local_f1 = local_metric["f1_score"] if local_metric is not None else None
+            # Safely extract metrics - handle both dict and non-dict types
+            # Use try-except to handle any edge cases with metric extraction
+            try:
+                if isinstance(local_metric, dict) and local_metric is not None:
+                    local_accuracy = local_metric.get("accuracy")
+                    local_f1 = local_metric.get("f1_score")
+                else:
+                    local_accuracy = None
+                    local_f1 = None
+            except (KeyError, TypeError, AttributeError):
+                local_accuracy = None
+                local_f1 = None
             # Global results
             global_loss = res_cen[0] if res_cen is not None else None
             global_metric = res_cen[1] if res_cen is not None else None
-            global_accuracy = global_metric["accuracy"] if global_metric is not None else None
-            global_f1 = global_metric["f1_score"] if global_metric is not None else None
+            # Safely extract metrics - handle both dict and non-dict types
+            try:
+                if isinstance(global_metric, dict) and global_metric is not None:
+                    global_accuracy = global_metric.get("accuracy")
+                    global_f1 = global_metric.get("f1_score")
+                else:
+                    global_accuracy = None
+                    global_f1 = None
+            except (KeyError, TypeError, AttributeError):
+                global_accuracy = None
+                global_f1 = None
             # log(INFO, f"Accuracy: {acc}")
             if self.out_file_path is not None:
                 field_names = ["round", "global_accuracy", "global_f1_score", "global_loss", "local_accuracy", "local_f1", "local_loss", "processing_time", "upload_gb", "download_gb"]
-                dict = {
+                row_dict = {
                     "round": current_round,
                     "global_accuracy": global_accuracy,
                     "global_f1_score": global_f1,
@@ -187,9 +206,10 @@ class ServerSaveData:
                 }
                 with open(self.out_file_path, "a") as f:
                     dictwriter_object = csv.DictWriter(f, fieldnames=field_names)
-                    dictwriter_object.writerow(dict)
+                    dictwriter_object.writerow(row_dict)
                     f.close()
-            if global_accuracy >= float(self.target_acc):
+            # Safely check target accuracy - handle None case
+            if global_accuracy is not None and global_accuracy >= float(self.target_acc):
                 log(
                     INFO,
                     f"Reached target accuracy so stopping further rounds: {self.target_acc}",
@@ -208,7 +228,7 @@ class ServerSaveData:
         elapsed = end_time - start_time
         log(INFO, "FL finished in %s = %s minutes = %s hours", elapsed, elapsed / 60, elapsed / 3600)
 
-        return history
+        return history, elapsed
 
     def evaluate_round(
         self,
