@@ -70,14 +70,58 @@ class BaseClient(fl.client.NumPyClient):
             # print("=================================\n")
 
             # Convert to numpy arrays (preserving order)
-            return [tensor.cpu().numpy() for tensor in params_to_send.values()]
+            params = [tensor.cpu().numpy() for tensor in params_to_send.values()]
         else: 
             # Send full model parameters to server
-            return [val.cpu().numpy() for _, val in self.model.state_dict().items()]
+            params = [val.cpu().numpy() for _, val in self.model.state_dict().items()]
+        
+        # DEBUG: Remove after debugging
+        total_size = sum(p.nbytes for p in params) / 1e6  # MB
+        # Option 1: Print
+        print(f"Client {self.client_id}: get_parameters() returning {len(params)} parameters, total size: {total_size:.2f} MB")
+        
+        # Option 2: Logging
+        # from flwr.common.logger import log
+        # from logging import INFO
+        # log(INFO, f"Client {self.client_id}: get_parameters() returning {len(params)} parameters, total size: {total_size:.2f} MB")
+        
+        assert len(params) > 0, f"Client {self.client_id}: get_parameters() returning EMPTY parameters!"
+        assert total_size > 0, f"Client {self.client_id}: get_parameters() returning zero-size parameters!"
+        
+        return params
 
 
     def set_parameters(self, parameters):
-        set_params(self.model, parameters)
+        # DEBUG: Remove after debugging
+        # Option 1: Print
+        print(f"Client {self.client_id}: set_parameters() called with {len(parameters)} parameters")
+        
+        # Option 2: Logging
+        # from flwr.common.logger import log
+        # from logging import INFO, WARNING, ERROR
+        # log(INFO, f"Client {self.client_id}: set_parameters() called with {len(parameters)} parameters")
+        
+        # Lưu weights trước khi set để so sánh
+        old_weights = {name: param.clone() for name, param in self.model.named_parameters()}
+        try:
+            set_params(self.model, parameters)
+            print(f"Client {self.client_id}: set_parameters() completed successfully")
+            # log(INFO, f"Client {self.client_id}: set_parameters() completed successfully")
+            
+            # Verify weights đã thay đổi
+            new_weights = {name: param for name, param in self.model.named_parameters()}
+            for name in old_weights:
+                if not torch.equal(old_weights[name], new_weights[name]):
+                    print(f"Client {self.client_id}: Weight '{name}' changed ✓")
+                    # log(INFO, f"Client {self.client_id}: Weight '{name}' changed ✓")
+                    break
+            else:
+                print(f"WARNING: Client {self.client_id}: No weights changed!")
+                # log(WARNING, f"Client {self.client_id}: No weights changed!")
+        except Exception as e:
+            print(f"ERROR: Client {self.client_id}: set_parameters() failed: {e}")
+            # log(ERROR, f"Client {self.client_id}: set_parameters() failed: {e}")
+            raise
 
     def reload_dataset(self, mode: str = "replace"):
         """
@@ -132,6 +176,22 @@ class BaseClient(fl.client.NumPyClient):
         """
         Fit with dynamic dataset updates and strict model inheritance.
         """
+        # DEBUG: Remove after debugging
+        # Option 1: Print
+        print(f"Client {self.client_id}: fit() called with {len(parameters) if parameters else 0} parameters")
+        
+        # Option 2: Logging
+        # from flwr.common.logger import log
+        # from logging import INFO
+        # log(INFO, f"Client {self.client_id}: fit() called with {len(parameters) if parameters else 0} parameters")
+        
+        assert parameters is not None, f"Client {self.client_id}: parameters is None"
+        assert len(parameters) > 0, f"Client {self.client_id}: parameters is empty"
+        if parameters:
+            total_size = sum(p.nbytes if hasattr(p, 'nbytes') else len(p) for p in parameters)
+            print(f"Client {self.client_id}: Total parameter size: {total_size} bytes")
+            # log(INFO, f"Client {self.client_id}: Total parameter size: {total_size} bytes")
+        
         # Always inherit model parameters (NO reset)
         self.set_parameters(parameters)
 
@@ -188,6 +248,20 @@ class BaseClient(fl.client.NumPyClient):
 
         # self.load_state()  # Load state at start
         self.optimizer = get_optimizer(model=self.model, client_config=config)
+        
+        # DEBUG: Remove after debugging - Verify model has parameters after set_parameters
+        sample_param = next(iter(self.model.parameters()))
+        # Option 1: Print
+        print(f"Client {self.client_id}: After set_parameters, first param value: {sample_param.data.flatten()[0]}")
+        
+        # Option 2: Logging
+        # from flwr.common.logger import log
+        # from logging import INFO
+        # log(INFO, f"Client {self.client_id}: After set_parameters, first param value: {sample_param.data.flatten()[0]}")
+        
+        # Verify model có parameters
+        assert len(list(self.model.parameters())) > 0, f"Client {self.client_id}: Model has no parameters"
+        
         self.train(
             net=self.model,
             trainloader=trainloader,

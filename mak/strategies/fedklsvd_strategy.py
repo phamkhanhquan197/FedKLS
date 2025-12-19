@@ -75,6 +75,13 @@ class FedKLSVDStrategy(FedAvg):
         failures: List[Union[Tuple[ClientProxy, FitRes], BaseException]],
     ) -> Tuple[Optional[Parameters], Dict[str, Scalar]]:
         """Aggregate fit results for FedKL-SVD using weighted average."""
+        # DEBUG: Remove after debugging
+        # Option 1: Print
+        print(f"Round {server_round}: aggregate_fit() called with {len(results)} results")
+        
+        # Option 2: Logging
+        # log(INFO, f"Round {server_round}: aggregate_fit() called with {len(results)} results")
+        
         if not results:
             log(WARNING, f"Round {server_round}: No results to aggregate")
             return None, {}
@@ -94,6 +101,14 @@ class FedKLSVDStrategy(FedAvg):
 
         # Aggregate parameters using the custom aggregation function
         aggregated_parameters = self.fedklsvd_aggregate(parameters, num_examples, kl_norms)
+        
+        # DEBUG: Remove after debugging
+        assert aggregated_parameters is not None, f"Round {server_round}: aggregate_fit() returned None aggregated_parameters!"
+        assert len(aggregated_parameters) > 0, f"Round {server_round}: aggregate_fit() returned empty aggregated_parameters!"
+        total_size = sum(p.nbytes for p in aggregated_parameters) / 1e6  # MB
+        print(f"Round {server_round}: Aggregated {len(aggregated_parameters)} parameter layers, total size: {total_size:.2f} MB")
+        # log(INFO, f"Round {server_round}: Aggregated {len(aggregated_parameters)} parameter layers, total size: {total_size:.2f} MB")
+        assert total_size > 0, f"Round {server_round}: Aggregated parameters have zero size!"
 
         # Aggregate parameters using weighted averaging based on number of examples (IMPORTANT) (FEDAVG)
         # #Convert client parameters to Numpy arrays

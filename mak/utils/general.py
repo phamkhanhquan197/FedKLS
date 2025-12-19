@@ -60,9 +60,34 @@ def test(net, testloader, device: str, feature_key: str) -> Tuple[float, float, 
 def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays], device: str = "cuda"):
 
     """Set model weights from a list of NumPy ndarrays."""
+    # DEBUG: Remove after debugging
+    # Option 1: Print
+    # Option 2: Logging
+    # from flwr.common.logger import log
+    # from logging import INFO, WARNING
+    
     if params is None:
         return  # Skip if parameters is None
+    
     model_state = model.state_dict()
+    
+    # DEBUG: Remove after debugging
+    print(f"set_params(): model_state has {len(model_state)} keys")
+    print(f"set_params(): received {len(params)} parameters")
+    # log(INFO, f"set_params(): model_state has {len(model_state)} keys")
+    # log(INFO, f"set_params(): received {len(params)} parameters")
+    
+    assert params is not None, "params is None"
+    assert len(params) > 0, "params is empty"
+    
+    # DEBUG: Remove after debugging - Get sample weight before update
+    sample_key = list(model_state.keys())[0] if model_state else None
+    old_weight = None
+    if sample_key:
+        old_weight = model_state[sample_key].clone()
+        print(f"set_params(): Before update - {sample_key} shape: {old_weight.shape}, first value: {old_weight.flatten()[0]}")
+        # log(INFO, f"set_params(): Before update - {sample_key} shape: {old_weight.shape}, first value: {old_weight.flatten()[0]}")
+    
     if len(model_state.items()) != len(params): # Handle LoRA parameter update
         if any(key.startswith("distilbert.") for key in model_state.keys()):
             lora_keys = [k for k in model_state.keys() 
@@ -74,6 +99,13 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays], dev
             lora_keys = [k for k in model_state.keys() 
                         if ("self_attn" in k or "mlp" in k)]
 
+        # DEBUG: Remove after debugging
+        print(f"set_params(): PEFT mode - lora_keys: {lora_keys[:5]}...")  # First 5
+        print(f"set_params(): lora_keys count: {len(lora_keys)}, params count: {len(params)}")
+        # log(INFO, f"set_params(): PEFT mode - lora_keys: {lora_keys[:5]}...")
+        # log(INFO, f"set_params(): lora_keys count: {len(lora_keys)}, params count: {len(params)}")
+        assert len(lora_keys) == len(params), f"MISMATCH! lora_keys={len(lora_keys)}, params={len(params)}"
+
         # Create state dict with only LoRA parameters
         lora_params = OrderedDict()
         for key, array in zip(lora_keys, params):
@@ -82,6 +114,20 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays], dev
         # Update model with LoRA parameters only
         model_state.update(lora_params)
         model.load_state_dict(model_state, strict=True)
+        
+        # DEBUG: Remove after debugging - Verify weight changed
+        if sample_key and old_weight is not None:
+            new_weight = model.state_dict()[sample_key]
+            print(f"set_params(): After update - {sample_key} shape: {new_weight.shape}, first value: {new_weight.flatten()[0]}")
+            # log(INFO, f"set_params(): After update - {sample_key} shape: {new_weight.shape}, first value: {new_weight.flatten()[0]}")
+            
+            if torch.equal(old_weight, new_weight):
+                print(f"WARNING: set_params(): Weight did NOT change for {sample_key}!")
+                # log(WARNING, f"set_params(): Weight did NOT change for {sample_key}!")
+                raise ValueError(f"Weight '{sample_key}' did not change after set_params()")
+            else:
+                print(f"set_params(): Weight updated successfully for {sample_key} ✓")
+                # log(INFO, f"set_params(): Weight updated successfully for {sample_key} ✓")
 
 
     else: #Full parameter update
@@ -90,6 +136,20 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays], dev
         state_dict = OrderedDict({k: v.clone().detach().to(device) if isinstance(v, torch.Tensor) else torch.tensor(v, device=device)
                                   for k, v in params_dict})
         model.load_state_dict(state_dict, strict=True)
+        
+        # DEBUG: Remove after debugging - Verify weight changed (full update case)
+        if sample_key and old_weight is not None:
+            new_weight = model.state_dict()[sample_key]
+            print(f"set_params(): After update (full) - {sample_key} shape: {new_weight.shape}, first value: {new_weight.flatten()[0]}")
+            # log(INFO, f"set_params(): After update (full) - {sample_key} shape: {new_weight.shape}, first value: {new_weight.flatten()[0]}")
+            
+            if torch.equal(old_weight, new_weight):
+                print(f"WARNING: set_params(): Weight did NOT change for {sample_key}!")
+                # log(WARNING, f"set_params(): Weight did NOT change for {sample_key}!")
+                raise ValueError(f"Weight '{sample_key}' did not change after set_params()")
+            else:
+                print(f"set_params(): Weight updated successfully for {sample_key} ✓")
+                # log(INFO, f"set_params(): Weight updated successfully for {sample_key} ✓")
 
 
 
