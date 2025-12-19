@@ -114,8 +114,10 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays], dev
             log(INFO, f"set_params(): After update - {sample_key} shape: {new_weight.shape}, first value: {new_weight.flatten()[0]}")
             
             if torch.equal(old_weight, new_weight):
-                log(WARNING, f"set_params(): Weight did NOT change for {sample_key}!")
-                raise ValueError(f"Weight '{sample_key}' did not change after set_params()")
+                # Log warning but don't raise error - this can happen legitimately during initial setup
+                # when setting model to its own current parameters (e.g., round 0 evaluation)
+                log(WARNING, f"set_params(): Weight '{sample_key}' did NOT change after set_params()")
+                log(WARNING, f"set_params(): This may be normal during initial setup (round 0) when parameters are already correct")
             else:
                 log(INFO, f"set_params(): Weight updated successfully for {sample_key} ✓")
 
@@ -133,8 +135,10 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays], dev
             log(INFO, f"set_params(): After update (full) - {sample_key} shape: {new_weight.shape}, first value: {new_weight.flatten()[0]}")
             
             if torch.equal(old_weight, new_weight):
-                log(WARNING, f"set_params(): Weight did NOT change for {sample_key}!")
-                raise ValueError(f"Weight '{sample_key}' did not change after set_params()")
+                # Log warning but don't raise error - this can happen legitimately during initial setup
+                # when setting model to its own current parameters (e.g., round 0 evaluation)
+                log(WARNING, f"set_params(): Weight '{sample_key}' did NOT change after set_params()")
+                log(WARNING, f"set_params(): This may be normal during initial setup (round 0) when parameters are already correct")
             else:
                 log(INFO, f"set_params(): Weight updated successfully for {sample_key} ✓")
 
