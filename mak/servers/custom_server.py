@@ -303,36 +303,12 @@ class ServerSaveData:
         server_round: int,
         timeout: Optional[float]) -> Optional[Tuple[Optional[Parameters], Dict[str, Scalar], FitResultsAndFailures]]:
         """Perform a single round of federated averaging."""
-        # DEBUG: Remove after debugging
-        # Option 1: Print (đơn giản)
-        print(f"Round {server_round}: Server parameters size: {len(self.parameters.tensors)}")
-        print(f"Round {server_round}: Server parameters total size: {sum(len(p) for p in self.parameters.tensors)} bytes")
-        
-        # Option 2: Logging (có thể ghi file)
-        # log(INFO, f"Round {server_round}: Server parameters size: {len(self.parameters.tensors)}")
-        # log(INFO, f"Round {server_round}: Server parameters total size: {sum(len(p) for p in self.parameters.tensors)} bytes")
-        
-        # Option 3: Debugger (inspect variables)
-        # import pdb; pdb.set_trace()
-        
         # Get clients and their respective instructions from strategy
         client_instructions = self.strategy.configure_fit(
             server_round=server_round,
             parameters=self.parameters,
             client_manager=self._client_manager,
         )
-        
-        # DEBUG: Remove after debugging
-        for client_proxy, fit_ins in client_instructions:
-            # Option 1: Print
-            print(f"Round {server_round}: Sending to client {client_proxy.cid}: {len(fit_ins.parameters.tensors)} parameter tensors")
-            
-            # Option 2: Logging
-            # log(INFO, f"Round {server_round}: Sending to client {client_proxy.cid}: {len(fit_ins.parameters.tensors)} parameter tensors")
-            
-            # Verify parameters không None
-            assert fit_ins.parameters is not None, f"FitIns parameters is None for client {client_proxy.cid}"
-            assert len(fit_ins.parameters.tensors) > 0, f"FitIns parameters.tensors is empty for client {client_proxy.cid}"
         
         #Track download size (server -> clients)
         param_size = sum(len(p) for p in self.parameters.tensors) / 1e9 # Convert to GB
@@ -361,35 +337,6 @@ class ServerSaveData:
             timeout=timeout,
             num_threads=self.num_train_thread,
         )
-        
-        # DEBUG: Remove after debugging
-        # Option 1: Print
-        print(f"Round {server_round}: fit_clients() called with {len(client_instructions)} clients")
-        print(f"Round {server_round}: Received {len(results)} results, {len(failures)} failures")
-        
-        # Option 2: Logging
-        # log(INFO, f"Round {server_round}: fit_clients() called with {len(client_instructions)} clients")
-        # log(INFO, f"Round {server_round}: Received {len(results)} results, {len(failures)} failures")
-        
-        # Verify có results
-        assert len(results) > 0, f"No results received in round {server_round}"
-        if len(failures) > 0:
-            print(f"WARNING: {len(failures)} failures detected!")
-            # log(WARNING, f"Round {server_round}: {len(failures)} failures detected!")
-        
-        # DEBUG: Remove after debugging - Check parameters received from clients
-        for client_proxy, fit_res in results:
-            assert fit_res.parameters is not None, f"Round {server_round}: Client {client_proxy.cid} returned None parameters!"
-            assert fit_res.parameters.tensors, f"Round {server_round}: Client {client_proxy.cid} returned empty parameters.tensors!"
-            param_size = sum(len(p) for p in fit_res.parameters.tensors) / 1e6  # MB
-            
-            # Option 1: Print
-            print(f"Round {server_round}: Client {client_proxy.cid} returned {len(fit_res.parameters.tensors)} parameters, size: {param_size:.2f} MB")
-            
-            # Option 2: Logging
-            # log(INFO, f"Round {server_round}: Client {client_proxy.cid} returned {len(fit_res.parameters.tensors)} parameters, size: {param_size:.2f} MB")
-            
-            assert param_size > 0, f"Round {server_round}: Client {client_proxy.cid} returned zero-size parameters!"
 
         # # ------------------- START: Print client weight shapes -------------------
         # log(INFO, "--- Client Weight Shapes Received (Round %s) ---", server_round)
@@ -443,31 +390,9 @@ class ServerSaveData:
                 client_id, train_samples, num_class, class_dist) 
 
         # Standard aggregation for non-LoRA models
-        # DEBUG: Remove after debugging - Check parameters before aggregation
-        old_param_hash = hash(tuple(p for p in self.parameters.tensors)) if self.parameters.tensors else None
-        
         parameters_aggregated, metrics_aggregated = self.strategy.aggregate_fit(
             server_round, results, failures
         )
-        
-        # DEBUG: Remove after debugging - Check if parameters changed after aggregation
-        if parameters_aggregated is not None and parameters_aggregated.tensors:
-            new_param_hash = hash(tuple(p for p in parameters_aggregated.tensors))
-            if old_param_hash == new_param_hash:
-                # Option 1: Print
-                print(f"WARNING: Round {server_round}: Server parameters did NOT change after aggregation!")
-                
-                # Option 2: Logging
-                # log(WARNING, f"Round {server_round}: Server parameters did NOT change after aggregation!")
-                
-                raise ValueError(f"Server parameters unchanged in round {server_round}")
-            else:
-                print(f"Round {server_round}: Server parameters updated successfully ✓")
-                # log(INFO, f"Round {server_round}: Server parameters updated successfully ✓")
-        else:
-            print(f"WARNING: Round {server_round}: parameters_aggregated is None or empty!")
-            # log(WARNING, f"Round {server_round}: parameters_aggregated is None or empty!")
-        
         ##Check how many tensor the model performs aggregating
         # aggregated_ndarrays = parameters_to_ndarrays(parameters_aggregated)
         # log(INFO, f"Aggregated parameters ({len(aggregated_ndarrays)} tensors):")
