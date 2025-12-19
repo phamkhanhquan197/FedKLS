@@ -418,6 +418,19 @@ class ServerSaveData:
         # DEBUG: Remove after debugging - Check parameters before aggregation
         old_param_hash = hash(tuple(p for p in self.parameters.tensors)) if self.parameters.tensors else None
         
+        # DEBUG: Remove after debugging - Log detailed info before aggregation
+        log(INFO, f"Round {server_round}: Before aggregate_fit() - results count: {len(results)}, failures count: {len(failures)}")
+        log(INFO, f"Round {server_round}: Strategy accept_failures: {self.strategy.accept_failures}")
+        if len(results) == 0:
+            log(WARNING, f"Round {server_round}: ⚠️ NO RESULTS from clients! This will cause aggregate_fit() to return None")
+        if len(failures) > 0:
+            log(WARNING, f"Round {server_round}: ⚠️ {len(failures)} failures detected")
+            for i, failure in enumerate(failures):
+                if isinstance(failure, Exception):
+                    log(WARNING, f"Round {server_round}: Failure #{i+1}: {type(failure).__name__}: {str(failure)[:200]}")
+                else:
+                    log(WARNING, f"Round {server_round}: Failure #{i+1}: {type(failure).__name__}")
+        
         parameters_aggregated, metrics_aggregated = self.strategy.aggregate_fit(
             server_round, results, failures
         )
@@ -431,7 +444,14 @@ class ServerSaveData:
             else:
                 log(INFO, f"Round {server_round}: Server parameters updated successfully ✓")
         else:
-            log(WARNING, f"Round {server_round}: parameters_aggregated is None or empty!")
+            log(WARNING, f"Round {server_round}: ⚠️ parameters_aggregated is None or empty!")
+            log(WARNING, f"Round {server_round}: This means aggregate_fit() returned None. Possible causes:")
+            log(WARNING, f"Round {server_round}:   1. No results from clients (results count: {len(results)})")
+            log(WARNING, f"Round {server_round}:   2. Failures not accepted (failures: {len(failures)}, accept_failures: {self.strategy.accept_failures})")
+            if len(results) == 0:
+                log(ERROR, f"Round {server_round}: ❌ ROOT CAUSE: No results from clients! Check fit_clients() and client.fit()")
+            elif len(failures) > 0 and not self.strategy.accept_failures:
+                log(ERROR, f"Round {server_round}: ❌ ROOT CAUSE: {len(failures)} failures and accept_failures=False")
         
         ##Check how many tensor the model performs aggregating
         # aggregated_ndarrays = parameters_to_ndarrays(parameters_aggregated)

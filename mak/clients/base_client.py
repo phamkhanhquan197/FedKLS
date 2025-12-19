@@ -244,7 +244,25 @@ class BaseClient(fl.client.NumPyClient):
         # self.previous_val_loss = self.scheduler.best
         # self.save_state()  # Save state after training
 
-        return self.get_parameters({}), len(trainloader.dataset), {"client_id": self.client_id, "class_distribution": class_counts}
+        # DEBUG: Remove after debugging - Get parameters to send back
+        try:
+            params_to_send = self.get_parameters({})
+            num_examples = len(trainloader.dataset)
+            metrics = {"client_id": self.client_id, "class_distribution": class_counts}
+            
+            # Add kl_norm to metrics if available (for FedKLS)
+            if hasattr(self, 'kl_norm') and self.kl_norm is not None:
+                metrics["kl_norm"] = self.kl_norm
+            
+            log(INFO, f"Client {self.client_id}: fit() returning {len(params_to_send)} parameters, {num_examples} examples")
+            assert len(params_to_send) > 0, f"Client {self.client_id}: fit() returning EMPTY parameters!"
+            
+            return params_to_send, num_examples, metrics
+        except Exception as e:
+            log(ERROR, f"Client {self.client_id}: fit() failed with exception: {e}")
+            import traceback
+            log(ERROR, f"Client {self.client_id}: Traceback: {traceback.format_exc()}")
+            raise
 
     def evaluate(self, parameters, config):
         self.set_parameters(parameters)
