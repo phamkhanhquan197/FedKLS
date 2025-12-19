@@ -351,9 +351,33 @@ class ServerSaveData:
         # DEBUG: Remove after debugging
         log(INFO, f"Round {server_round}: fit_clients() called with {len(client_instructions)} clients")
         log(INFO, f"Round {server_round}: Received {len(results)} results, {len(failures)} failures")
-        assert len(results) > 0, f"No results received in round {server_round}"
+        
+        # Log detailed information about failures if any
         if len(failures) > 0:
             log(WARNING, f"Round {server_round}: {len(failures)} failures detected!")
+            for i, failure in enumerate(failures):
+                if isinstance(failure, Exception):
+                    log(ERROR, f"Round {server_round}: Failure #{i+1}: {type(failure).__name__}: {str(failure)[:500]}")
+                    import traceback
+                    log(ERROR, f"Round {server_round}: Failure #{i+1} traceback: {traceback.format_exc()[:1000]}")
+                elif isinstance(failure, tuple) and len(failure) == 2:
+                    # Failure is (ClientProxy, FitRes) with non-OK status
+                    client_proxy, fit_res = failure
+                    log(ERROR, f"Round {server_round}: Failure #{i+1}: Client {client_proxy.cid} returned status: {fit_res.status.code if hasattr(fit_res, 'status') else 'UNKNOWN'}")
+                else:
+                    log(ERROR, f"Round {server_round}: Failure #{i+1}: {type(failure).__name__}: {str(failure)[:500]}")
+        
+        # Check if we have any results
+        if len(results) == 0:
+            error_msg = f"Round {server_round}: No results received from any clients!"
+            log(ERROR, error_msg)
+            log(ERROR, f"Round {server_round}: Total clients called: {len(client_instructions)}")
+            log(ERROR, f"Round {server_round}: Total failures: {len(failures)}")
+            if len(failures) > 0:
+                log(ERROR, f"Round {server_round}: All clients failed. Check failure details above.")
+            else:
+                log(ERROR, f"Round {server_round}: No failures reported but no results either. Possible timeout or clients not responding.")
+            raise RuntimeError(error_msg)
         
         # DEBUG: Remove after debugging - Check parameters received from clients
         for client_proxy, fit_res in results:
