@@ -93,7 +93,7 @@ class ServerSaveData:
         return self._client_manager
 
     # pylint: disable=too-many-locals
-    def fit(self, num_rounds: int, timeout: Optional[float]) -> Tuple[History, float]:
+    def fit(self, num_rounds: int, timeout: Optional[float]) -> History:
         """Run federated averaging for a number of rounds."""
         history = History()
 
@@ -228,7 +228,7 @@ class ServerSaveData:
         elapsed = end_time - start_time
         log(INFO, "FL finished in %s = %s minutes = %s hours", elapsed, elapsed / 60, elapsed / 3600)
 
-        return history, elapsed
+        return history
 
     def evaluate_round(
         self,

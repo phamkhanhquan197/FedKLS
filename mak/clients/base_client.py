@@ -25,6 +25,7 @@ class BaseClient(fl.client.NumPyClient):
         save_dir,
         dataset=None,            # NEW: FederatedDataset reference
         apply_transforms=None,   # NEW: transform function
+        data_scheduler=None,     # NEW: DynamicDataScheduler for round-aware allocation
     ):
         self.client_id = client_id
         self.config_sim = config_sim
@@ -43,6 +44,7 @@ class BaseClient(fl.client.NumPyClient):
         self.dataset = dataset
         self.apply_transforms = apply_transforms
         self.partition_id = client_id
+        self.data_scheduler = data_scheduler  # NEW: Store scheduler
         
         self.optimizer = None
         self.scheduler = None
@@ -90,13 +92,13 @@ class BaseClient(fl.client.NumPyClient):
         # DEBUG: Remove after debugging
         log(INFO, f"Client {self.client_id}: set_parameters() called with {len(parameters)} parameters")
         
-        # Lưu weights trước khi set để so sánh
+        # Save weights before setting to compare
         old_weights = {name: param.clone() for name, param in self.model.named_parameters()}
         try:
             set_params(self.model, parameters)
             log(INFO, f"Client {self.client_id}: set_parameters() completed successfully")
             
-            # Verify weights đã thay đổi
+            # Verify weights have changed
             new_weights = {name: param for name, param in self.model.named_parameters()}
             for name in old_weights:
                 if not torch.equal(old_weights[name], new_weights[name]):
@@ -108,15 +110,29 @@ class BaseClient(fl.client.NumPyClient):
             log(ERROR, f"Client {self.client_id}: set_parameters() failed: {e}")
             raise
 
-    def reload_dataset(self, mode: str = "replace"):
+    def reload_dataset(self, mode: str = "replace", round_num: int = 1):
         """
         Reload client-side dataset without touching model parameters.
+        Uses DynamicDataScheduler for round-aware, disjoint allocation.
 
         Args:
-            mode: "replace" | "append"
-                - "replace": Drop toàn bộ dataset cũ, load dataset mới từ nguồn dữ liệu
-                - "append": Giữ dataset cũ và thêm dữ liệu mới
+            mode: "replace" | "append" (legacy, kept for compatibility)
+                - "replace": Drop entire old dataset, load new dataset from scheduler
+                - "append": For incremental mode, dataset size increases monotonically
+            round_num: Current round number for schedule lookup
         """
+        # Use scheduler if available (new approach)
+        if self.data_scheduler is not None:
+            trainset, valset = self.data_scheduler.get_client_round_datasets(
+                client_id=self.client_id,
+                round_num=round_num,
+                apply_transforms=self.apply_transforms
+            )
+            self.trainset = trainset
+            self.valset = valset
+            return
+        
+        # Fallback to old approach if scheduler not available
         if self.dataset is None or self.apply_transforms is None:
             raise RuntimeError("Dataset reference or transform function not provided.")
 
@@ -181,12 +197,18 @@ class BaseClient(fl.client.NumPyClient):
         current_round = config.get("current_round", 0)
 
         # Decide whether to update dataset
-        if enabled and round_step is not None:
-            if current_round % round_step == 0:
-                if mode == "reset":
-                    self.reload_dataset(mode="replace")
-                elif mode == "incremental":
-                    self.reload_dataset(mode="append")
+        if enabled:
+            # Always reload dataset to get round-specific indices and validation split
+            # This ensures validation size changes when train size changes
+            if self.data_scheduler is not None:
+                self.reload_dataset(mode=mode, round_num=current_round)
+            else:
+                # Fallback to old approach
+                if round_step is not None and (current_round % round_step == 0 or current_round == 1):
+                    if mode == "reset":
+                        self.reload_dataset(mode="replace", round_num=current_round)
+                    elif mode == "incremental":
+                        self.reload_dataset(mode="append", round_num=current_round)
 
         # Normal training (no reset, no re-init)
         batch, epochs, _ = (
@@ -266,6 +288,17 @@ class BaseClient(fl.client.NumPyClient):
 
     def evaluate(self, parameters, config):
         self.set_parameters(parameters)
+        
+        # Reload dataset to ensure validation size is updated for current round
+        # This is necessary because evaluate() may be called after fit() in the same round
+        # but with different dataset allocations
+        dyn_cfg = self.config_sim.get("dynamic_data", {})
+        enabled = dyn_cfg.get("enabled", False)
+        if enabled and self.data_scheduler is not None:
+            # Try to get current_round from config, fallback to "round" key or 0
+            current_round = config.get("current_round", config.get("round", 0))
+            self.reload_dataset(mode=dyn_cfg.get("mode", "incremental"), round_num=current_round)
+        
         valloader = DataLoader(self.valset, batch_size=self.test_batch_size)
         # Count the class distribution in the validation set
         class_counts = self.count_class_distribution(valloader)

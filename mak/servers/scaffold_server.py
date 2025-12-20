@@ -99,7 +99,7 @@ class ScaffoldServer(ServerSaveData):
         return get_parameters_res.parameters
 
     # pylint: disable=too-many-locals
-    def fit(self, num_rounds: int, timeout: Optional[float]) -> Tuple[History, float]:
+    def fit(self, num_rounds: int, timeout: Optional[float]) -> History:
         """Run federated averaging for a number of rounds."""
         history = History()
 
@@ -192,7 +192,7 @@ class ScaffoldServer(ServerSaveData):
         end_time = timeit.default_timer()
         elapsed = end_time - start_time
         log(INFO, "FL finished in %s", elapsed)
-        return history, elapsed
+        return history
 
     # pylint: disable=too-many-locals
     def fit_round(

@@ -116,6 +116,14 @@ If `save_train_res` is set to `true`, all the output data, like accuracy, loss, 
 - `alpha`: LoRA/adapter alpha parameter (typically same as rank).
 - `method`: Choose among 'lora', 'pissa', 'milora', 'middle', 'fedkls' (Do not set `method` = 'fedkls' when running FFT)
 
+### Dynamic Data Section
+- `enabled`: `True` to enable dynamic dataset updates; `False` to use static datasets (default).
+- `mode`: Choose between `"incremental"` (dataset size increases monotonically) or `"reset"` (dataset replaced at milestones).
+- `round_step`: Frequency of dataset updates (e.g., `1` = every round, `10` = every 10 rounds).
+- `val_ratio`: Validation split ratio (default: `0.2`).
+- `start_fraction`: For incremental mode, initial data fraction per client (default: `0.3`). Dataset grows linearly to 1.0 by final round.
+- `reset_size_range`: For reset mode, `[min_fraction, max_fraction]` for dataset size range (e.g., `[0.5, 1.0]`).
+
 ### FedAWA Config Section
 - `server_valid_ratio`: Fraction for server validation.
 - `server_epochs`: Local epochs on the server side.

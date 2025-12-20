@@ -704,6 +704,7 @@ def get_strategy(
         ),
         evaluate_metrics_aggregation_fn=weighted_average,
         on_fit_config_fn=get_fit_config_fn(config_sim=config),
+        on_evaluate_config_fn=get_evaluate_config_fn(config_sim=config),
         initial_parameters=fl.common.ndarrays_to_parameters(
             [val.cpu().numpy() for _, val in model.state_dict().items()]),
         **kwargs.get(STRATEGY, {}),
@@ -752,6 +753,21 @@ def get_fit_config_fn(config_sim):
         return config
 
     return fit_config
+
+
+def get_evaluate_config_fn(config_sim):
+    def evaluate_config(server_round: int):
+        """Return evaluation configuration dict for each round.
+        
+        passes the current round number to the client
+        """
+        config = {
+            "round": server_round,
+            "current_round": server_round,  # Add current_round for dynamic data updates
+        }
+        return config
+    
+    return evaluate_config
 
 
 def get_mode_and_shape(partition):
