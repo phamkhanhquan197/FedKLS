@@ -303,22 +303,12 @@ class ServerSaveData:
         server_round: int,
         timeout: Optional[float]) -> Optional[Tuple[Optional[Parameters], Dict[str, Scalar], FitResultsAndFailures]]:
         """Perform a single round of federated averaging."""
-        # DEBUG: Remove after debugging
-        log(INFO, f"Round {server_round}: Server parameters size: {len(self.parameters.tensors)}")
-        log(INFO, f"Round {server_round}: Server parameters total size: {sum(len(p) for p in self.parameters.tensors)} bytes")
-        
         # Get clients and their respective instructions from strategy
         client_instructions = self.strategy.configure_fit(
             server_round=server_round,
             parameters=self.parameters,
             client_manager=self._client_manager,
         )
-        
-        # DEBUG: Remove after debugging
-        for client_proxy, fit_ins in client_instructions:
-            log(INFO, f"Round {server_round}: Sending to client {client_proxy.cid}: {len(fit_ins.parameters.tensors)} parameter tensors")
-            assert fit_ins.parameters is not None, f"FitIns parameters is None for client {client_proxy.cid}"
-            assert len(fit_ins.parameters.tensors) > 0, f"FitIns parameters.tensors is empty for client {client_proxy.cid}"
         
         #Track download size (server -> clients)
         param_size = sum(len(p) for p in self.parameters.tensors) / 1e9 # Convert to GB
@@ -351,33 +341,9 @@ class ServerSaveData:
         # DEBUG: Remove after debugging
         log(INFO, f"Round {server_round}: fit_clients() called with {len(client_instructions)} clients")
         log(INFO, f"Round {server_round}: Received {len(results)} results, {len(failures)} failures")
-        
-        # Log detailed information about failures if any
+        assert len(results) > 0, f"No results received in round {server_round}"
         if len(failures) > 0:
             log(WARNING, f"Round {server_round}: {len(failures)} failures detected!")
-            for i, failure in enumerate(failures):
-                if isinstance(failure, Exception):
-                    log(ERROR, f"Round {server_round}: Failure #{i+1}: {type(failure).__name__}: {str(failure)[:500]}")
-                    import traceback
-                    log(ERROR, f"Round {server_round}: Failure #{i+1} traceback: {traceback.format_exc()[:1000]}")
-                elif isinstance(failure, tuple) and len(failure) == 2:
-                    # Failure is (ClientProxy, FitRes) with non-OK status
-                    client_proxy, fit_res = failure
-                    log(ERROR, f"Round {server_round}: Failure #{i+1}: Client {client_proxy.cid} returned status: {fit_res.status.code if hasattr(fit_res, 'status') else 'UNKNOWN'}")
-                else:
-                    log(ERROR, f"Round {server_round}: Failure #{i+1}: {type(failure).__name__}: {str(failure)[:500]}")
-        
-        # Check if we have any results
-        if len(results) == 0:
-            error_msg = f"Round {server_round}: No results received from any clients!"
-            log(ERROR, error_msg)
-            log(ERROR, f"Round {server_round}: Total clients called: {len(client_instructions)}")
-            log(ERROR, f"Round {server_round}: Total failures: {len(failures)}")
-            if len(failures) > 0:
-                log(ERROR, f"Round {server_round}: All clients failed. Check failure details above.")
-            else:
-                log(ERROR, f"Round {server_round}: No failures reported but no results either. Possible timeout or clients not responding.")
-            raise RuntimeError(error_msg)
         
         # DEBUG: Remove after debugging - Check parameters received from clients
         for client_proxy, fit_res in results:
@@ -442,19 +408,6 @@ class ServerSaveData:
         # DEBUG: Remove after debugging - Check parameters before aggregation
         old_param_hash = hash(tuple(p for p in self.parameters.tensors)) if self.parameters.tensors else None
         
-        # DEBUG: Remove after debugging - Log detailed info before aggregation
-        log(INFO, f"Round {server_round}: Before aggregate_fit() - results count: {len(results)}, failures count: {len(failures)}")
-        log(INFO, f"Round {server_round}: Strategy accept_failures: {self.strategy.accept_failures}")
-        if len(results) == 0:
-            log(WARNING, f"Round {server_round}: ⚠️ NO RESULTS from clients! This will cause aggregate_fit() to return None")
-        if len(failures) > 0:
-            log(WARNING, f"Round {server_round}: ⚠️ {len(failures)} failures detected")
-            for i, failure in enumerate(failures):
-                if isinstance(failure, Exception):
-                    log(WARNING, f"Round {server_round}: Failure #{i+1}: {type(failure).__name__}: {str(failure)[:200]}")
-                else:
-                    log(WARNING, f"Round {server_round}: Failure #{i+1}: {type(failure).__name__}")
-        
         parameters_aggregated, metrics_aggregated = self.strategy.aggregate_fit(
             server_round, results, failures
         )
@@ -468,14 +421,7 @@ class ServerSaveData:
             else:
                 log(INFO, f"Round {server_round}: Server parameters updated successfully ✓")
         else:
-            log(WARNING, f"Round {server_round}: ⚠️ parameters_aggregated is None or empty!")
-            log(WARNING, f"Round {server_round}: This means aggregate_fit() returned None. Possible causes:")
-            log(WARNING, f"Round {server_round}:   1. No results from clients (results count: {len(results)})")
-            log(WARNING, f"Round {server_round}:   2. Failures not accepted (failures: {len(failures)}, accept_failures: {self.strategy.accept_failures})")
-            if len(results) == 0:
-                log(ERROR, f"Round {server_round}: ❌ ROOT CAUSE: No results from clients! Check fit_clients() and client.fit()")
-            elif len(failures) > 0 and not self.strategy.accept_failures:
-                log(ERROR, f"Round {server_round}: ❌ ROOT CAUSE: {len(failures)} failures and accept_failures=False")
+            log(WARNING, f"Round {server_round}: parameters_aggregated is None or empty!")
         
         ##Check how many tensor the model performs aggregating
         # aggregated_ndarrays = parameters_to_ndarrays(parameters_aggregated)
