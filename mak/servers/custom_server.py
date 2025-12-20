@@ -458,15 +458,7 @@ class ServerSaveData:
         log(INFO, "Requesting initial parameters from one random client")
         random_client = self._client_manager.sample(1)[0]
         ins = GetParametersIns(config={})
-        
-        # Handle group_id parameter for newer Flower versions with Ray backend
-        import inspect
-        sig = inspect.signature(random_client.get_parameters)
-        if 'group_id' in sig.parameters:
-            get_parameters_res = random_client.get_parameters(ins=ins, timeout=timeout, group_id=None)
-        else:
-            get_parameters_res = random_client.get_parameters(ins=ins, timeout=timeout)
-        
+        get_parameters_res = random_client.get_parameters(ins=ins, timeout=timeout)
         log(INFO, "Received initial parameters from one random client")
         
         return get_parameters_res.parameters
@@ -543,13 +535,7 @@ def fit_clients(
         batch_failures = []
         for client_proxy, ins in batch:
             try:
-                # Handle group_id parameter for newer Flower versions with Ray backend
-                import inspect
-                sig = inspect.signature(client_proxy.fit)
-                if 'group_id' in sig.parameters:
-                    result = client_proxy.fit(ins, timeout=timeout, group_id=None)
-                else:
-                    result = client_proxy.fit(ins, timeout=timeout)
+                result = client_proxy.fit(ins, timeout=timeout)
                 batch_results.append((client_proxy, result))
             except Exception as e:
                 batch_failures.append((client_proxy, e))
@@ -577,13 +563,7 @@ def fit_client(
     client: ClientProxy, ins: FitIns, timeout: Optional[float]
 ) -> Tuple[ClientProxy, FitRes]:
     """Refine parameters on a single client."""
-    # Handle group_id parameter for newer Flower versions with Ray backend
-    import inspect
-    sig = inspect.signature(client.fit)
-    if 'group_id' in sig.parameters:
-        fit_res = client.fit(ins, timeout=timeout, group_id=None)
-    else:
-        fit_res = client.fit(ins, timeout=timeout)
+    fit_res = client.fit(ins, timeout=timeout)
     return client, fit_res
 
 
@@ -640,13 +620,7 @@ def evaluate_clients(
         batch_failures = []
         for client_proxy, ins in batch:
             try:
-                # Handle group_id parameter for newer Flower versions with Ray backend
-                import inspect
-                sig = inspect.signature(client_proxy.evaluate)
-                if 'group_id' in sig.parameters:
-                    result = client_proxy.evaluate(ins, timeout=timeout, group_id=None)
-                else:
-                    result = client_proxy.evaluate(ins, timeout=timeout)
+                result = client_proxy.evaluate(ins, timeout=timeout)
                 batch_results.append((client_proxy, result))
             except Exception as e:
                 batch_failures.append((client_proxy, e))
@@ -675,13 +649,7 @@ def evaluate_client(
     timeout: Optional[float],
 ) -> Tuple[ClientProxy, EvaluateRes]:
     """Evaluate parameters on a single client."""
-    # Handle group_id parameter for newer Flower versions with Ray backend
-    import inspect
-    sig = inspect.signature(client.evaluate)
-    if 'group_id' in sig.parameters:
-        evaluate_res = client.evaluate(ins, timeout=timeout, group_id=None)
-    else:
-        evaluate_res = client.evaluate(ins, timeout=timeout)
+    evaluate_res = client.evaluate(ins, timeout=timeout)
     return client, evaluate_res
 
 
