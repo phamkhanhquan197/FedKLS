@@ -6,9 +6,9 @@ from mak.clients.base_client import BaseClient
 
 class FedKLSVDClient(BaseClient):
     def __init__(
-        self, client_id, model, trainset, valset, config_sim, device, save_dir, kl_norm, dataset=None, apply_transforms=None
+        self, client_id, model, trainset, valset, config_sim, device, save_dir, kl_norm, dataset=None, apply_transforms=None, data_scheduler=None
     ):
-        super().__init__(client_id, model, trainset, valset, config_sim, device, save_dir, dataset=dataset, apply_transforms=apply_transforms)  
+        super().__init__(client_id, model, trainset, valset, config_sim, device, save_dir, dataset=dataset, apply_transforms=apply_transforms, data_scheduler=data_scheduler)
         self.kl_norm = kl_norm  # Normalized KL divergence for this client
         # log(INFO, f"Client {self.client_id}: Initialized with kl_norm = {self.kl_norm}")
         
