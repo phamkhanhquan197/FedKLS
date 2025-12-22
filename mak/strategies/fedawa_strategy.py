@@ -268,11 +268,3 @@ class FedAWAStrategy(FedAvg):
 
             optimized_weights = softmax(optimizees).detach().cpu().numpy().tolist()
             return optimized_weights
-
-
-    
-
-    
-
-
-
