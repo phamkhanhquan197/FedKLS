@@ -118,11 +118,11 @@ If `save_train_res` is set to `true`, all the output data, like accuracy, loss, 
 
 ### Dynamic Data Section
 - `enabled`: `True` to enable dynamic dataset updates; `False` to use static datasets (default).
-- `mode`: Choose between `"incremental"` (dataset size increases monotonically) or `"reset"` (dataset replaced at milestones).
+- `mode`: Choose between `"incremental"` (dataset size increases monotonically) or `"reset"` (full dataset repartitioning at milestones).
 - `round_step`: Frequency of dataset updates (e.g., `1` = every round, `10` = every 10 rounds).
 - `val_ratio`: Validation split ratio (default: `0.2`).
 - `start_fraction`: For incremental mode, initial data fraction per client (default: `0.3`). Dataset grows linearly to 1.0 by final round.
-- `reset_size_range`: For reset mode, `[min_fraction, max_fraction]` for dataset size range (e.g., `[0.5, 1.0]`).
+- **Reset Mode**: At each milestone (determined by `round_step`), the entire dataset is repartitioned with a different seed (`seed + milestone * 10000`), ensuring all samples are distributed among clients following the Dirichlet distribution. Each client receives 100% of its partition (full allocation).
 
 ### FedAWA Config Section
 - `server_valid_ratio`: Fraction for server validation.

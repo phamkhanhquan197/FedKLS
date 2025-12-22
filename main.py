@@ -167,11 +167,11 @@ def main():
             num_clients=config_sim['server']['num_clients'],
             total_rounds=config_sim['server']['num_rounds'],
             seed=config_sim['common']['seed'],
+            config_sim=config_sim,  # NEW: Pass config for repartitioning
             val_ratio=dyn_cfg.get("val_ratio", 0.2),
             mode=dyn_cfg.get("mode", "incremental"),
             round_step=dyn_cfg.get("round_step", 10),
             start_fraction=dyn_cfg.get("start_fraction", 0.3),
-            reset_size_range=dyn_cfg.get("reset_size_range", None),
         )
         log(INFO, f"DynamicDataScheduler created: mode={dyn_cfg.get('mode')}, round_step={dyn_cfg.get('round_step')}")
 

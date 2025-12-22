@@ -72,4 +72,4 @@ dynamic_data:
   round_step: 10  # Dataset update frequency (trigger reload every N rounds)
   val_ratio: 0.2  # Validation split ratio (e.g., 0.2 = 20% validation)
   start_fraction: 0.3  # For incremental: initial data fraction per client (e.g., 0.3 = 30%)
-  reset_size_range: [0.5, 1.0]  # For reset mode: [min_fraction, max_fraction] for size variation
+  # Note: Reset mode now repartitions the full dataset at each milestone with different seed

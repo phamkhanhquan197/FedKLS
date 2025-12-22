@@ -6,17 +6,19 @@ for dynamic dataset updates in federated learning.
 
 Key features:
 - Incremental mode: Monotonic non-decreasing dataset size per client
-- Reset mode: Dataset replacement with configurable size changes
+- Reset mode: Full dataset repartitioning with different Dirichlet distributions
 - Disjoint allocation: No duplicate samples between clients
 - Deterministic: Reproducible based on seed
 """
 
 import random
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 from collections import defaultdict
 import numpy as np
 from flwr_datasets import FederatedDataset
 from datasets import Dataset
+from mak.utils.helper import get_partitioner
+from mak.utils.dataset_info import dataset_info
 
 
 class DynamicDataScheduler:
@@ -35,11 +37,11 @@ class DynamicDataScheduler:
         num_clients: int,
         total_rounds: int,
         seed: int,
+        config_sim: dict,  # NEW: Config dict to recreate partitioner
         val_ratio: float = 0.2,
         mode: str = "incremental",
         round_step: int = 10,
         start_fraction: float = 0.3,  # For incremental: initial data fraction
-        reset_size_range: Optional[Tuple[float, float]] = None,  # For reset: (min, max) fraction
     ):
         """
         Initialize dynamic data scheduler.
@@ -49,21 +51,21 @@ class DynamicDataScheduler:
             num_clients: Number of clients
             total_rounds: Total number of training rounds
             seed: Random seed for reproducibility
+            config_sim: Config dict containing dataset info and partitioner settings
             val_ratio: Validation split ratio (default 0.2)
             mode: "incremental" or "reset"
             round_step: Dataset update frequency (trigger every N rounds)
             start_fraction: For incremental mode, initial data fraction per client
-            reset_size_range: For reset mode, (min_fraction, max_fraction) for size variation
         """
         self.federated_dataset = federated_dataset
         self.num_clients = num_clients
         self.total_rounds = total_rounds
         self.seed = seed
+        self.config_sim = config_sim  # NEW: Store config for repartitioning
         self.val_ratio = val_ratio
         self.mode = mode
         self.round_step = round_step
         self.start_fraction = start_fraction
-        self.reset_size_range = reset_size_range or (0.5, 1.0)
         
         # Initialize random state
         self.rng = random.Random(seed)
@@ -75,6 +77,9 @@ class DynamicDataScheduler:
         
         # Schedule cache: (client_id, round) -> train_indices
         self._schedule_cache: Dict[Tuple[int, int], List[int]] = {}
+        
+        # NEW: Cache for repartitioned datasets per round (for reset mode)
+        self._repartitioned_datasets: Dict[int, FederatedDataset] = {}
         
         # Track allocated indices per client to ensure disjoint
         self._allocated_indices: Dict[int, set] = defaultdict(set)
@@ -178,50 +183,80 @@ class DynamicDataScheduler:
                 for round_num in range(milestone, end_round):
                     self._schedule_cache[(cid, round_num)] = indices_copy
     
+    def _repartition_dataset(self, round_num: int) -> FederatedDataset:
+        """
+        Repartition the full dataset with a new seed to create different distribution.
+        
+        Args:
+            round_num: Round number (used to generate different seed)
+            
+        Returns:
+            New FederatedDataset with repartitioned data
+        """
+        # Create new config with modified seed for this round
+        # Large multiplier to ensure different seeds
+        repartition_seed = self.seed + round_num * 10000
+        config_copy = self.config_sim.copy()
+        config_copy["common"] = self.config_sim["common"].copy()
+        config_copy["common"]["seed"] = repartition_seed
+        
+        # Get partitioner with new seed
+        partitioner_dict = get_partitioner(config_sim=config_copy)
+        
+        # Get dataset name
+        dataset_name = self.config_sim["common"]["dataset"]
+        if dataset_name not in dataset_info.keys():
+            available = list(dataset_info.keys())
+            raise Exception(f"Dataset name should be among: {available}")
+        
+        # Create new FederatedDataset with repartitioned data
+        fds = FederatedDataset(dataset=dataset_name, partitioners=partitioner_dict)
+        
+        return fds
+    
     def _create_reset_schedule(self):
-        """Create reset schedule: dataset replacement with size changes."""
+        """
+        Create reset schedule: full dataset repartitioning at each milestone.
+        At each milestone, the entire dataset is repartitioned with a different
+        seed, ensuring all samples are distributed among clients following
+        Dirichlet distribution.
+        """
         milestones = [r for r in range(1, self.total_rounds + 1) if r % self.round_step == 0]
         if not milestones:
             milestones = [self.total_rounds]
         
+        # Ensure round 1 is included
+        if 1 not in milestones:
+            milestones = [1] + milestones
+        
+        # Remove duplicates and sort
+        milestones = sorted(list(set(milestones)))
+        
+        # For each milestone, repartition the dataset
+        for milestone in milestones:
+            # Repartition dataset with new seed
+            repartitioned_fds = self._repartition_dataset(milestone)
+            self._repartitioned_datasets[milestone] = repartitioned_fds
+            
+            # Load full partitions for all clients (100% allocation)
+            for cid in range(self.num_clients):
+                partition = repartitioned_fds.load_partition(partition_id=cid)
+                # Use all indices in the partition (100% allocation)
+                all_indices = list(range(len(partition)))
+                self._schedule_cache[(cid, milestone)] = all_indices
+        
+        # Fill in rounds between milestones with previous milestone's data
         for cid in range(self.num_clients):
-            partition_size = len(self._client_partitions[cid])
-            available_indices = sorted(self._client_total_indices[cid])
-            
-            # Initial round: use start_fraction
-            initial_size = int(partition_size * self.start_fraction)
-            self.np_rng.seed(self.seed + cid * 1000 + 1)
-            initial_selected = sorted(self.np_rng.choice(
-                available_indices,
-                size=min(initial_size, len(available_indices)),
-                replace=False
-            ).tolist())
-            
-            prev_indices = initial_selected
-            
+            prev_milestone = None
             for round_num in range(1, self.total_rounds + 1):
-                if round_num in milestones and round_num > 1:
-                    # Reset: select new indices with different size
-                    min_size = int(partition_size * self.reset_size_range[0])
-                    max_size = int(partition_size * self.reset_size_range[1])
-                    
-                    # Deterministic size selection
-                    self.np_rng.seed(self.seed + cid * 1000 + round_num)
-                    target_size = self.np_rng.randint(min_size, max_size + 1)
-                    
-                    # Select indices deterministically (different from previous)
-                    self.np_rng.seed(self.seed + cid * 2000 + round_num)
-                    selected = sorted(self.np_rng.choice(
-                        available_indices,
-                        size=min(target_size, len(available_indices)),
-                        replace=False
-                    ).tolist())
-                    
-                    self._schedule_cache[(cid, round_num)] = selected
-                    prev_indices = selected
+                if round_num in milestones:
+                    prev_milestone = round_num
+                elif prev_milestone is not None:
+                    # Use previous milestone's indices
+                    self._schedule_cache[(cid, round_num)] = self._schedule_cache[(cid, prev_milestone)].copy()
                 else:
-                    # Use previous round's indices if not a milestone
-                    self._schedule_cache[(cid, round_num)] = prev_indices.copy()
+                    # Should not happen if round 1 is in milestones
+                    raise ValueError(f"No milestone found before round {round_num}")
     
     def get_client_round_indices(self, client_id: int, round_num: int) -> List[int]:
         """
@@ -267,11 +302,33 @@ class DynamicDataScheduler:
         if not train_indices:
             raise ValueError(f"No indices found for client {client_id} at round {round_num}")
         
-        # Get partition
-        partition = self._client_partitions[client_id]
+        # For reset mode, find the milestone dataset for this round
+        if self.mode == "reset":
+            # Find the milestone for this round
+            milestone = None
+            for m in sorted(self._repartitioned_datasets.keys()):
+                if m <= round_num:
+                    milestone = m
+                else:
+                    break
+            
+            if milestone is None:
+                raise ValueError(f"No repartitioned dataset found for round {round_num}")
+            
+            # Load partition from repartitioned dataset
+            repartitioned_fds = self._repartitioned_datasets[milestone]
+            partition = repartitioned_fds.load_partition(partition_id=client_id)
+        else:
+            # For incremental mode, use original partition
+            partition = self._client_partitions[client_id]
         
-        # Select subset based on indices
-        trainset_full = partition.select(train_indices)
+        # Select subset based on indices (for incremental) or use all (for reset)
+        if self.mode == "reset":
+            # In reset mode, train_indices contains all indices (100% allocation)
+            trainset_full = partition
+        else:
+            # In incremental mode, select subset
+            trainset_full = partition.select(train_indices)
         
         # Split into train and validation
         # Use deterministic split based on seed + client_id + round
