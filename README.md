@@ -12,7 +12,7 @@ This repository provides an easy-to-use Federated Learning framework based on Fl
 ## 📋 Prerequisites
 
 - Git
-- Python 3.x
+- Python 3.11
 - pip (Python package installer)
 
 ## 🚀 Getting Started
