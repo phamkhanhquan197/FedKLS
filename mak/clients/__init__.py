@@ -17,7 +17,7 @@ def get_client_fn(
     apply_transforms,
     save_dir,
     kl_norm_dict: dict = None, #Precomputed KL divergence values from server, if available
-    data_scheduler=None,  # NEW: DynamicDataScheduler for round-aware allocation
+    data_scheduler = None, # NEW: DynamicDataScheduler for round-aware allocation
 ):
     strategy = config_sim["server"]["strategy"].lower()
     client_class = get_client_class(strategy)
@@ -52,8 +52,8 @@ def get_client_fn(
         if data_scheduler is not None:
             trainset, valset = data_scheduler.get_client_round_datasets(
                 client_id=int(cid),
-                round_num=1,  # Initial round
-                apply_transforms=apply_transforms
+                round_num=1, #Initial round
+                apply_transforms=apply_transforms,
             )
         else:
             # Fallback to old approach
@@ -73,10 +73,10 @@ def get_client_fn(
             config_sim=config_sim, 
             device=device,
             save_dir=save_dir,
-            kl_norm=kl_norm,
-            dataset=dataset,                 # NEW: Pass dataset reference
-            apply_transforms=apply_transforms, # NEW: Pass transform function
-            data_scheduler=data_scheduler,   # NEW: Pass scheduler
+            kl_norm=kl_norm,  
+            dataset=dataset,
+            apply_transforms=apply_transforms,
+            data_scheduler=data_scheduler, # NEW: DynamicDataScheduler for round-aware allocation
         )
         return client.to_client()
     

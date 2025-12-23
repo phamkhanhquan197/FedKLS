@@ -1,13 +1,14 @@
 import os
 
 import flwr as fl
-from torch.utils.data import DataLoader, ConcatDataset
+from torch.utils.data import DataLoader
 import torch
 from mak.utils.general import set_params, test
 from mak.utils.helper import get_optimizer
 from mak.utils.dataset_info import dataset_info
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-
+from flwr.common.logger import log
+from logging import INFO
 
 class BaseClient(fl.client.NumPyClient):
     """flwr base client implementaion"""
@@ -21,9 +22,9 @@ class BaseClient(fl.client.NumPyClient):
         config_sim,
         device,
         save_dir,
-        dataset=None,            # NEW: FederatedDataset reference
-        apply_transforms=None,   # NEW: transform function
-        data_scheduler=None,     # NEW: DynamicDataScheduler for round-aware allocation
+        dataset=None, # NEW: FederatedDataset reference
+        apply_transforms=None, # NEW: transform function
+        data_scheduler=None, # NEW: DynamicDataScheduler for round-aware allocation
     ):
         self.client_id = client_id
         self.config_sim = config_sim
@@ -37,13 +38,13 @@ class BaseClient(fl.client.NumPyClient):
         self.dataset_name = self.config_sim["common"]["dataset"]
         self.feature_key = dataset_info[self.dataset_name]["feature_key"]
         self.output_column = dataset_info[self.dataset_name]["output_column"]
-        
-        # NEW: Store dataset reference and transform function for dynamic reload
+
+        #NEW: Store dataset reference and transform function for dynamic reload
         self.dataset = dataset
         self.apply_transforms = apply_transforms
         self.partition_id = client_id
-        self.data_scheduler = data_scheduler  # NEW: Store scheduler
-        
+        self.data_scheduler = data_scheduler # NEW: Store scheduler
+
         self.optimizer = None
         self.scheduler = None
         self.previous_val_loss = None
@@ -77,16 +78,21 @@ class BaseClient(fl.client.NumPyClient):
             # Send full model parameters to server
             return [val.cpu().numpy() for _, val in self.model.state_dict().items()]
 
+    def _load_full_partition_once(self):
+        if self.full_partition is None:
+            self.full_partition = self.dataset.load_partition(
+                partition_id=self.partition_id
+            )
 
-    def set_parameters(self, parameters):
-        set_params(self.model, parameters)
-
-    def reload_dataset(self, mode: str = "replace", round_num: int = 1):
+    def reload_dataset(self, mode: str, round_num: int=1):
         """
         Reload client-side dataset without touching model parameters.
         Uses DynamicDataScheduler for round-aware, disjoint allocation.
 
         Args:
+            mode: "replace" | "append"
+                - "replace": Drop toàn bộ dataset cũ, load dataset mới từ nguồn dữ liệu
+                - "append": Giữ dataset cũ và thêm dữ liệu mới
             mode: "replace" | "append" (legacy, kept for compatibility)
                 - "replace": Drop entire old dataset, load new dataset from scheduler
                 - "append": For incremental mode, dataset size increases monotonically
@@ -126,6 +132,9 @@ class BaseClient(fl.client.NumPyClient):
             self.trainset = new_trainset
             self.valset = new_valset
 
+    def set_parameters(self, parameters):
+        set_params(self.model, parameters)
+
     def count_class_distribution(self, dataset):
         """Count the class distribution in the dataset."""
         class_counts = {}
@@ -148,7 +157,6 @@ class BaseClient(fl.client.NumPyClient):
         """
         Fit with dynamic dataset updates and strict model inheritance.
         """
-        # Always inherit model parameters (NO reset)
         self.set_parameters(parameters)
 
         # Read dynamic data config
@@ -173,12 +181,11 @@ class BaseClient(fl.client.NumPyClient):
                     elif mode == "incremental":
                         self.reload_dataset(mode="append", round_num=current_round)
 
-        # Normal training (no reset, no re-init)
-        batch, epochs, _ = (
+        batch, epochs = (
             config["batch_size"],
-            config["epochs"],
-            config["lr"],
+            config["epochs"]
         )
+        
         # Create a DataLoader for the training set
         trainloader = DataLoader(self.trainset, batch_size=batch, shuffle=True)
         # Count the class distribution in the training set
@@ -227,7 +234,7 @@ class BaseClient(fl.client.NumPyClient):
         num_examples = len(trainloader.dataset)
         metrics = {"client_id": self.client_id, "class_distribution": class_counts}
         
-        # Add kl_norm to metrics if available (for FedKLS)
+        # Add kl_norm to metrics if available (for FedMoKLS)
         if hasattr(self, 'kl_norm') and self.kl_norm is not None:
             metrics["kl_norm"] = self.kl_norm
         
@@ -235,7 +242,6 @@ class BaseClient(fl.client.NumPyClient):
 
     def evaluate(self, parameters, config):
         self.set_parameters(parameters)
-        
         # Reload dataset to ensure validation size is updated for current round
         # This is necessary because evaluate() may be called after fit() in the same round
         # but with different dataset allocations
@@ -245,7 +251,7 @@ class BaseClient(fl.client.NumPyClient):
             # Try to get current_round from config, fallback to "round" key or 0
             current_round = config.get("current_round", config.get("round", 0))
             self.reload_dataset(mode=dyn_cfg.get("mode", "incremental"), round_num=current_round)
-        
+
         valloader = DataLoader(self.valset, batch_size=self.test_batch_size)
         # Count the class distribution in the validation set
         class_counts = self.count_class_distribution(valloader)

@@ -20,7 +20,6 @@ from datasets import Dataset
 from mak.utils.helper import get_partitioner
 from mak.utils.dataset_info import dataset_info
 
-
 class DynamicDataScheduler:
     """
     Manages dynamic data allocation schedule for federated learning clients.
@@ -37,7 +36,7 @@ class DynamicDataScheduler:
         num_clients: int,
         total_rounds: int,
         seed: int,
-        config_sim: dict,  # NEW: Config dict to recreate partitioner
+        config_sim: dict,
         val_ratio: float = 0.2,
         mode: str = "incremental",
         round_step: int = 10,
@@ -61,7 +60,7 @@ class DynamicDataScheduler:
         self.num_clients = num_clients
         self.total_rounds = total_rounds
         self.seed = seed
-        self.config_sim = config_sim  # NEW: Store config for repartitioning
+        self.config_sim = config_sim 
         self.val_ratio = val_ratio
         self.mode = mode
         self.round_step = round_step
@@ -77,7 +76,7 @@ class DynamicDataScheduler:
         
         # Schedule cache: (client_id, round) -> train_indices
         self._schedule_cache: Dict[Tuple[int, int], List[int]] = {}
-        
+
         # NEW: Cache for repartitioned datasets per round (for reset mode)
         self._repartitioned_datasets: Dict[int, FederatedDataset] = {}
         
@@ -182,7 +181,7 @@ class DynamicDataScheduler:
                 indices_copy = sorted(current_indices.copy())
                 for round_num in range(milestone, end_round):
                     self._schedule_cache[(cid, round_num)] = indices_copy
-    
+  
     def _repartition_dataset(self, round_num: int) -> FederatedDataset:
         """
         Repartition the full dataset with a new seed to create different distribution.
@@ -224,7 +223,7 @@ class DynamicDataScheduler:
         milestones = [r for r in range(1, self.total_rounds + 1) if r % self.round_step == 0]
         if not milestones:
             milestones = [self.total_rounds]
-        
+
         # Ensure round 1 is included
         if 1 not in milestones:
             milestones = [1] + milestones
@@ -237,7 +236,7 @@ class DynamicDataScheduler:
             # Repartition dataset with new seed
             repartitioned_fds = self._repartition_dataset(milestone)
             self._repartitioned_datasets[milestone] = repartitioned_fds
-            
+
             # Load full partitions for all clients (100% allocation)
             for cid in range(self.num_clients):
                 partition = repartitioned_fds.load_partition(partition_id=cid)
@@ -257,7 +256,7 @@ class DynamicDataScheduler:
                 else:
                     # Should not happen if round 1 is in milestones
                     raise ValueError(f"No milestone found before round {round_num}")
-    
+
     def get_client_round_indices(self, client_id: int, round_num: int) -> List[int]:
         """
         Get train indices for a specific client at a specific round.
@@ -292,7 +291,7 @@ class DynamicDataScheduler:
         Args:
             client_id: Client ID
             round_num: Current round number
-            apply_transforms: Optional transform function
+            apply_transforms: transform function
             
         Returns:
             Tuple of (trainset, valset) with proper validation split
@@ -346,39 +345,3 @@ class DynamicDataScheduler:
             valset = valset.with_transform(apply_transforms)
         
         return trainset, valset
-    
-    def get_client_dataset_size(self, client_id: int, round_num: int) -> Tuple[int, int]:
-        """
-        Get train and validation sizes for a client at a specific round.
-        
-        Args:
-            client_id: Client ID
-            round_num: Current round number
-            
-        Returns:
-            Tuple of (train_size, val_size)
-        """
-        train_indices = self.get_client_round_indices(client_id, round_num)
-        total_size = len(train_indices)
-        train_size = int(total_size * (1 - self.val_ratio))
-        val_size = total_size - train_size
-        return train_size, val_size
-    
-    def verify_disjoint(self, round_num: int) -> bool:
-        """
-        Verify that clients have disjoint indices at a specific round.
-        
-        Args:
-            round_num: Round number to check
-            
-        Returns:
-            True if all clients have disjoint indices
-        """
-        all_indices = []
-        for cid in range(self.num_clients):
-            indices = set(self.get_client_round_indices(cid, round_num))
-            if indices & set(all_indices):
-                return False
-            all_indices.extend(indices)
-        return True
-

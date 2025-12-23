@@ -11,7 +11,7 @@ class FedProxClient(BaseClient):
 
     def __init__(
         self, client_id, model, trainset, valset, config_sim, device, save_dir, dataset=None, apply_transforms=None, data_scheduler=None
-    ):
+    ):  
         super().__init__(
             client_id, model, trainset, valset, config_sim, device, save_dir, dataset=dataset, apply_transforms=apply_transforms, data_scheduler=data_scheduler
         )

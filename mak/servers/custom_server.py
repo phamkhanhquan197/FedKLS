@@ -189,7 +189,7 @@ class ServerSaveData:
             except (KeyError, TypeError, AttributeError):
                 global_accuracy = None
                 global_f1 = None
-            # log(INFO, f"Accuracy: {acc}")
+
             if self.out_file_path is not None:
                 field_names = ["round", "global_accuracy", "global_f1_score", "global_loss", "local_accuracy", "local_f1", "local_loss", "processing_time", "upload_gb", "download_gb"]
                 row_dict = {
@@ -208,7 +208,6 @@ class ServerSaveData:
                     dictwriter_object = csv.DictWriter(f, fieldnames=field_names)
                     dictwriter_object.writerow(row_dict)
                     f.close()
-            # Safely check target accuracy - handle None case
             if global_accuracy is not None and global_accuracy >= float(self.target_acc):
                 log(
                     INFO,
@@ -234,8 +233,7 @@ class ServerSaveData:
         self,
         server_round: int,
         timeout: Optional[float],
-        curr_round_start_time: float,
-    ) -> Optional[Tuple[Optional[float], Dict[str, Scalar], EvaluateResultsAndFailures]]:
+        curr_round_start_time: float,) -> Optional[Tuple[Optional[float], Dict[str, Scalar], EvaluateResultsAndFailures]]:
         """Validate current global model on a number of clients."""
         # Get clients and their respective instructions from strategy
         client_instructions = self.strategy.configure_evaluate(
@@ -404,24 +402,10 @@ class ServerSaveData:
             log(INFO, "Client %s (Total training samples: %s, Class Distribution (%s classes): %s)", 
                 client_id, train_samples, num_class, class_dist) 
 
-        # Standard aggregation for non-LoRA models
-        # DEBUG: Remove after debugging - Check parameters before aggregation
-        old_param_hash = hash(tuple(p for p in self.parameters.tensors)) if self.parameters.tensors else None
-        
+        # Standard aggregation for non-LoRA models        
         parameters_aggregated, metrics_aggregated = self.strategy.aggregate_fit(
             server_round, results, failures
         )
-        
-        # DEBUG: Remove after debugging - Check if parameters changed after aggregation
-        if parameters_aggregated is not None and parameters_aggregated.tensors:
-            new_param_hash = hash(tuple(p for p in parameters_aggregated.tensors))
-            if old_param_hash == new_param_hash:
-                log(WARNING, f"Round {server_round}: Server parameters did NOT change after aggregation!")
-                raise ValueError(f"Server parameters unchanged in round {server_round}")
-            else:
-                log(INFO, f"Round {server_round}: Server parameters updated successfully ✓")
-        else:
-            log(WARNING, f"Round {server_round}: parameters_aggregated is None or empty!")
         
         ##Check how many tensor the model performs aggregating
         # aggregated_ndarrays = parameters_to_ndarrays(parameters_aggregated)
