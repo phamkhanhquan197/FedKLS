@@ -844,6 +844,21 @@ def get_evaluate_config_fn(config_sim):
     
     return evaluate_config
 
+def get_evaluate_config_fn(config_sim):
+    def evaluate_config(server_round: int):
+        """Return evaluation configuration dict for each round.
+        
+        passes the current round number to the client
+        """
+        config = {
+            "round": server_round,
+            "current_round": server_round,  # Add current_round for dynamic data updates
+        }
+        return config
+    
+    return evaluate_config
+
+
 def get_mode_and_shape(partition):
     data_set_keys = list(partition.features.keys())
     x_column = data_set_keys[0]

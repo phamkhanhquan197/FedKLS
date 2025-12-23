@@ -204,59 +204,14 @@ class DynamicDataScheduler:
         
         # Get dataset name
         dataset_name = self.config_sim["common"]["dataset"]
-        # if dataset_name not in dataset_info.keys():
-        #     available = list(dataset_info.keys())
-        #     raise Exception(f"Dataset name should be among: {available}")
+        if dataset_name not in dataset_info.keys():
+            available = list(dataset_info.keys())
+            raise Exception(f"Dataset name should be among: {available}")
         
         # Create new FederatedDataset with repartitioned data
         fds = FederatedDataset(dataset=dataset_name, partitioners=partitioner_dict)
         
         return fds
-
-    # def _create_reset_schedule(self):
-    #     """Create reset schedule: dataset replacement with size changes."""
-    #     milestones = [r for r in range(1, self.total_rounds + 1) if r % self.round_step == 0]
-    #     if not milestones:
-    #         milestones = [self.total_rounds]
-        
-    #     for cid in range(self.num_clients):
-    #         partition_size = len(self._client_partitions[cid])
-    #         available_indices = sorted(self._client_total_indices[cid])
-            
-    #         # Initial round: use start_fraction
-    #         initial_size = int(partition_size * self.start_fraction)
-    #         self.np_rng.seed(self.seed + cid * 1000 + 1)
-    #         initial_selected = sorted(self.np_rng.choice(
-    #             available_indices,
-    #             size=min(initial_size, len(available_indices)),
-    #             replace=False
-    #         ).tolist())
-            
-    #         prev_indices = initial_selected
-            
-    #         for round_num in range(1, self.total_rounds + 1):
-    #             if round_num in milestones and round_num > 1:
-    #                 # Reset: select new indices with different size
-    #                 min_size = int(partition_size * self.reset_size_range[0])
-    #                 max_size = int(partition_size * self.reset_size_range[1])
-                    
-    #                 # Deterministic size selection
-    #                 self.np_rng.seed(self.seed + cid * 1000 + round_num)
-    #                 target_size = self.np_rng.randint(min_size, max_size + 1)
-                    
-    #                 # Select indices deterministically (different from previous)
-    #                 self.np_rng.seed(self.seed + cid * 2000 + round_num)
-    #                 selected = sorted(self.np_rng.choice(
-    #                     available_indices,
-    #                     size=min(target_size, len(available_indices)),
-    #                     replace=False
-    #                 ).tolist())
-                    
-    #                 self._schedule_cache[(cid, round_num)] = selected
-    #                 prev_indices = selected
-    #             else:
-    #                 # Use previous round's indices if not a milestone
-    #                 self._schedule_cache[(cid, round_num)] = prev_indices.copy()
     
     def _create_reset_schedule(self):
         """
@@ -390,38 +345,3 @@ class DynamicDataScheduler:
             valset = valset.with_transform(apply_transforms)
         
         return trainset, valset
-    
-    def get_client_dataset_size(self, client_id: int, round_num: int) -> Tuple[int, int]:
-        """
-        Get train and validation sizes for a client at a specific round.
-        
-        Args:
-            client_id: Client ID
-            round_num: Current round number
-            
-        Returns:
-            Tuple of (train_size, val_size)
-        """
-        train_indices = self.get_client_round_indices(client_id, round_num)
-        total_size = len(train_indices)
-        train_size = int(total_size * (1 - self.val_ratio))
-        val_size = total_size - train_size
-        return train_size, val_size
-    
-    def verify_disjoint(self, round_num: int) -> bool:
-        """
-        Verify that clients have disjoint indices at a specific round.
-        
-        Args:
-            round_num: Round number to check
-            
-        Returns:
-            True if all clients have disjoint indices
-        """
-        all_indices = []
-        for cid in range(self.num_clients):
-            indices = set(self.get_client_round_indices(cid, round_num))
-            if indices & set(all_indices):
-                return False
-            all_indices.extend(indices)
-        return True

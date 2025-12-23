@@ -48,13 +48,6 @@ def get_client_fn(
 
 
     def client_fn(cid: str) -> fl.client.Client:
-        # #Access precomputed client partitions
-        # client_dataset_total = dataset.load_partition(partition_id = int(cid))
-        # client_dataset_splits = client_dataset_total.train_test_split(test_size=0.2, seed=config_sim["common"]["seed"])
-        
-        # trainset = client_dataset_splits["train"].with_transform(apply_transforms)
-        # valset = client_dataset_splits["test"].with_transform(apply_transforms)
-
         # Use scheduler if available (new approach with round-aware allocation)
         if data_scheduler is not None:
             trainset, valset = data_scheduler.get_client_round_datasets(

@@ -132,13 +132,9 @@ class BaseClient(fl.client.NumPyClient):
             self.trainset = new_trainset
             self.valset = new_valset
 
-
-
     def set_parameters(self, parameters):
         set_params(self.model, parameters)
 
-
-    
     def count_class_distribution(self, dataset):
         """Count the class distribution in the dataset."""
         class_counts = {}
@@ -189,6 +185,7 @@ class BaseClient(fl.client.NumPyClient):
             config["batch_size"],
             config["epochs"]
         )
+        
         # Create a DataLoader for the training set
         trainloader = DataLoader(self.trainset, batch_size=batch, shuffle=True)
         # Count the class distribution in the training set
@@ -245,7 +242,6 @@ class BaseClient(fl.client.NumPyClient):
 
     def evaluate(self, parameters, config):
         self.set_parameters(parameters)
-
         # Reload dataset to ensure validation size is updated for current round
         # This is necessary because evaluate() may be called after fit() in the same round
         # but with different dataset allocations

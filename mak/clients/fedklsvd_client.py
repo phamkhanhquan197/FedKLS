@@ -67,8 +67,3 @@ class FedKLSVDClient(BaseClient):
         # Add kl_norm to metrics
         metrics["kl_norm"] = self.kl_norm
         return parameters, num_examples, metrics
-    
-
-
-
-
