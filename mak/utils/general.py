@@ -1,12 +1,15 @@
 import copy
 from collections import OrderedDict
 from typing import List, Tuple
+import numpy as np
 
 import flwr as fl
 import torch
 from flwr.common import Metrics
 from mak.utils.dataset_info import dataset_info
+import torch.nn.functional as F
 from sklearn.metrics import f1_score
+
 
 # Testing if the dataset is text or image
 def test(net, testloader, device: str, feature_key: str) -> Tuple[float, float, float]:
@@ -16,6 +19,7 @@ def test(net, testloader, device: str, feature_key: str) -> Tuple[float, float, 
     total = 0
     all_labels = []
     all_preds = []
+    all_probs = []
     
     # Set the network to evaluation mode
     net.eval()
@@ -30,14 +34,17 @@ def test(net, testloader, device: str, feature_key: str) -> Tuple[float, float, 
                 outputs = net(input_ids, attention_mask=attention_mask, labels=labels)
                 loss += outputs.loss.item()
                 logits = outputs.logits
+                probs = F.softmax(logits, dim=1)  # probability per class
                 predicted = torch.argmax(logits, dim=1)
                 correct += (predicted == labels).sum().item()
                 total += labels.size(0)
                 #Collect for F1 score
                 all_labels.extend(labels.cpu().numpy())
                 all_preds.extend(predicted.cpu().numpy())
+                all_probs.extend(probs.cpu().numpy())
         accuracy = correct / total
         f1 = f1_score(all_labels, all_preds, average='weighted')
+
         return loss, accuracy, f1
     #for image datasets, we can use the standard loss function
     else:
@@ -48,19 +55,25 @@ def test(net, testloader, device: str, feature_key: str) -> Tuple[float, float, 
                 images, labels = data[x_label].to(device), data[y_label].to(device)
                 outputs = net(images)
                 loss += criterion(outputs, labels).item()
+                probs = F.softmax(outputs, dim=1)  # probability per class
                 _, predicted = torch.max(outputs.data, 1)
                 correct += (predicted == labels).sum().item()
                 #Collect for F1 score
                 all_labels.extend(labels.cpu().numpy())
                 all_preds.extend(predicted.cpu().numpy())
+                all_probs.extend(probs.cpu().numpy())
         accuracy = correct / len(testloader.dataset)
         f1 = f1_score(all_labels, all_preds, average='weighted')
+
         return loss, accuracy, f1
 
 def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays], device: str = "cuda"):
 
     """Set model weights from a list of NumPy ndarrays."""
     model_state = model.state_dict()
+    if params is None:
+        return  # Skip if parameters is None
+        
     if len(model_state.items()) != len(params): # Handle LoRA parameter update
         if any(key.startswith("distilbert.") for key in model_state.keys()):
             lora_keys = [k for k in model_state.keys() 
@@ -87,7 +100,7 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays], dev
         # state_dict = OrderedDict({k: torch.tensor(v, device=device).clone().detach() for k, v in params_dict})
         state_dict = OrderedDict({k: v.clone().detach().to(device) if isinstance(v, torch.Tensor) else torch.tensor(v, device=device)
                                   for k, v in params_dict})
-        model.load_state_dict(state_dict, strict=True)
+        model.load_state_dict(state_dict, strict=False)
 
 
 
@@ -97,6 +110,7 @@ def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
     # Multiply accuracy of each client by number of examples used
     accuracies = [num_examples * m["accuracy"] for num_examples, m in metrics]
     f1_scores = [num_examples * m["f1_score"] for num_examples, m in metrics]
+
     examples = [num_examples for num_examples, _ in metrics]
 
     # Aggregate and return custom metric (weighted average)

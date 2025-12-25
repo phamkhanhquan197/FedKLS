@@ -76,11 +76,19 @@ class FedKLSVDStrategy(FedAvg):
     ) -> Tuple[Optional[Parameters], Dict[str, Scalar]]:
         """Aggregate fit results for FedKL-SVD using weighted average."""
         if not results:
-            log(WARNING, f"Round {server_round}: No results to aggregate")
+            log(WARNING, f"Round {server_round}: ⚠️ No results to aggregate - returning None")
+            log(WARNING, f"Round {server_round}: This means fit_clients() returned empty results list")
+            log(WARNING, f"Round {server_round}: Possible causes: all clients failed, timeout, or clients not responding")
             return None, {}
         # Do not aggregate if there are failures and failures are not accepted
         if not self.accept_failures and failures:
-            log(WARNING, f"Round {server_round}: {len(failures)} client failures during fit")
+            log(WARNING, f"Round {server_round}: ⚠️ {len(failures)} client failures during fit and accept_failures=False - returning None")
+            log(WARNING, f"Round {server_round}: Failures details:")
+            for i, failure in enumerate(failures):
+                if isinstance(failure, Exception):
+                    log(WARNING, f"Round {server_round}:   Failure #{i+1}: {type(failure).__name__}: {str(failure)[:200]}")
+                else:
+                    log(WARNING, f"Round {server_round}:   Failure #{i+1}: {type(failure).__name__}")
             return None, {}
         log(INFO, f"Round {server_round}: Aggregated parameters from {len(results)} clients")
         

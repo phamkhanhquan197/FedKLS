@@ -171,7 +171,7 @@ class ScaffoldServer(ServerSaveData):
             log(INFO, f"Accuracy: {acc}")
             if self.out_file_path is not None:
                 field_names = ["round", "accuracy", "loss", "time"]
-                dict = {
+                row_dict = {
                     "round": current_round,
                     "accuracy": acc,
                     "loss": loss,
@@ -179,7 +179,7 @@ class ScaffoldServer(ServerSaveData):
                 }
                 with open(self.out_file_path, "a") as f:
                     dictwriter_object = csv.DictWriter(f, fieldnames=field_names)
-                    dictwriter_object.writerow(dict)
+                    dictwriter_object.writerow(row_dict)
                     f.close()
             if acc >= float(self.target_acc):
                 log(

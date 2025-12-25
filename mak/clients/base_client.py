@@ -7,7 +7,8 @@ from mak.utils.general import set_params, test
 from mak.utils.helper import get_optimizer
 from mak.utils.dataset_info import dataset_info
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-
+from flwr.common.logger import log
+from logging import INFO
 
 class BaseClient(fl.client.NumPyClient):
     """flwr base client implementaion"""
@@ -21,6 +22,9 @@ class BaseClient(fl.client.NumPyClient):
         config_sim,
         device,
         save_dir,
+        dataset=None, # NEW: FederatedDataset reference
+        apply_transforms=None, # NEW: transform function
+        data_scheduler=None, # NEW: DynamicDataScheduler for round-aware allocation
     ):
         self.client_id = client_id
         self.config_sim = config_sim
@@ -34,7 +38,13 @@ class BaseClient(fl.client.NumPyClient):
         self.dataset_name = self.config_sim["common"]["dataset"]
         self.feature_key = dataset_info[self.dataset_name]["feature_key"]
         self.output_column = dataset_info[self.dataset_name]["output_column"]
-        
+
+        #NEW: Store dataset reference and transform function for dynamic reload
+        self.dataset = dataset
+        self.apply_transforms = apply_transforms
+        self.partition_id = client_id
+        self.data_scheduler = data_scheduler # NEW: Store scheduler
+
         self.optimizer = None
         self.scheduler = None
         self.previous_val_loss = None
@@ -51,6 +61,10 @@ class BaseClient(fl.client.NumPyClient):
                 params_to_send = {name: tensor for name, tensor in self.model.state_dict().items() if "self" in name or "dense" in name}
             elif any(key.startswith("model.") for key in self.model.state_dict().keys()):
                 params_to_send = {name: tensor for name, tensor in self.model.state_dict().items() if "self_attn" in name or "mlp" in name}
+            else:
+                # For other models (e.g., ResNet, CNN), send all parameters if PEFT is enabled
+                # This handles cases where the model doesn't match the above patterns
+                params_to_send = {name: tensor for name, tensor in self.model.state_dict().items()}
 
             # Print parameter names and shapes
             # print("\n=== Parameters Sent to Server ===")
@@ -64,6 +78,59 @@ class BaseClient(fl.client.NumPyClient):
             # Send full model parameters to server
             return [val.cpu().numpy() for _, val in self.model.state_dict().items()]
 
+    def _load_full_partition_once(self):
+        if self.full_partition is None:
+            self.full_partition = self.dataset.load_partition(
+                partition_id=self.partition_id
+            )
+
+    def reload_dataset(self, mode: str, round_num: int=1):
+        """
+        Reload client-side dataset without touching model parameters.
+        Uses DynamicDataScheduler for round-aware, disjoint allocation.
+
+        Args:
+            mode: "replace" | "append"
+                - "replace": Drop toàn bộ dataset cũ, load dataset mới từ nguồn dữ liệu
+                - "append": Giữ dataset cũ và thêm dữ liệu mới
+            mode: "replace" | "append" (legacy, kept for compatibility)
+                - "replace": Drop entire old dataset, load new dataset from scheduler
+                - "append": For incremental mode, dataset size increases monotonically
+            round_num: Current round number for schedule lookup
+        """
+        # Use scheduler if available (new approach)
+        if self.data_scheduler is not None:
+            trainset, valset = self.data_scheduler.get_client_round_datasets(
+                client_id=self.client_id,
+                round_num=round_num,
+                apply_transforms=self.apply_transforms
+            )
+            self.trainset = trainset
+            self.valset = valset
+            return
+        
+        # Fallback to old approach if scheduler not available
+        if self.dataset is None or self.apply_transforms is None:
+            raise RuntimeError("Dataset reference or transform function not provided.")
+
+        client_dataset_total = self.dataset.load_partition(
+            partition_id=self.partition_id
+        )
+
+        splits = client_dataset_total.train_test_split(
+            test_size=0.2,
+            seed=self.config_sim["common"]["seed"],
+        )
+
+        new_trainset = splits["train"].with_transform(self.apply_transforms)
+        new_valset = splits["test"].with_transform(self.apply_transforms)
+
+        if mode == "append":
+            self.trainset = ConcatDataset([self.trainset, new_trainset])
+            self.valset = ConcatDataset([self.valset, new_valset])
+        else:
+            self.trainset = new_trainset
+            self.valset = new_valset
 
     def set_parameters(self, parameters):
         set_params(self.model, parameters)
@@ -87,15 +154,40 @@ class BaseClient(fl.client.NumPyClient):
         return dict(sorted(class_counts.items()))
 
     def fit(self, parameters, config):
+        """
+        Fit with dynamic dataset updates and strict model inheritance.
+        """
         self.set_parameters(parameters)
 
-        batch, epochs, learning_rate = (
+        # Read dynamic data config
+        dyn_cfg = self.config_sim.get("dynamic_data", {})
+        enabled = dyn_cfg.get("enabled", False)
+        mode = dyn_cfg.get("mode", "incremental")
+        round_step = dyn_cfg.get("round_step", None)
+
+        current_round = config.get("current_round", 0)
+
+        # Decide whether to update dataset
+        if enabled:
+            # Always reload dataset to get round-specific indices and validation split
+            # This ensures validation size changes when train size changes
+            if self.data_scheduler is not None:
+                self.reload_dataset(mode=mode, round_num=current_round)
+            else:
+                # Fallback to old approach
+                if round_step is not None and (current_round % round_step == 0 or current_round == 1):
+                    if mode == "reset":
+                        self.reload_dataset(mode="replace", round_num=current_round)
+                    elif mode == "incremental":
+                        self.reload_dataset(mode="append", round_num=current_round)
+
+        batch, epochs = (
             config["batch_size"],
-            config["epochs"],
-            config["lr"],
+            config["epochs"]
         )
+        
         # Create a DataLoader for the training set
-        trainloader  = DataLoader(self.trainset, batch_size=batch, shuffle=True)
+        trainloader = DataLoader(self.trainset, batch_size=batch, shuffle=True)
         # Count the class distribution in the training set
         class_counts = self.count_class_distribution(trainloader)
         # # Reuse or initialize optimizer
@@ -138,10 +230,28 @@ class BaseClient(fl.client.NumPyClient):
         # self.previous_val_loss = self.scheduler.best
         # self.save_state()  # Save state after training
 
-        return self.get_parameters({}), len(trainloader.dataset), {"client_id": self.client_id, "class_distribution": class_counts}
+        params_to_send = self.get_parameters({})
+        num_examples = len(trainloader.dataset)
+        metrics = {"client_id": self.client_id, "class_distribution": class_counts}
+        
+        # Add kl_norm to metrics if available (for FedMoKLS)
+        if hasattr(self, 'kl_norm') and self.kl_norm is not None:
+            metrics["kl_norm"] = self.kl_norm
+        
+        return params_to_send, num_examples, metrics
 
     def evaluate(self, parameters, config):
         self.set_parameters(parameters)
+        # Reload dataset to ensure validation size is updated for current round
+        # This is necessary because evaluate() may be called after fit() in the same round
+        # but with different dataset allocations
+        dyn_cfg = self.config_sim.get("dynamic_data", {})
+        enabled = dyn_cfg.get("enabled", False)
+        if enabled and self.data_scheduler is not None:
+            # Try to get current_round from config, fallback to "round" key or 0
+            current_round = config.get("current_round", config.get("round", 0))
+            self.reload_dataset(mode=dyn_cfg.get("mode", "incremental"), round_num=current_round)
+
         valloader = DataLoader(self.valset, batch_size=self.test_batch_size)
         # Count the class distribution in the validation set
         class_counts = self.count_class_distribution(valloader)

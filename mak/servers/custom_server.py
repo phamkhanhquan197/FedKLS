@@ -163,17 +163,36 @@ class ServerSaveData:
             # Local results
             local_loss = res_fed[0] if res_fed is not None else None
             local_metric = res_fed[1] if res_fed is not None else None
-            local_accuracy = local_metric["accuracy"] if local_metric is not None else None
-            local_f1 = local_metric["f1_score"] if local_metric is not None else None
+            # Safely extract metrics - handle both dict and non-dict types
+            # Use try-except to handle any edge cases with metric extraction
+            try:
+                if isinstance(local_metric, dict) and local_metric is not None:
+                    local_accuracy = local_metric.get("accuracy")
+                    local_f1 = local_metric.get("f1_score")
+                else:
+                    local_accuracy = None
+                    local_f1 = None
+            except (KeyError, TypeError, AttributeError):
+                local_accuracy = None
+                local_f1 = None
             # Global results
             global_loss = res_cen[0] if res_cen is not None else None
             global_metric = res_cen[1] if res_cen is not None else None
-            global_accuracy = global_metric["accuracy"] if global_metric is not None else None
-            global_f1 = global_metric["f1_score"] if global_metric is not None else None
-            # log(INFO, f"Accuracy: {acc}")
+            # Safely extract metrics - handle both dict and non-dict types
+            try:
+                if isinstance(global_metric, dict) and global_metric is not None:
+                    global_accuracy = global_metric.get("accuracy")
+                    global_f1 = global_metric.get("f1_score")
+                else:
+                    global_accuracy = None
+                    global_f1 = None
+            except (KeyError, TypeError, AttributeError):
+                global_accuracy = None
+                global_f1 = None
+
             if self.out_file_path is not None:
                 field_names = ["round", "global_accuracy", "global_f1_score", "global_loss", "local_accuracy", "local_f1", "local_loss", "processing_time", "upload_gb", "download_gb"]
-                dict = {
+                row_dict = {
                     "round": current_round,
                     "global_accuracy": global_accuracy,
                     "global_f1_score": global_f1,
@@ -187,9 +206,9 @@ class ServerSaveData:
                 }
                 with open(self.out_file_path, "a") as f:
                     dictwriter_object = csv.DictWriter(f, fieldnames=field_names)
-                    dictwriter_object.writerow(dict)
+                    dictwriter_object.writerow(row_dict)
                     f.close()
-            if global_accuracy >= float(self.target_acc):
+            if global_accuracy is not None and global_accuracy >= float(self.target_acc):
                 log(
                     INFO,
                     f"Reached target accuracy so stopping further rounds: {self.target_acc}",
@@ -214,8 +233,7 @@ class ServerSaveData:
         self,
         server_round: int,
         timeout: Optional[float],
-        curr_round_start_time: float,
-    ) -> Optional[Tuple[Optional[float], Dict[str, Scalar], EvaluateResultsAndFailures]]:
+        curr_round_start_time: float,) -> Optional[Tuple[Optional[float], Dict[str, Scalar], EvaluateResultsAndFailures]]:
         """Validate current global model on a number of clients."""
         # Get clients and their respective instructions from strategy
         client_instructions = self.strategy.configure_evaluate(
@@ -317,6 +335,21 @@ class ServerSaveData:
             timeout=timeout,
             num_threads=self.num_train_thread,
         )
+        
+        # DEBUG: Remove after debugging
+        log(INFO, f"Round {server_round}: fit_clients() called with {len(client_instructions)} clients")
+        log(INFO, f"Round {server_round}: Received {len(results)} results, {len(failures)} failures")
+        assert len(results) > 0, f"No results received in round {server_round}"
+        if len(failures) > 0:
+            log(WARNING, f"Round {server_round}: {len(failures)} failures detected!")
+        
+        # DEBUG: Remove after debugging - Check parameters received from clients
+        for client_proxy, fit_res in results:
+            assert fit_res.parameters is not None, f"Round {server_round}: Client {client_proxy.cid} returned None parameters!"
+            assert fit_res.parameters.tensors, f"Round {server_round}: Client {client_proxy.cid} returned empty parameters.tensors!"
+            param_size = sum(len(p) for p in fit_res.parameters.tensors) / 1e6  # MB
+            log(INFO, f"Round {server_round}: Client {client_proxy.cid} returned {len(fit_res.parameters.tensors)} parameters, size: {param_size:.2f} MB")
+            assert param_size > 0, f"Round {server_round}: Client {client_proxy.cid} returned zero-size parameters!"
 
         # # ------------------- START: Print client weight shapes -------------------
         # log(INFO, "--- Client Weight Shapes Received (Round %s) ---", server_round)
@@ -369,10 +402,11 @@ class ServerSaveData:
             log(INFO, "Client %s (Total training samples: %s, Class Distribution (%s classes): %s)", 
                 client_id, train_samples, num_class, class_dist) 
 
-        # Standard aggregation for non-LoRA models
+        # Standard aggregation for non-LoRA models        
         parameters_aggregated, metrics_aggregated = self.strategy.aggregate_fit(
             server_round, results, failures
         )
+        
         ##Check how many tensor the model performs aggregating
         # aggregated_ndarrays = parameters_to_ndarrays(parameters_aggregated)
         # log(INFO, f"Aggregated parameters ({len(aggregated_ndarrays)} tensors):")

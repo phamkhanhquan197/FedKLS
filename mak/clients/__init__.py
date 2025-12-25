@@ -18,6 +18,7 @@ def get_client_fn(
     apply_transforms,
     save_dir,
     kl_norm_dict: dict = None, #Precomputed KL divergence values from server, if available
+    data_scheduler = None, # NEW: DynamicDataScheduler for round-aware allocation
 ):
     strategy = config_sim["server"]["strategy"].lower()
     client_class = get_client_class(strategy)
@@ -48,12 +49,20 @@ def get_client_fn(
 
 
     def client_fn(cid: str) -> fl.client.Client:
-        #Access precomputed client partitions
-        client_dataset_total = dataset.load_partition(partition_id = int(cid))
-        client_dataset_splits = client_dataset_total.train_test_split(test_size=0.2, seed=config_sim["common"]["seed"])
-        
-        trainset = client_dataset_splits["train"].with_transform(apply_transforms)
-        valset = client_dataset_splits["test"].with_transform(apply_transforms)
+        # Use scheduler if available (new approach with round-aware allocation)
+        if data_scheduler is not None:
+            trainset, valset = data_scheduler.get_client_round_datasets(
+                client_id=int(cid),
+                round_num=1, #Initial round
+                apply_transforms=apply_transforms,
+            )
+        else:
+            # Fallback to old approach
+            client_dataset_total = dataset.load_partition(partition_id = int(cid))
+            client_dataset_splits = client_dataset_total.train_test_split(test_size=0.2, seed=config_sim["common"]["seed"])
+            
+            trainset = client_dataset_splits["train"].with_transform(apply_transforms)
+            valset = client_dataset_splits["test"].with_transform(apply_transforms)
 
         #Pass the normalized KL divergence to the client
         kl_norm = kl_normalized_per_client[int(cid)] if method == "fedkls" else 0.0
@@ -66,6 +75,9 @@ def get_client_fn(
             device=device,
             save_dir=save_dir,
             kl_norm=kl_norm,  
+            dataset=dataset,
+            apply_transforms=apply_transforms,
+            data_scheduler=data_scheduler, # NEW: DynamicDataScheduler for round-aware allocation
         )
         return client.to_client()
     
