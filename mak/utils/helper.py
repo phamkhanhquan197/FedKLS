@@ -24,11 +24,13 @@ from torch.utils.data import DataLoader
 import mak
 from mak.servers.custom_server import ServerSaveData
 from mak.servers.fedklsvd_server import FedKLSVDServer
+from mak.servers.ffa_lora_server import FFALoRAServer
 from mak.servers.fednova_server import FedNovaServer
 from mak.servers.scaffold_server import ScaffoldServer
 from mak.strategies.fednova_strategy import FedNovaStrategy
 from mak.strategies.scaffold_strategy import ScaffoldStrategy
 from mak.strategies.fedklsvd_strategy import FedKLSVDStrategy
+from mak.strategies.ffa_lora_strategy import FFALoRAStrategy
 from mak.utils.dataset_info import dataset_info
 from mak.utils.general import set_params, test, weighted_average
 from mak.models.svd_model import SVDAdapter, ConvAdapter
@@ -252,6 +254,77 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
                 B = torch.zeros(rank, d_in, device=weight_matrix.device)  # Zero init
                 W_res = weight_matrix
             log(INFO, f"Layer {name}: Applied LoRA with rank {rank}.")
+
+        elif method == 'ffa_lora':
+            # FFA-LoRA: Initialize A (configurable), B = 0, freeze A forever (external control)
+            ffa_cfg = config.get("ffa_lora_config", {})
+            seed = ffa_cfg.get("seed", 42)
+            init_method = ffa_cfg.get("init_method", "kaiming")
+
+            if seed is not None:
+                torch.manual_seed(seed)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(seed)
+
+            if init_method not in {"kaiming", "gaussian", "orthogonal", "svd"}:
+                raise ValueError(
+                    f"Unknown init_method: {init_method}. Options: kaiming | gaussian | orthogonal | svd"
+                )
+
+            if isinstance(layer, torch.nn.Conv2d):
+                c_out, c_in, k1, k2 = weight_matrix.shape
+                d_in = c_in * k1 * k2
+                W_flat = weight_matrix.view(c_out, -1)
+
+                # A init
+                if init_method == "kaiming":
+                    A = torch.empty(c_out, rank, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    init.kaiming_normal_(A, mode="fan_out", nonlinearity="relu")
+                elif init_method == "gaussian":
+                    A = torch.empty(c_out, rank, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    init.normal_(A, mean=0.0, std=0.01)
+                elif init_method == "orthogonal":
+                    A = torch.empty(c_out, rank, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    init.orthogonal_(A)
+                else:  # svd
+                    U, S, Vh = torch.linalg.svd(W_flat.float(), full_matrices=False)
+                    max_possible_rank = Vh.size(0)
+                    if rank > max_possible_rank:
+                        log(INFO, f"Warning: Requested rank {rank} for layer {name} > max possible rank {max_possible_rank}.")
+                        rank = max_possible_rank
+                    # FIX (CRITICAL): For FFA-LoRA SVD init, use right singular vectors
+                    # W = U @ diag(S) @ Vh, with Vh shape [In, In]. LoRA A must be [rank, In].
+                    A = Vh[:rank, :].to(device=weight_matrix.device, dtype=weight_matrix.dtype)
+
+                B = torch.zeros(rank, d_in, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                W_res = weight_matrix
+
+            else:
+                d_out, d_in = weight_matrix.shape
+
+                if init_method == "kaiming":
+                    A = torch.empty(d_out, rank, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    init.kaiming_normal_(A, mode="fan_out", nonlinearity="relu")
+                elif init_method == "gaussian":
+                    A = torch.empty(d_out, rank, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    init.normal_(A, mean=0.0, std=0.01)
+                elif init_method == "orthogonal":
+                    A = torch.empty(d_out, rank, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    init.orthogonal_(A)
+                else:  # svd
+                    U, S, Vh = torch.linalg.svd(weight_matrix.float(), full_matrices=False)
+                    max_possible_rank = Vh.size(0)
+                    if rank > max_possible_rank:
+                        log(INFO, f"Warning: Requested rank {rank} for layer {name} > max possible rank {max_possible_rank}.")
+                        rank = max_possible_rank
+                    # FIX (CRITICAL): Use right singular vectors for A (shape [rank, In])
+                    A = Vh[:rank, :].to(device=weight_matrix.device, dtype=weight_matrix.dtype)
+
+                B = torch.zeros(rank, d_in, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                W_res = weight_matrix
+
+            log(INFO, f"Layer {name}: Applied FFA-LoRA with rank {rank} (A init={init_method}, B=zero, A frozen).")
+
         else:
             if isinstance(layer, torch.nn.Conv2d): #Conv2d layer SVD
                 # weight_matrix = weight_matrix.view(weight_matrix.size(0), -1)  # Flatten Conv2d weights
@@ -360,11 +433,18 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
             new_layer = ConvAdapter(original_conv=layer, W_res=W_res, A=A, B=B, alpha=alpha, rank=rank)
         else:
             new_layer = SVDAdapter(W_res=W_res, A=A, B=B, alpha=alpha, rank=rank, original_bias=original_bias)
-        
+
+        # Freeze A for FFA-LoRA (external control)
+        if method == "ffa_lora":
+            try:
+                new_layer.A.requires_grad = False
+            except Exception as e:
+                log(INFO, f"Warning: Could not freeze A for layer {name}: {e}")
+
         # Split layer name and replace the original layer
         parent_name, child_name = name.rsplit(".", 1)
         parent = model.get_submodule(parent_name)
-        setattr(parent, child_name, new_layer)  
+        setattr(parent, child_name, new_layer)
     
     return model
 
@@ -619,6 +699,15 @@ def get_server(strategy, client_manager, out_file_path, target_acc, num_train_th
             out_file_path=out_file_path,
             target_acc=target_acc,
         )
+    elif isinstance(strategy, FFALoRAStrategy):
+        return FFALoRAServer(
+            strategy=strategy,
+            client_manager=client_manager,
+            out_file_path=out_file_path,
+            target_acc=target_acc,
+            num_train_thread=num_train_thread,
+            num_test_thread=num_test_thread,
+        )
     else:
         return ServerSaveData(
             strategy=strategy,
@@ -682,6 +771,9 @@ def get_strategy(
             "model": model,
             "test_data": test_data,
             "apply_transforms_test": apply_transforms_test,
+        },
+        "FFALoRA": {
+            "config": config,
         },
         "PowD": {
             "candidate_client_set": config["powd_config"]["candidate_client_set"],

@@ -6,3 +6,4 @@ from mak.strategies.power_d import PowD
 from mak.strategies.scaffold_strategy import ScaffoldStrategy as Scaffold
 from mak.strategies.fedklsvd_strategy import FedKLSVDStrategy as FedKLSVD
 from mak.strategies.fedawa_strategy import FedAWAStrategy as FedAWA
+from mak.strategies.ffa_lora_strategy import FFALoRAStrategy as FFALoRA

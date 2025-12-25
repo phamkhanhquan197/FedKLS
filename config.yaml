@@ -43,7 +43,13 @@ peft:
   enabled: True  #False = FFT, do not set method = fedkls when running FFT
   rank: 32
   alpha: 32 #Equal to the rank
-  method: pissa # ['pissa', 'milora', 'middle', 'fedkls', 'lora']
+  method: pissa # ['pissa', 'milora', 'middle', 'fedkls', 'lora', 'ffa_lora']
+
+# FFA-LoRA baseline config
+ffa_lora_config:
+  seed: 42
+  # Options: kaiming | gaussian | orthogonal | svd
+  init_method: "kaiming"
 
 fedawa_config:
   server_valid_ratio: 0.2 

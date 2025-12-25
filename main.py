@@ -120,7 +120,7 @@ def main():
             #Server always needs the SVD-adapted model when LoRA is enabled
             server_model = svd_model
             
-        elif lora_method in ["pissa", "milora", "middle", "lora"]:
+        elif lora_method in ["pissa", "milora", "middle", "lora", "ffa_lora"]:
             log(INFO, "Applying SVD to create svd model for server...")
             # Create a deep copy of base_model to avoid modifying it
             model_for_svd = copy.deepcopy(base_model)
