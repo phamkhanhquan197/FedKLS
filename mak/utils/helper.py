@@ -710,7 +710,7 @@ def get_strategy(
             "candidate_client_set": config["powd_config"]["candidate_client_set"],
         },
         "PFedMoAP": {
-            "config_sim": config,
+            "config": config,
         },
     } 
     

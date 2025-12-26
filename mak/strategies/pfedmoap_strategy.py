@@ -10,9 +10,9 @@ from flwr.server.client_proxy import ClientProxy
 
 
 class PFedMoAPStrategy(fl.server.strategy.FedAvg):
-    def __init__(self, *, pfedmoap_cfg: dict, **kwargs):
+    def __init__(self, *, config: dict, **kwargs):
         super().__init__(**kwargs)
-        self.cfg = pfedmoap_cfg
+        self.cfg = config["pfedmoap_config"]
         self.K = int(self.cfg.get("K", 4))
         self.prompt_pool: Dict[int, np.ndarray] = {}
         self.global_prompt: Optional[np.ndarray] = None
