@@ -36,8 +36,6 @@ import math
 from collections import Counter
 import torch.nn.init as init
 
-from mak.clients.pfedmoap_client import PFedMoAPState
-
 
 def get_device_and_resources(config_sim):
     # Check if GPU is available
@@ -505,6 +503,8 @@ def get_evaluate_fn(
                 dgating = config_sim["pfedmoap_config"]["dgating"]
                 heads = config_sim["pfedmoap_config"]["heads"]    
                 
+                # Can caused circular import 
+                from mak.clients.pfedmoap_client import PFedMoAPState
                 model.pfedmoap = PFedMoAPState(prompt_len=prompt_len, prompt_dim=prompt_dim, dgating=dgating, heads=heads)
 
             prompt = torch.from_numpy(np.asarray(parameters[0])).to(device=device, dtype=model.pfedmoap.local_prompt.dtype)
