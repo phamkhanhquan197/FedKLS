@@ -120,6 +120,12 @@ def main():
             #Server always needs the SVD-adapted model when LoRA is enabled
             server_model = svd_model
             
+        elif lora_method == "pfedmoap":                
+            log(INFO, "=>>>>> Method PFEDMOAP: using base_model for server and clients, no SVD.")
+
+            server_model = base_model
+            client_model = base_model 
+            
         elif lora_method in ["pissa", "milora", "middle", "lora"]:
             log(INFO, "Applying SVD to create svd model for server...")
             # Create a deep copy of base_model to avoid modifying it

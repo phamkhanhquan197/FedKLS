@@ -6,6 +6,8 @@ from mak.clients.fedprox_client import FedProxClient
 from mak.clients.scaffold_client import ScaffoldClient
 from mak.clients.fedklsvd_client import FedKLSVDClient
 from mak.clients.fedawa_client import FedAWAClient
+from mak.clients.pfedmoap_client import PFedMoAPClient
+
 from logging import INFO
 from flwr.common.logger import log
 
@@ -85,5 +87,7 @@ def get_client_class(strategy: str):
         return FedKLSVDClient
     elif strategy == "fedawa":
         return FedAWAClient
+    elif strategy == "pfedmoap":
+        return PFedMoAPClient
     else:
         return FedAvgClient
