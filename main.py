@@ -121,10 +121,10 @@ def main():
             server_model = svd_model
             
         elif lora_method == "pfedmoap":                
-            log(INFO, "=>>>>> Method pFedMoAP: using base_model for server and clients, no SVD.")
 
             server_model = base_model
-            client_model = base_model 
+            client_model = server_model
+            log(INFO, "=>>>>> Method PFEDMOAP: model wrapped inside get_model (no SVD).")            
             
         elif lora_method in ["pissa", "milora", "middle", "lora"]:
             log(INFO, "Applying SVD to create svd model for server...")

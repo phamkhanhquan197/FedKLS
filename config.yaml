@@ -80,3 +80,5 @@ pfedmoap_config:
   non_local_k: 4
   dgating: 128
   heads: 8
+  lambda_local: 1.0
+  temperature: 1.0

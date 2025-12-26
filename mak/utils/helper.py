@@ -464,6 +464,28 @@ def get_model(config, shape):
 
         return base_model
 
+    method = config.get("peft", {}).get("method", "").lower()
+    if method == "pfedmoap":
+        from mak.models.pfedmoap_wrapper import PFedMoAPPromptWrapper
+        prompt_len = config["pfedmoap_config"]["prompt_len"]
+        prompt_dim = config["pfedmoap_config"]["prompt_dim"]
+        dgating = config["pfedmoap_config"]["dgating"]
+        lambda_local = config["pfedmoap_config"]["lambda_local"]
+        temperature = config["pfedmoap_config"]["temperature"]    
+
+        base_model = PFedMoAPPromptWrapper(
+            base_model=base_model,
+            prompt_len=prompt_len,
+            prompt_dim=prompt_dim,
+            dgating=dgating,
+            lambda_local=lambda_local,
+            temperature=temperature,
+        )
+        
+        log(INFO, "=>>>>> Method PFEDMOAP: model wrapped inside get_model (no SVD).")
+
+        return base_model
+
     # check custom models
     model = getattr(__import__("mak.models", fromlist=[model_name]), model_name)(
         num_classes=num_classes, input_shape=shape
