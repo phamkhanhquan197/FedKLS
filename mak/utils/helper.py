@@ -686,6 +686,10 @@ def get_strategy(
         "PowD": {
             "candidate_client_set": config["powd_config"]["candidate_client_set"],
         },
+        "pFedMoAP": {
+            "config": config,
+            "model": model,
+        }
     } 
     return getattr(__import__("mak.strategies", fromlist=[STRATEGY]), STRATEGY)(
         fraction_fit=FRACTION_FIT,

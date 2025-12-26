@@ -121,7 +121,7 @@ def main():
             server_model = svd_model
             
         elif lora_method == "pfedmoap":                
-            log(INFO, "=>>>>> Method PFEDMOAP: using base_model for server and clients, no SVD.")
+            log(INFO, "=>>>>> Method pFedMoAP: using base_model for server and clients, no SVD.")
 
             server_model = base_model
             client_model = base_model 

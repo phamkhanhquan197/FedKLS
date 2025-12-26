@@ -44,7 +44,7 @@ peft:
   enabled: True #False = FFT, do not set method = fedkls when running FFT
   rank: 32
   alpha: 32 #Equal to the rank
-  method: pFedMoAP # ['pissa', 'milora', 'middle', 'fedkls', 'lora']
+  method: pfedmoap # ['pissa', 'milora', 'middle', 'fedkls', 'lora']
 
 # NEW: Dynamic Data Updates Configuration
 dynamic_data:
