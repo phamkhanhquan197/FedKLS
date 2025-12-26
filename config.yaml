@@ -25,7 +25,7 @@ server:
   num_clients : 3 # total number of clients participating in training
   fraction_evaluate : 1 # fraction of clients to be selected for evaluation
   min_evaluate_clients : 10 # minimum number of clients to be selected for evaluation
-  strategy : pFedMoAP #[FedAWA, FedKLSVD, FedAvg, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova]
+  strategy : PFedMoAP #[FedAWA, FedKLSVD, FedAvg, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova]
 
 client:
   loss: FocalLoss # [CrossEntropyLoss, FocalLoss]
@@ -72,3 +72,11 @@ fedprox:
 
 powd_config:
   candidate_client_set: 20 # the d parameter (client fraction ≤ d ≤ total clients)
+
+pfedmoap_config:
+  num_prompts: 8 # not sure if used
+  prompt_len: 16
+  prompt_dim: 768
+  non_local_k: 4
+  dgating: 128
+  heads: 8

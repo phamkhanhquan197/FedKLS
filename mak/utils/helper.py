@@ -36,6 +36,8 @@ import math
 from collections import Counter
 import torch.nn.init as init
 
+from mak.clients.pfedmoap_client import PFedMoAPState
+
 
 def get_device_and_resources(config_sim):
     # Check if GPU is available
@@ -487,9 +489,30 @@ def get_evaluate_fn(
     def evaluate(
         server_round: int, parameters: fl.common.NDArrays, config: Dict[str, Scalar]
     ):  
-        ## model = get_model(config=config_sim, shape=shape)
-        set_params(model, parameters)
+        
+        method = config_sim.get("peft", {}).get("method", "").lower()
+        strat = config_sim.get("server", {}).get("strategy", "")
 
+        if strat == "PFedMoAP" or method == "pfedmoap":
+            # parameters is prompt only: [prompt]
+            if len(parameters) != 1:
+                raise ValueError(f"PFedMoAP centralized eval expects 1 prompt, got {len(parameters)}")
+
+            # Attach pfedmoap state if missing
+            if not hasattr(model, "pfedmoap"):                
+                prompt_len = config_sim["pfedmoap_config"]["prompt_len"]
+                prompt_dim = config_sim["pfedmoap_config"]["prompt_dim"]
+                dgating = config_sim["pfedmoap_config"]["dgating"]
+                heads = config_sim["pfedmoap_config"]["heads"]    
+                
+                model.pfedmoap = PFedMoAPState(prompt_len=prompt_len, prompt_dim=prompt_dim, dgating=dgating, heads=heads)
+
+            prompt = torch.from_numpy(np.asarray(parameters[0])).to(device=device, dtype=model.pfedmoap.local_prompt.dtype)
+            model.pfedmoap.set_global_prompt(prompt)
+        else:
+            ## model = get_model(config=config_sim, shape=shape)
+            set_params(model, parameters)
+        
         model.to(device)
 
         # Apply transform to dataset
@@ -686,11 +709,22 @@ def get_strategy(
         "PowD": {
             "candidate_client_set": config["powd_config"]["candidate_client_set"],
         },
-        "pFedMoAP": {
-            "config": config,
-            "model": model,
-        }
+        "PFedMoAP": {
+            "config_sim": config,
+        },
     } 
+    
+    if STRATEGY == "PFedMoAP" or config.get("peft", {}).get("method", "").lower() == "pfedmoap":
+        prompt_len = config["pfedmoap_config"]["prompt_len"]
+        prompt_dim = config["pfedmoap_config"]["prompt_dim"]
+        # init global prompt
+        prompt0 = (0.02 * np.random.randn(prompt_len, prompt_dim)).astype(np.float32)
+        init_params = fl.common.ndarrays_to_parameters([prompt0])
+    else:
+        init_params = fl.common.ndarrays_to_parameters(
+            [val.cpu().numpy() for _, val in model.state_dict().items()]
+        )
+    
     return getattr(__import__("mak.strategies", fromlist=[STRATEGY]), STRATEGY)(
         fraction_fit=FRACTION_FIT,
         fraction_evaluate=FRACTION_EVAL,
@@ -708,8 +742,7 @@ def get_strategy(
         ),
         evaluate_metrics_aggregation_fn=weighted_average,
         on_fit_config_fn=get_fit_config_fn(config_sim=config),
-        initial_parameters=fl.common.ndarrays_to_parameters(
-            [val.cpu().numpy() for _, val in model.state_dict().items()]),
+        initial_parameters=init_params,
         **kwargs.get(STRATEGY, {}),
     )
 
