@@ -9,6 +9,80 @@ from flwr.common import FitIns, FitRes, Parameters, Scalar
 from flwr.server.client_proxy import ClientProxy
 
 
+class PFedMoAPStrategy(fl.server.strategy.FedAvg):
+    def __init__(self, *, pfedmoap_cfg: dict, **kwargs):
+        super().__init__(**kwargs)
+        self.cfg = pfedmoap_cfg
+        self.K = int(self.cfg.get("K", 4))
+        self.prompt_pool: Dict[int, np.ndarray] = {}
+        self.global_prompt: Optional[np.ndarray] = None
+
+    def _knn_select(self, cid: int) -> List[np.ndarray]:
+        if cid not in self.prompt_pool:
+            return []
+        if len(self.prompt_pool) <= 1:
+            return []
+        p = self.prompt_pool[cid].reshape(-1)
+        cands = []
+        for other_cid, other_p in self.prompt_pool.items():
+            if other_cid == cid:
+                continue
+            d = np.sum((p - other_p.reshape(-1)) ** 2)
+            cands.append((d, other_cid))
+        cands.sort(key=lambda x: x[0])
+        chosen = [self.prompt_pool[j] for _, j in cands[: self.K]]
+        return chosen
+
+    def initialize_parameters(self, client_manager):
+        # init global prompt from server side if provided
+        # If None, Flower will ask a random client. You can instead set a zero prompt here.
+        return super().initialize_parameters(client_manager)
+
+    def configure_fit(self, server_round, parameters, client_manager):
+        # parameters here will be treated as global prompt
+        fit_instructions = super().configure_fit(server_round, parameters, client_manager)
+
+        new_fit_ins = []
+        for client_proxy, fit_ins in fit_instructions:
+            cid = int(client_proxy.cid)
+            non_local = self._knn_select(cid)
+            cfg = dict(fit_ins.config)
+
+            cfg["peft_method"] = "pfedmoap"
+            cfg["pfedmoap_round"] = server_round
+            cfg["pfedmoap_has_pool_entry"] = (cid in self.prompt_pool)
+            cfg["pfedmoap_K"] = self.K
+            cfg["pfedmoap_lambda"] = float(self.cfg.get("lambda", 0.5))
+            cfg["pfedmoap_dgating"] = int(self.cfg.get("dgating", 128))
+            cfg["pfedmoap_heads"] = int(self.cfg.get("heads", 8))
+
+            # Serialize non_local prompts
+            # Each prompt is np.ndarray. We put them into bytes using np.save to a buffer.
+            payload = []
+            for p in non_local:
+                payload.append(p.tolist())
+            cfg["pfedmoap_non_local_prompts"] = payload
+
+            new_fit_ins.append((client_proxy, fl.common.FitIns(parameters, cfg)))
+
+        return new_fit_ins
+
+    def aggregate_fit(self, server_round, results, failures):
+        # FedAvg aggregation on prompts, then update pool entries for participating clients
+        aggregated_parameters, aggregated_metrics = super().aggregate_fit(server_round, results, failures)
+
+        # Update pool from client uploads
+        for client_proxy, fit_res in results:
+            cid = int(client_proxy.cid)
+            # fit_res.parameters is what client returned: prompt only
+            nds = fl.common.parameters_to_ndarrays(fit_res.parameters)
+            # assume single ndarray prompt
+            prompt_arr = nds[0]
+            self.prompt_pool[cid] = prompt_arr
+
+        return aggregated_parameters, aggregated_metrics
+
+
 class PFedMoAP(fl.server.strategy.FedAvg):
     """
     pFedMoAP strategy (Phase 2 server side):
