@@ -36,34 +36,70 @@ _MODELS = {
 }
 
 
-def _download(url: str, root: str = os.path.expanduser(os.path.join(os.environ["PROJECT"], "VirtualEnvs/.cache/clip"))):
-    os.makedirs(root, exist_ok=True)
-    filename = os.path.basename(url)
+def _default_clip_cache_dir() -> str:
+    """
+    Portable cache dir for CLIP downloads.
 
+    Priority:
+    1) If user sets CLIP_CACHE_DIR, use it (optional override, not required).
+    2) Use XDG cache on Linux if available: ~/.cache/clip
+    3) Use %LOCALAPPDATA% on Windows: .../clip
+    4) Fallback: ~/.cache/clip
+    """
+    override = os.environ.get("CLIP_CACHE_DIR")
+    if override:
+        return os.path.expanduser(override)
+
+    # Linux/macOS
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    base = xdg if xdg else os.path.join(os.path.expanduser("~"), ".cache")
+    return os.path.join(base, "clip")
+
+
+def _download(url: str, root: str | None = None) -> str:
+    """
+    Download file to a portable cache directory (no dependency on PROJECT env var).
+    """
+    if root is None:
+        root = _default_clip_cache_dir()
+
+    root = os.path.expanduser(root)
+    os.makedirs(root, exist_ok=True)
+
+    filename = os.path.basename(url)
     expected_sha256 = url.split("/")[-2]
     download_target = os.path.join(root, filename)
 
     if os.path.exists(download_target) and not os.path.isfile(download_target):
         raise RuntimeError(f"{download_target} exists and is not a regular file")
 
+    def _sha256(path: str) -> str:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
     if os.path.isfile(download_target):
-        if hashlib.sha256(open(download_target, "rb").read()).hexdigest() == expected_sha256:
+        if _sha256(download_target) == expected_sha256:
             return download_target
-        else:
-            warnings.warn(f"{download_target} exists, but the SHA256 checksum does not match; re-downloading the file")
+        warnings.warn(
+            f"{download_target} exists, but SHA256 checksum does not match; re-downloading the file"
+        )
 
     with urllib.request.urlopen(url) as source, open(download_target, "wb") as output:
-        with tqdm(total=int(source.info().get("Content-Length")), ncols=80, unit='iB', unit_scale=True) as loop:
+        total = source.info().get("Content-Length")
+        total_int = int(total) if total is not None else None
+        with tqdm(total=total_int, ncols=80, unit="iB", unit_scale=True) as loop:
             while True:
                 buffer = source.read(8192)
                 if not buffer:
                     break
-
                 output.write(buffer)
                 loop.update(len(buffer))
 
-    if hashlib.sha256(open(download_target, "rb").read()).hexdigest() != expected_sha256:
-        raise RuntimeError(f"Model has been downloaded but the SHA256 checksum does not not match")
+    if _sha256(download_target) != expected_sha256:
+        raise RuntimeError("Model downloaded but SHA256 checksum does not match")
 
     return download_target
 
