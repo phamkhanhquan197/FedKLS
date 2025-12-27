@@ -182,18 +182,23 @@ def main():
     #Update client_fn to pass kl_norm along with the model
     def client_fn_with_models(cid):
         cid = int(cid)
+
         if lora_method == "fedkls":
-            # model = client_models[cid]
-            # kl_norm = kl_normalized_per_client[cid]
-            # Load model from disk
             model_path = client_models[cid]
-            model = torch.load(model_path, map_location=device, weights_only = False)  # Load model from file
-            model = model.to(device)  # Move model to the correct device
-            kl_norm = kl_normalized_per_client[cid]  # Get the KL norm for this client
-            
-        else:
-            model = client_model
-            kl_norm = None
+            model = torch.load(model_path, map_location=device, weights_only=False).to(device)
+
+            return get_client_fn(
+                config_sim=config_sim,
+                dataset=fds,
+                model=model,
+                device=device,
+                apply_transforms=apply_transforms,
+                save_dir=saved_models_path,
+                kl_norm_dict=kl_normalized_per_client,   # only here
+            )(cid)
+
+        # else: PFedMoAP or others
+        model = client_model
         return get_client_fn(
             config_sim=config_sim,
             dataset=fds,
@@ -201,10 +206,9 @@ def main():
             device=device,
             apply_transforms=apply_transforms,
             save_dir=saved_models_path,
-            kl_norm_dict=kl_normalized_per_client if lora_method == "fedkls" else None,  # Pass precomputed kl_norms
+            # DO NOT pass kl_norm_dict at all
         )(cid)
-
-    
+        
     hist = fl.simulation.start_simulation(
         client_fn=client_fn_with_models,
         num_clients=config_sim['server']['num_clients'],
