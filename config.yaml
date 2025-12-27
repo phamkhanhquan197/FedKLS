@@ -7,7 +7,7 @@ common:
   dirichlet_alpha : 0.05 #dirichlet concentration parameter (only used if data_type is dirchlet-niid)
   target_acc : 0.99
   # model : Qwen/Qwen1.5-0.5B # one among [distilbert-base-uncased, bert-base-uncased, meta-llama/Llama-2-7b-hf, Qwen/Qwen1.5-0.5B, Net, CifarNet, SimpleCNN, KerasExpCNN, MNISTCNN, SimpleDNN, FMCNNModel,FedAVGCNN,Resnet18, Resnet34,ResNet18Pretrained, ResNet34Pretrained,ResNet18Small, ResNet20Small,MobileNetV2,EfficientNetB0,LSTMModel]
-  model: distilbert-base-uncased
+  model: CLIP
   # model: Qwen/Qwen1.5-0.5B
   optimizer : sgd # one among [sgd,adam]
   sgd_momentum : 0.9
@@ -41,10 +41,10 @@ client:
   num_gpus : 1 #  no. of GPU that are assigned for each actor (it can be fraction value as well)
 
 peft:
-  enabled: True #False = FFT, do not set method = fedkls when running FFT
+  enabled: False #False = FFT, do not set method = fedkls when running FFT
   rank: 32
   alpha: 32 #Equal to the rank
-  method: pfedmoap # ['pissa', 'milora', 'middle', 'fedkls', 'lora']
+  method: lora # ['pissa', 'milora', 'middle', 'fedkls', 'lora']
 
 # NEW: Dynamic Data Updates Configuration
 dynamic_data:

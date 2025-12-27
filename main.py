@@ -118,31 +118,7 @@ def main():
                 log(INFO, f"{name}: shape {tuple(tensor.shape)}")  
             log(INFO, f"=>>>>>>>>>>>>>>>>>Number of layers: {len(svd_model.state_dict())}")
             #Server always needs the SVD-adapted model when LoRA is enabled
-            server_model = svd_model
-            
-        elif lora_method == "pfedmoap":                
-            from mak.models.pfedmoap_wrapper import PFedMoAPPromptWrapper
-                        
-            prompt_len = config_sim["pfedmoap_config"]["prompt_len"]
-            prompt_dim = config_sim["pfedmoap_config"]["prompt_dim"]
-            dgating = config_sim["pfedmoap_config"]["dgating"]
-            lambda_local = config_sim["pfedmoap_config"]["lambda_local"]
-            temperature = config_sim["pfedmoap_config"]["temperature"]            
-
-            # Wrap model for server + clients (evaluation uses server_model too)
-            server_model = PFedMoAPPromptWrapper(
-                base_model=base_model,
-                prompt_len=prompt_len,
-                prompt_dim=prompt_dim,
-                dgating=dgating,
-                lambda_local=lambda_local,
-                temperature=temperature,
-            )
-
-            server_model = base_model
-            client_model = server_model
-            log(INFO, "=>>>>> Method PFEDMOAP: model wrapped inside get_model (no SVD).")            
-            
+            server_model = svd_model    
         elif lora_method in ["pissa", "milora", "middle", "lora"]:
             log(INFO, "Applying SVD to create svd model for server...")
             # Create a deep copy of base_model to avoid modifying it
