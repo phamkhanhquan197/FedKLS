@@ -5,7 +5,7 @@ from datasets.utils.logging import disable_progress_bar
 import os
 from mak.utils.helper import get_device_and_resources
 from mak.utils.helper import gen_dir_outfile_server, get_model, get_strategy, get_server, save_simulation_history,get_dataset, get_size_weights
-from mak.utils.pytorch_transformations import TransformationPipeline, TextTransformationPipeline
+from mak.utils.pytorch_transformations import TransformationPipeline, TextTransformationPipeline, CLIPTransformationPipeline
 from mak.clients import get_client_fn
 from mak.utils.dataset_info import dataset_info
 from mak.utils.helper import get_config, set_seed, parse_args, apply_svd_to_model
@@ -37,7 +37,7 @@ def main():
     
     set_seed(seed=config_sim['common']['seed'])
     
-    fds, centralized_testset = get_dataset(config_sim=config_sim)
+    fds, centralized_testset, classnames = get_dataset(config_sim=config_sim)
 
     if config_sim['server']['strategy'] == 'FedLaw':
         size_weights = get_size_weights(federated_dataset=fds,num_clients=config_sim['server']['num_clients']) #for fedlaw only
@@ -48,8 +48,12 @@ def main():
     model_name = config_sim['common']['model']
     shape = dataset_info[dataset_name]["input_shape"]
 
+    if model_name == "clip" or config_sim["server"]["strategy"] == "PFedMoAP":
+        # optional: derive img_size from pfedmoap_config/backbone
+        transformation_pipeline = CLIPTransformationPipeline(dataset_name=dataset_name, img_size=224)
+
     # Check if the dataset is a text dataset and use the appropriate transformation pipeline
-    if dataset_name in ['SetFit/20_newsgroups', 'legacy-datasets/banking77', 'fancyzhx/dbpedia_14'] or model_name in ['distilbert-base-uncased', 'microsoft/deberta-v3-base', 'llama2-7b']:
+    elif dataset_name in ['SetFit/20_newsgroups', 'legacy-datasets/banking77', 'fancyzhx/dbpedia_14'] or model_name in ['distilbert-base-uncased', 'microsoft/deberta-v3-base', 'llama2-7b']:
         # For text datasets, we need to use a different transformation pipeline
         transformation_pipeline = TextTransformationPipeline(dataset_name=dataset_name, model_name=model_name)
     else: 
@@ -65,7 +69,7 @@ def main():
         fl.common.logger.configure(identifier="FLNCLAB", filename=os.path.join(saved_models_path,'log.txt'))
 
     #Base model
-    base_model = get_model(config_sim,shape = shape)
+    base_model = get_model(config_sim,shape=shape, classnames=classnames)
     # Move base_model to CPU to reduce GPU memory usage
     base_model = base_model.cpu()  ### CHANGE ###: Ensure base_model is on CPU
 

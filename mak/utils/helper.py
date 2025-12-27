@@ -26,9 +26,11 @@ from mak.servers.custom_server import ServerSaveData
 from mak.servers.fedklsvd_server import FedKLSVDServer
 from mak.servers.fednova_server import FedNovaServer
 from mak.servers.scaffold_server import ScaffoldServer
+from mak.servers.pfedmoap_strategy import PFedMoAPServer
 from mak.strategies.fednova_strategy import FedNovaStrategy
 from mak.strategies.scaffold_strategy import ScaffoldStrategy
 from mak.strategies.fedklsvd_strategy import FedKLSVDStrategy
+from mak.strategies.pfedmoap_strategy import PFedMoAPStrategy
 from mak.utils.dataset_info import dataset_info
 from mak.utils.general import set_params, test, weighted_average
 from mak.models.svd_model import SVDAdapter, ConvAdapter
@@ -36,6 +38,8 @@ import math
 from collections import Counter
 import torch.nn.init as init
 
+
+TEXT_ONLY_DATASETS = {"SetFit/20_newsgroups", "legacy-datasets/banking77", "fancyzhx/dbpedia_14"}
 
 def get_device_and_resources(config_sim):
     # Check if GPU is available
@@ -185,7 +189,16 @@ def get_dataset(config_sim):
         # get test column name
         test_set = dataset_info[dataset_name]["test_set"]
         centralized_testset = fds.load_split(test_set)
-        return fds, centralized_testset
+        
+        out_col = dataset_info[dataset_name]["output_column"]
+        feat = centralized_testset.features.get(out_col, None)
+        if feat is not None and hasattr(feat, "names") and feat.names:
+            classnames = list(feat.names)
+        else:
+            num_classes = dataset_info[dataset_name]["num_classes"]
+            classnames = [f"class{i}" for i in range(num_classes)]
+
+        return fds, centralized_testset, classnames
 
 def extract_linear_layers(model):
     """Return a dict of {layer_name: layer_module} for all linear layers in the model.
@@ -430,11 +443,34 @@ def compute_client_distributions(config, dataset, num_clients: int) -> dict:
     
     return client_distributions
 
-def get_model(config, shape):
+def get_model(config, shape, classnames=None):
     model_name = config["common"]["model"]
     # get num_classes
     dataset_name = config["common"]["dataset"]
     num_classes = dataset_info[dataset_name]["num_classes"]
+    
+    # PFedMoAP CLIP guard
+    if model_name == "clip":
+        if dataset_name in TEXT_ONLY_DATASETS:
+            raise ValueError(f"PFedMoAP CLIP requires image dataset, got text dataset: {dataset_name}")
+
+        pf = config["pfedmoap_config"]
+        if classnames is None:
+            classnames = [f"class{i}" for i in range(num_classes)]
+        model = getattr(__import__("mak.models", fromlist=[model_name]), model_name)(
+            num_classes=num_classes,
+            input_shape=shape,
+            backbone_name=pf.get("backbone_name", "ViT-B/32"),
+            classnames=classnames,
+            prompt_len=pf["prompt_len"],
+            num_experts=pf.get("num_experts", 4),
+            dgating=pf["dgating"],
+            gating_heads=pf.get("heads", pf.get("gating_heads", 4)),
+            lambda_local=pf.get("lambda_local", 1.0),
+            freeze_text=True,
+        )
+        return model
+
 
     # check if model is from huggingface
     if model_name in ["distilbert-base-uncased", "Qwen/Qwen1.5-0.5B"]:  # Add more as needed
@@ -493,23 +529,15 @@ def get_evaluate_fn(
         strat = config_sim.get("server", {}).get("strategy", "")
 
         if strat == "PFedMoAP" or method == "pfedmoap":
-            # parameters is prompt only: [prompt]
             if len(parameters) != 1:
                 raise ValueError(f"PFedMoAP centralized eval expects 1 prompt, got {len(parameters)}")
 
-            # Attach pfedmoap state if missing
-            if not hasattr(model, "pfedmoap"):                
-                prompt_len = config_sim["pfedmoap_config"]["prompt_len"]
-                prompt_dim = config_sim["pfedmoap_config"]["prompt_dim"]
-                dgating = config_sim["pfedmoap_config"]["dgating"]
-                heads = config_sim["pfedmoap_config"]["heads"]    
-                
-                # Can caused circular import 
-                from mak.clients.pfedmoap_client import PFedMoAPState
-                model.pfedmoap = PFedMoAPState(prompt_len=prompt_len, prompt_dim=prompt_dim, dgating=dgating, heads=heads)
-
-            prompt = torch.from_numpy(np.asarray(parameters[0])).to(device=device, dtype=model.pfedmoap.local_prompt.dtype)
-            model.pfedmoap.set_global_prompt(prompt)
+            prompt = torch.from_numpy(np.asarray(parameters[0])).to(device=device)
+            # Use model API directly
+            if hasattr(model, "set_prompt"):
+                model.set_prompt(prompt)
+            if hasattr(model, "clear_nonlocal"):
+                model.clear_nonlocal()
         else:
             ## model = get_model(config=config_sim, shape=shape)
             set_params(model, parameters)
@@ -643,6 +671,15 @@ def get_server(strategy, client_manager, out_file_path, target_acc, num_train_th
             out_file_path=out_file_path,
             target_acc=target_acc,
         )
+    elif isinstance(strategy, PFedMoAPStrategy):
+        return PFedMoAPServer(
+            strategy=strategy,
+            client_manager=client_manager,
+            out_file_path=out_file_path,
+            target_acc=target_acc,
+            num_train_thread=num_train_thread,
+            num_test_thread=num_test_thread,
+        )
     else:
         return ServerSaveData(
             strategy=strategy,
@@ -715,9 +752,12 @@ def get_strategy(
         },
     } 
     
-    if STRATEGY == "PFedMoAP" or config.get("peft", {}).get("method", "").lower() == "pfedmoap":
+    if STRATEGY == "PFedMoAP":
         prompt_len = config["pfedmoap_config"]["prompt_len"]
-        prompt_dim = config["pfedmoap_config"]["prompt_dim"]
+        
+        prompt_dim = int(model.prompt_learner.ctx.shape[1])
+        config["pfedmoap_config"]["prompt_dim"] = prompt_dim 
+
         # init global prompt
         prompt0 = (0.02 * np.random.randn(prompt_len, prompt_dim)).astype(np.float32)
         init_params = fl.common.ndarrays_to_parameters([prompt0])

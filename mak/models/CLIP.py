@@ -1,5 +1,5 @@
-# mak/models/CLIP.py
-# PFedMoAP-ready CLIP wrapper built on the local "clip/" folder you copied:
+# mak/models/clip.py
+# PFedMoAP-ready clip wrapper built on the local "clip/" folder you copied:
 # clip/__init__.py, clip/clip.py, clip/model.py, clip/simple_tokenizer.py
 #
 # Notes:
