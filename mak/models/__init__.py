@@ -9,7 +9,13 @@ from .cnn import (
     SimpleCNN,
     SimpleDNN,
 )
-from .efficientnet import EfficientNetB0
+
+# Kaggle env bug workaround for EfficientNet import
+try:
+    from .efficientnet import EfficientNetB0
+except Exception:
+    EfficientNetB0 = None
+
 from .fedlaw_models import ResNet18Small, ResNet20Small
 from .lstm import LSTMModel
 from .mobilenet import MobileNetV2
