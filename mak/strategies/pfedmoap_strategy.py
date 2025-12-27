@@ -60,6 +60,11 @@ class PFedMoAPStrategy(FedAvg):
                 f"Prompt shape mismatch, got {prompt.shape}, expected {(self.prompt_len, self.prompt_dim)}"
             )
         return prompt
+    
+    def _cosine_dist(a, b, eps=1e-8):
+        a = a / (np.linalg.norm(a) + eps)
+        b = b / (np.linalg.norm(b) + eps)
+        return 1.0 - float(np.dot(a, b))
 
     def _select_expert_prompts(self, cid: int) -> List[np.ndarray]:
         # If pool not ready, return empty
@@ -101,7 +106,7 @@ class PFedMoAPStrategy(FedAvg):
         dists: List[Tuple[float, int]] = []
         for k in keys:
             p = self.prompt_pool[k].reshape(-1)
-            dist = float(np.linalg.norm(q - p))
+            dist = self._cosine_dist(q, p)
             dists.append((dist, k))
         dists.sort(key=lambda x: x[0])
         chosen_ids = [k for _, k in dists[:k_need]]
