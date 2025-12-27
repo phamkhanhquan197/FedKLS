@@ -19,7 +19,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import clip_backbone as clip
+import mak.models.clip_backbone as clip
 
 
 class _TextEncoder(nn.Module):
