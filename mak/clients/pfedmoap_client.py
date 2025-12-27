@@ -18,7 +18,13 @@ class PFedMoAPClient(BaseClient):
       3) trains prompt and gating only
       4) returns updated local prompt only
     """
-
+    def __init__(
+        self, client_id, model, trainset, valset, config_sim, device, save_dir, kl_norm=None, dataset=None, apply_transforms=None
+    ):
+        super().__init__(
+            client_id, model, trainset, valset, config_sim, device, save_dir, dataset=dataset, apply_transforms=apply_transforms
+        )
+    
     def _build_optimizer(self, lr: float) -> torch.optim.Optimizer:
         pf = self.config_sim.get("pfedmoap_config", {})
         prompt_lr = float(pf.get("prompt_lr", lr))
