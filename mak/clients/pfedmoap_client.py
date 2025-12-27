@@ -119,8 +119,7 @@ class PFedMoAPClient(BaseClient):
     ):
         net.train()
 
-        # Keep criterion behavior consistent with BaseClient
-        criterion = self.criterion
+        criterion = self.get_loss(loss=config["loss"])
 
         feature_key = getattr(self, "feature_key", None)
         label_key = getattr(self, "output_column", None)
