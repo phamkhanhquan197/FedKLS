@@ -24,7 +24,7 @@ server:
   min_fit_clients : 3 # minimum number of clients to be selected for training
   num_clients : 3 # total number of clients participating in training
   fraction_evaluate : 1 # fraction of clients to be selected for evaluation
-  min_evaluate_clients : 10 # minimum number of clients to be selected for evaluation
+  min_evaluate_clients : 3 # minimum number of clients to be selected for evaluation
   strategy : PFedMoAP #[FedAWA, FedKLSVD, FedAvg, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova]
 
 client:

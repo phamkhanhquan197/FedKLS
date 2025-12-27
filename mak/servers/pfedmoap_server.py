@@ -31,7 +31,6 @@ class PFedMoAPServer(ServerSaveData):
       - broadcast parameters bytes
       - extra per-client config bytes (pfedmoap_expert_prompts)
     """
-
     def fit_round(
         self,
         server_round: int,
@@ -47,16 +46,29 @@ class PFedMoAPServer(ServerSaveData):
             log(INFO, "Start training: no clients selected, cancel")
             return None
 
-        # Download bytes:
-        # 1) parameters broadcast (global prompt)
+        # -------------------------
+        # Compute download payload
+        # -------------------------
         param_bytes = sum(len(t) for t in self.parameters.tensors)
-        # 2) config payload per client (expert prompts)
+
         cfg_bytes_total = 0
         for _, fitins in client_instructions:
             cfg_bytes_total += _bytes_of_expert_prompts_from_config(fitins.config)
 
         download_gb = (param_bytes * len(client_instructions) + cfg_bytes_total) / 1e9
-        self.comm_tracker.log_round(server_round=server_round, upload=0, download=download_gb)
+
+        # -------------------------
+        # Tracker: ensure keys exist
+        # -------------------------
+        if server_round not in self.comm_tracker.per_round:
+            self.comm_tracker.per_round[server_round] = {"upload": 0.0, "download": 0.0}
+        else:
+            self.comm_tracker.per_round[server_round].setdefault("upload", 0.0)
+            self.comm_tracker.per_round[server_round].setdefault("download", 0.0)
+
+        # Set download explicitly (don't rely on log_round key naming)
+        self.comm_tracker.per_round[server_round]["download"] = float(download_gb)
+        self.comm_tracker.total_download += float(download_gb)
 
         log(
             INFO,
@@ -67,7 +79,9 @@ class PFedMoAPServer(ServerSaveData):
             download_gb,
         )
 
-        # Use the original parallel fit implementation from ServerSaveData
+        # -------------------------
+        # Fit selected clients
+        # -------------------------
         results, failures = fit_clients(
             client_instructions=client_instructions,
             max_workers=self.max_workers,
@@ -75,17 +89,24 @@ class PFedMoAPServer(ServerSaveData):
             num_threads=self.num_train_thread,
         )
 
-        # Upload bytes: sum of returned parameters from all successful clients
+        # -------------------------
+        # Compute upload payload
+        # -------------------------
         upload_bytes_total = 0
         for _, fit_res in results:
             upload_bytes_total += sum(len(t) for t in fit_res.parameters.tensors)
 
         upload_gb = upload_bytes_total / 1e9
-        self.comm_tracker.per_round[server_round]["upload"] = upload_gb
-        self.comm_tracker.total_upload += upload_gb
+
+        # Set upload explicitly
+        self.comm_tracker.per_round[server_round]["upload"] = float(upload_gb)
+        self.comm_tracker.total_upload += float(upload_gb)
 
         log(INFO, "Round %s upload: %.6f GB", server_round, upload_gb)
 
+        # -------------------------
+        # Aggregate
+        # -------------------------
         parameters_aggregated, metrics_aggregated = self.strategy.aggregate_fit(
             server_round, results, failures
         )
