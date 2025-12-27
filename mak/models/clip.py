@@ -308,6 +308,27 @@ class Clip(nn.Module):
         tokenized = self.prompt_learner.tokenized_prompts
         txt_feat_local = self.text_encoder(prompt_embeddings, tokenized)  # (C, D)
         txt_feat_local = F.normalize(txt_feat_local, dim=-1)
+        
+        def _stat(name, x):
+            x_f = x.detach().float()
+            ok = torch.isfinite(x_f).all().item()
+            print(
+                f"[PFedMoAP][DBG] {name} finite={ok} "
+                f"nan={torch.isnan(x_f).any().item()} inf={torch.isinf(x_f).any().item()} "
+                f"min={x_f.nan_to_num().min().item():.6f} max={x_f.nan_to_num().max().item():.6f}"
+            )
+
+        # after image_encoder
+        _stat("images", images)
+        _stat("img_feat_raw", img_feat)
+
+        # after text_encoder
+        _stat("txt_feat_raw", txt_feat_local)
+
+        # logit_scale
+        ls = self.logit_scale.detach().float()
+        print(f"[PFedMoAP][DBG] logit_scale raw={ls.item():.6f} exp={ls.exp().item():.6f}")
+
 
         # --- numeric safety: compute logits in fp32 + clamp logit_scale ---
         logit_scale = self.logit_scale.float().exp().clamp(max=100.0)  # was self.logit_scale.exp()
