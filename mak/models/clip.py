@@ -31,19 +31,18 @@ class _TextEncoder(nn.Module):
         self.positional_embedding = clip_model.positional_embedding
         self.ln_final = clip_model.ln_final
         self.text_projection = clip_model.text_projection
-        self.dtype = clip_model.dtype
 
     def forward(self, prompt_embeddings: torch.Tensor, tokenized_prompts: torch.Tensor) -> torch.Tensor:
-        # prompt_embeddings: (C, L, D)
-        x = prompt_embeddings + self.positional_embedding.type(self.dtype)
+        # prompt_embeddings: (C, L, D), expected float32 for numeric stability
+        x = prompt_embeddings + self.positional_embedding.float()
         x = x.permute(1, 0, 2)  # (L, C, D)
-        x = self.transformer(x)
+        x = self.transformer(x)  # keep in float32
         x = x.permute(1, 0, 2)  # (C, L, D)
-        x = self.ln_final(x).type(self.dtype)
+        x = self.ln_final(x).float()
 
         # Take features at EOT position
         eot_idx = tokenized_prompts.argmax(dim=-1)
-        x = x[torch.arange(x.shape[0]), eot_idx] @ self.text_projection
+        x = x[torch.arange(x.shape[0]), eot_idx] @ self.text_projection.float()
         return x
 
 
@@ -66,13 +65,11 @@ class _PromptLearner(nn.Module):
     ):
         super().__init__()
         self.device = device
-        self.dtype = clip_model.dtype
         self.classnames = list(classnames)
         self.n_class = len(self.classnames)
         self.prompt_len = int(prompt_len)
 
         # Build tokenized prompts with placeholders "X"
-        # Example: "X X X ... X <class>"
         placeholder = " ".join(["X"] * self.prompt_len)
         texts = [template.format(placeholder, name) for name in self.classnames]
         tokenized = torch.cat([clip.tokenize(t) for t in texts]).to(self.device)
@@ -80,15 +77,15 @@ class _PromptLearner(nn.Module):
 
         # Embed tokens once to get fixed prefix/suffix structure
         with torch.no_grad():
-            embedding = clip_model.token_embedding(self.tokenized_prompts).type(self.dtype)
+            embedding = clip_model.token_embedding(self.tokenized_prompts).float()
 
         # Prefix: SOS token only
         self.register_buffer("token_prefix", embedding[:, :1, :])  # (C, 1, D)
         # Suffix: tokens after ctx positions
         self.register_buffer("token_suffix", embedding[:, 1 + self.prompt_len :, :])  # (C, L-1-m, D)
 
-        # Learnable context vectors (shared across classes, as in CoOp and many prompt methods)
-        ctx = torch.empty(self.prompt_len, embedding.size(-1), dtype=self.dtype, device=self.device)
+        # Learnable context vectors (shared across classes)
+        ctx = torch.empty(self.prompt_len, embedding.size(-1), dtype=torch.float32, device=self.device)
         nn.init.normal_(ctx, std=0.02)
         self.ctx = nn.Parameter(ctx)  # (m, D)
 
@@ -96,7 +93,7 @@ class _PromptLearner(nn.Module):
         # Expand ctx to (C, m, D)
         ctx = self.ctx.unsqueeze(0).expand(self.n_class, -1, -1)
         # Concatenate to full prompt embeddings
-        return torch.cat([self.token_prefix, ctx, self.token_suffix], dim=1)  # (C, L, D)
+        return torch.cat([self.token_prefix, ctx, self.token_suffix], dim=1).float()  # (C, L, D)
 
     def get_ctx(self) -> torch.Tensor:
         return self.ctx.detach()
@@ -132,12 +129,12 @@ class _MultiheadAttention(nn.Module):
 
         scores = torch.matmul(Qh, Kh.transpose(-2, -1)) / (self.dk ** 0.5)
 
-        # numeric safety
+        # numeric safety: fp32 softmax with max subtraction
         scores = scores.float()
-        scores = scores - scores.amax(dim=-1, keepdim=True)  # stabilize softmax
+        scores = scores - scores.amax(dim=-1, keepdim=True)
         attn = torch.softmax(scores, dim=-1).to(dtype=Vh.dtype)
-        out = torch.matmul(attn, Vh)
 
+        out = torch.matmul(attn, Vh)
         out = out.transpose(1, 2).contiguous().view(B, Nq, D)  # (B, Nq, D)
         return self.Wo(out)
 
@@ -145,10 +142,6 @@ class _MultiheadAttention(nn.Module):
 class Clip(nn.Module):
     """
     PFedMoAP-ready CLIP model for FedKLS.
-
-    Constructor is flexible:
-    - It will work when instantiated via getattr(...) with num_classes and input_shape only.
-    - You can also pass extra kwargs from your build_model/get_model if you wire them later.
 
     Key API used by PFedMoAP client/strategy:
     - get_prompt() -> torch.Tensor (prompt_len, D)
@@ -173,6 +166,7 @@ class Clip(nn.Module):
         freeze_text: bool = True,
         device: Optional[Union[str, torch.device]] = None,
         template: str = "{} {}",
+        debug: bool = False,
     ):
         super().__init__()
 
@@ -186,6 +180,7 @@ class Clip(nn.Module):
         self.num_experts = int(num_experts)
         self.lambda_local = float(lambda_local)
         self.dgating = int(dgating)
+        self.debug = bool(debug)
 
         # Default classnames if not provided
         if classnames is None:
@@ -197,8 +192,11 @@ class Clip(nn.Module):
         clip_model, _ = clip.load(backbone_name, device=self.device, jit=False)
         clip_model.eval()
 
+        # Force float32 for numeric stability (fix NaN in text branch)
+        clip_model = clip_model.float()
+
         self.clip_model = clip_model
-        self.dtype = clip_model.dtype
+        self.dtype = torch.float32
 
         # Encoders
         self.image_encoder = clip_model.visual
@@ -213,7 +211,6 @@ class Clip(nn.Module):
         if freeze_text:
             for p in self.text_encoder.parameters():
                 p.requires_grad = False
-            # Also freeze token embedding and positional embedding etc that belong to clip_model
             for name, p in clip_model.named_parameters():
                 if "visual" in name:
                     continue
@@ -254,16 +251,16 @@ class Clip(nn.Module):
 
     def set_prompt(self, prompt_tensor: torch.Tensor) -> None:
         assert prompt_tensor.ndim == 2, f"prompt must be 2D, got {prompt_tensor.shape}"
-        assert prompt_tensor.shape == self.prompt_learner.ctx.shape, \
+        assert prompt_tensor.shape == self.prompt_learner.ctx.shape, (
             f"ctx shape mismatch: got {prompt_tensor.shape}, need {self.prompt_learner.ctx.shape}"
+        )
         self.prompt_learner.set_ctx(prompt_tensor.to(self.device))
 
     def load_nonlocal_prompts(self, prompt_list: Sequence[torch.Tensor]) -> None:
-        # prompt_list: list of (prompt_len, D) tensors
         if prompt_list is None or len(prompt_list) == 0:
             self.clear_nonlocal()
             return
-        self.nonlocal_ctx_list = [p.detach().to(self.device) for p in prompt_list]
+        self.nonlocal_ctx_list = [p.detach().to(self.device, dtype=torch.float32) for p in prompt_list]
         self._compute_nonlocal_text_features()
 
     def clear_nonlocal(self) -> None:
@@ -279,96 +276,100 @@ class Clip(nn.Module):
             self.nonlocal_text_features = None
             return
 
-        # Save local ctx, swap in each nonlocal ctx to compute its text features
         local_ctx = self.prompt_learner.get_ctx().clone()
 
         feats = []
         for ctx in self.nonlocal_ctx_list:
             self.prompt_learner.set_ctx(ctx)
-            prompt_embeddings = self.prompt_learner()  # (C, L, D)
+            prompt_embeddings = self.prompt_learner()  # (C, L, D) float32
             tokenized = self.prompt_learner.tokenized_prompts  # (C, L)
-            text_feat = self.text_encoder(prompt_embeddings, tokenized)
-            text_feat = F.normalize(text_feat, dim=-1)
+
+            with torch.cuda.amp.autocast(enabled=False):
+                text_feat = self.text_encoder(prompt_embeddings.float(), tokenized)
+                text_feat = torch.nan_to_num(text_feat, nan=0.0, posinf=0.0, neginf=0.0)
+                text_feat = F.normalize(text_feat, dim=-1)
+
             feats.append(text_feat)
 
-        # Restore local ctx
         self.prompt_learner.set_ctx(local_ctx)
         self.nonlocal_text_features = torch.stack(feats, dim=0)  # (K, C, D)
+
+    # -------------------------
+    # Debug helper
+    # -------------------------
+    def _stat(self, name: str, x: torch.Tensor) -> None:
+        if not self.debug:
+            return
+        x_f = x.detach().float()
+        ok = torch.isfinite(x_f).all().item()
+        print(
+            f"[PFedMoAP][DBG] {name} finite={ok} "
+            f"nan={torch.isnan(x_f).any().item()} inf={torch.isinf(x_f).any().item()} "
+            f"min={x_f.nan_to_num().min().item():.6f} max={x_f.nan_to_num().max().item():.6f}"
+        )
 
     # -------------------------
     # Forward
     # -------------------------
     def forward(self, images: torch.Tensor) -> torch.Tensor:
-        # Encode image
-        img_feat = self.image_encoder(images.type(self.dtype))
-        img_feat = F.normalize(img_feat, dim=-1)  # (B, D)
+        # Run in float32 to avoid fp16 instability in text branch
+        with torch.cuda.amp.autocast(enabled=False):
+            images_f = images.to(dtype=torch.float32)
 
-        # Encode local text prompts
-        prompt_embeddings = self.prompt_learner()  # (C, L, D)
-        tokenized = self.prompt_learner.tokenized_prompts
-        txt_feat_local = self.text_encoder(prompt_embeddings, tokenized)  # (C, D)
-        txt_feat_local = F.normalize(txt_feat_local, dim=-1)
-        
-        def _stat(name, x):
-            x_f = x.detach().float()
-            ok = torch.isfinite(x_f).all().item()
-            print(
-                f"[PFedMoAP][DBG] {name} finite={ok} "
-                f"nan={torch.isnan(x_f).any().item()} inf={torch.isinf(x_f).any().item()} "
-                f"min={x_f.nan_to_num().min().item():.6f} max={x_f.nan_to_num().max().item():.6f}"
-            )
+            # Encode image
+            img_feat = self.image_encoder(images_f)
+            img_feat = torch.nan_to_num(img_feat, nan=0.0, posinf=0.0, neginf=0.0)
+            img_feat = F.normalize(img_feat, dim=-1)  # (B, D)
 
-        # after image_encoder
-        _stat("images", images)
-        _stat("img_feat_raw", img_feat)
+            # Encode local text prompts
+            prompt_embeddings = self.prompt_learner()  # (C, L, D) float32
+            tokenized = self.prompt_learner.tokenized_prompts
+            txt_feat_local = self.text_encoder(prompt_embeddings.float(), tokenized)  # (C, D)
+            txt_feat_local = torch.nan_to_num(txt_feat_local, nan=0.0, posinf=0.0, neginf=0.0)
+            txt_feat_local = F.normalize(txt_feat_local, dim=-1)
 
-        # after text_encoder
-        _stat("txt_feat_raw", txt_feat_local)
+            self._stat("images", images_f)
+            self._stat("img_feat", img_feat)
+            self._stat("txt_feat_local", txt_feat_local)
 
-        # logit_scale
-        ls = self.logit_scale.detach().float()
-        print(f"[PFedMoAP][DBG] logit_scale raw={ls.item():.6f} exp={ls.exp().item():.6f}")
+            if self.debug:
+                ls = self.logit_scale.detach().float()
+                print(f"[PFedMoAP][DBG] logit_scale raw={ls.item():.6f} exp={ls.exp().item():.6f}")
 
+            # Numeric safety: clamp logit_scale and compute logits in fp32
+            logit_scale = self.logit_scale.float().exp().clamp(max=100.0)
+            local_logits = logit_scale * (img_feat @ txt_feat_local.t())  # (B, C)
 
-        # --- numeric safety: compute logits in fp32 + clamp logit_scale ---
-        logit_scale = self.logit_scale.float().exp().clamp(max=100.0)  # was self.logit_scale.exp()
-        local_logits = logit_scale * (img_feat.float() @ txt_feat_local.float().t())
-        local_logits = local_logits.to(dtype=img_feat.dtype)
+            # If no non-local experts, return local logits
+            if self.nonlocal_text_features is None:
+                return local_logits
 
-        # If no non-local experts, return local logits
-        if self.nonlocal_text_features is None:
-            return local_logits
+            # Experts for each class: local + nonlocal
+            experts = torch.cat(
+                [txt_feat_local.unsqueeze(0), self.nonlocal_text_features.float()],
+                dim=0,
+            )  # (E, C, D)
+            experts = experts.permute(1, 0, 2).contiguous()  # (C, E, D)
 
-        # Experts for each class: local + nonlocal
-        # local: (C, D)
-        # nonlocal: (K, C, D)
-        # stack to (C, E, D) where E = 1 + K
-        experts = torch.cat(
-            [txt_feat_local.unsqueeze(0), self.nonlocal_text_features],
-            dim=0,
-        )  # (E, C, D)
-        experts = experts.permute(1, 0, 2).contiguous()  # (C, E, D)
+            # Pool for gating
+            img_g = self.img_pool(img_feat)  # (B, dg)
+            exp_g = self.txt_pool(experts)  # (C, E, dg)
 
-        # Pool for gating
-        img_g = self.img_pool(img_feat)  # (B, dg)
-        exp_g = self.txt_pool(experts)  # (C, E, dg)
+            # Build Q, K, V for attention per (B, C)
+            B = img_g.size(0)
+            C = exp_g.size(0)
+            E = exp_g.size(1)
+            dg = exp_g.size(2)
 
-        # Build Q, K, V for attention per (B, C)
-        B = img_g.size(0)
-        C = exp_g.size(0)
-        E = exp_g.size(1)
-        dg = exp_g.size(2)
+            Q = img_g.unsqueeze(1).expand(B, C, dg).reshape(B * C, 1, dg)  # (BC, 1, dg)
+            K = exp_g.unsqueeze(0).expand(B, C, E, dg).reshape(B * C, E, dg)  # (BC, E, dg)
+            V = K
 
-        Q = img_g.unsqueeze(1).expand(B, C, dg).reshape(B * C, 1, dg)  # (BC, 1, dg)
-        K = exp_g.unsqueeze(0).expand(B, C, E, dg).reshape(B * C, E, dg)  # (BC, E, dg)
-        V = K
+            fused_g = self.attn(Q, K, V).squeeze(1)  # (BC, dg)
+            fused = self.txt_up(fused_g).view(B, C, -1)  # (B, C, D)
+            fused = torch.nan_to_num(fused, nan=0.0, posinf=0.0, neginf=0.0)
+            fused = F.normalize(fused, dim=-1)
 
-        fused_g = self.attn(Q, K, V).squeeze(1)  # (BC, dg)
-        fused = self.txt_up(fused_g).view(B, C, -1)  # (B, C, D)
-        fused = F.normalize(fused, dim=-1)
-        fused = torch.nan_to_num(fused, nan=0.0, posinf=0.0, neginf=0.0)
+            moe_logits = logit_scale * torch.sum(img_feat.unsqueeze(1) * fused, dim=-1)  # (B, C)
 
-        # Similarity between image feat and fused per class
-        moe_logits = logit_scale * torch.sum(img_feat.unsqueeze(1) * fused, dim=-1)  # (B, C)
-
-        return moe_logits + (self.lambda_local * local_logits)
+            return moe_logits + (self.lambda_local * local_logits)
