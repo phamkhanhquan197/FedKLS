@@ -130,9 +130,13 @@ class _MultiheadAttention(nn.Module):
         Kh = self.Wk(K).view(B, Nk, self.num_heads, self.dk).transpose(1, 2)  # (B, h, Nk, dk)
         Vh = self.Wv(V).view(B, Nk, self.num_heads, self.dk).transpose(1, 2)  # (B, h, Nk, dk)
 
-        scores = torch.matmul(Qh, Kh.transpose(-2, -1)) / (self.dk**0.5)  # (B, h, Nq, Nk)
-        attn = torch.softmax(scores, dim=-1)
-        out = torch.matmul(attn, Vh)  # (B, h, Nq, dk)
+        scores = torch.matmul(Qh, Kh.transpose(-2, -1)) / (self.dk ** 0.5)
+
+        # numeric safety
+        scores = scores.float()
+        scores = scores - scores.amax(dim=-1, keepdim=True)  # stabilize softmax
+        attn = torch.softmax(scores, dim=-1).to(dtype=Vh.dtype)
+        out = torch.matmul(attn, Vh)
 
         out = out.transpose(1, 2).contiguous().view(B, Nq, D)  # (B, Nq, D)
         return self.Wo(out)
@@ -249,6 +253,9 @@ class Clip(nn.Module):
         return self.prompt_learner.get_ctx().detach().float().cpu()
 
     def set_prompt(self, prompt_tensor: torch.Tensor) -> None:
+        assert prompt_tensor.ndim == 2, f"prompt must be 2D, got {prompt_tensor.shape}"
+        assert prompt_tensor.shape == self.prompt_learner.ctx.shape, \
+            f"ctx shape mismatch: got {prompt_tensor.shape}, need {self.prompt_learner.ctx.shape}"
         self.prompt_learner.set_ctx(prompt_tensor.to(self.device))
 
     def load_nonlocal_prompts(self, prompt_list: Sequence[torch.Tensor]) -> None:
@@ -302,8 +309,10 @@ class Clip(nn.Module):
         txt_feat_local = self.text_encoder(prompt_embeddings, tokenized)  # (C, D)
         txt_feat_local = F.normalize(txt_feat_local, dim=-1)
 
-        logit_scale = self.logit_scale.exp()
-        local_logits = logit_scale * (img_feat @ txt_feat_local.t())  # (B, C)
+        # --- numeric safety: compute logits in fp32 + clamp logit_scale ---
+        logit_scale = self.logit_scale.float().exp().clamp(max=100.0)  # was self.logit_scale.exp()
+        local_logits = logit_scale * (img_feat.float() @ txt_feat_local.float().t())
+        local_logits = local_logits.to(dtype=img_feat.dtype)
 
         # If no non-local experts, return local logits
         if self.nonlocal_text_features is None:
@@ -336,6 +345,7 @@ class Clip(nn.Module):
         fused_g = self.attn(Q, K, V).squeeze(1)  # (BC, dg)
         fused = self.txt_up(fused_g).view(B, C, -1)  # (B, C, D)
         fused = F.normalize(fused, dim=-1)
+        fused = torch.nan_to_num(fused, nan=0.0, posinf=0.0, neginf=0.0)
 
         # Similarity between image feat and fused per class
         moe_logits = logit_scale * torch.sum(img_feat.unsqueeze(1) * fused, dim=-1)  # (B, C)

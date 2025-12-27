@@ -61,28 +61,66 @@ class PFedMoAPStrategy(FedAvg):
             )
         return prompt
     
-    def _cosine_dist(a, b, eps=1e-8):
-        a = a / (np.linalg.norm(a) + eps)
-        b = b / (np.linalg.norm(b) + eps)
-        return 1.0 - float(np.dot(a, b))
+    @staticmethod
+    def _cosine_dist(a: np.ndarray, b: np.ndarray, eps: float = 1e-12) -> float:
+        a = np.asarray(a, dtype=np.float32).reshape(-1)
+        b = np.asarray(b, dtype=np.float32).reshape(-1)
+        na = np.linalg.norm(a)
+        nb = np.linalg.norm(b)
+        denom = max(na * nb, eps)
+        # cosine distance = 1 - cosine similarity
+        return float(1.0 - np.dot(a, b) / denom)
 
     def _select_expert_prompts(self, cid: int) -> List[np.ndarray]:
         # If pool not ready, return empty
         if len(self.prompt_pool) <= 1:
             return []
 
+        def _fallback_random(reason: str) -> List[np.ndarray]:
+            if not self.allow_random_when_insufficient:
+                log.warning(
+                    "[PFedMoAP][expert_select] fallback blocked (allow_random_when_insufficient=False). cid=%s reason=%s",
+                    cid,
+                    reason,
+                )
+                return []
+            if not keys:
+                log.warning(
+                    "[PFedMoAP][expert_select] fallback failed (no candidates). cid=%s reason=%s",
+                    cid,
+                    reason,
+                )
+                return []
+            kk = min(k_need, len(keys))
+            if kk <= 0:
+                log.warning(
+                    "[PFedMoAP][expert_select] fallback failed (kk<=0). cid=%s k_need=%s len(keys)=%s reason=%s",
+                    cid,
+                    k_need,
+                    len(keys),
+                    reason,
+                )
+                return []
+            chosen = self.rng.choice(keys, size=kk, replace=False)
+            log.warning(
+                "[PFedMoAP][expert_select] fallback_random used. cid=%s chosen=%s reason=%s",
+                cid,
+                [int(x) for x in chosen],
+                reason,
+            )
+            return [self.prompt_pool[int(x)] for x in chosen]
+
         # If cid missing in pool, cold start
         if cid not in self.prompt_pool:
             if not self.allow_random_when_insufficient:
                 return []
-            # random selection from pool excluding cid (cid not in pool anyway)
             keys = list(self.prompt_pool.keys())
             if not keys:
                 return []
-            k = min(self.num_experts - 1, len(keys))
-            if k <= 0:
+            k_need = min(self.num_experts - 1, len(keys))
+            if k_need <= 0:
                 return []
-            chosen = self.rng.choice(keys, size=k, replace=False)
+            chosen = self.rng.choice(keys, size=k_need, replace=False)
             return [self.prompt_pool[int(x)] for x in chosen]
 
         # Normal case: cid exists in pool
@@ -101,16 +139,57 @@ class PFedMoAPStrategy(FedAvg):
             chosen = self.rng.choice(keys, size=k_need, replace=False)
             return [self.prompt_pool[int(x)] for x in chosen]
 
-        # KNN selection with L2 distance between flattened prompts
-        q = self.prompt_pool[cid].reshape(-1)
-        dists: List[Tuple[float, int]] = []
-        for k in keys:
-            p = self.prompt_pool[k].reshape(-1)
-            dist = self._cosine_dist(q, p)
-            dists.append((dist, k))
-        dists.sort(key=lambda x: x[0])
-        chosen_ids = [k for _, k in dists[:k_need]]
-        return [self.prompt_pool[int(x)] for x in chosen_ids]
+        # KNN selection with cosine distance between flattened prompts
+        try:
+            q = np.asarray(self.prompt_pool[cid], dtype=np.float32).reshape(-1)
+
+            # Sanity checks for query prompt
+            if q.size == 0:
+                return _fallback_random("query prompt empty")
+            if not np.all(np.isfinite(q)):
+                return _fallback_random("query prompt has NaN/Inf")
+            if np.linalg.norm(q) < 1e-8:
+                return _fallback_random("query prompt norm too small")
+
+            dists: List[Tuple[float, int]] = []
+            skipped = 0
+
+            for k in keys:
+                p_raw = self.prompt_pool[k]
+                p = np.asarray(p_raw, dtype=np.float32).reshape(-1)
+
+                # Skip invalid candidates
+                if p.size == 0:
+                    skipped += 1
+                    continue
+                if not np.all(np.isfinite(p)):
+                    skipped += 1
+                    continue
+                if p.shape != q.shape:
+                    skipped += 1
+                    continue
+                if np.linalg.norm(p) < 1e-8:
+                    skipped += 1
+                    continue
+
+                dist = self._cosine_dist(q, p)
+                if not np.isfinite(dist):
+                    skipped += 1
+                    continue
+
+                dists.append((float(dist), int(k)))
+
+            if len(dists) < k_need:
+                return _fallback_random(
+                    f"not enough valid candidates after filtering (valid={len(dists)} need={k_need} skipped={skipped})"
+                )
+
+            dists.sort(key=lambda x: x[0])
+            chosen_ids = [k for _, k in dists[:k_need]]
+            return [self.prompt_pool[int(x)] for x in chosen_ids]
+
+        except Exception as e:
+            return _fallback_random(f"exception during knn select: {type(e).__name__}: {e}")
 
     def initialize_parameters(self, client_manager) -> Optional[Parameters]:
         # In your pipeline you already pass initial_parameters from get_strategy().

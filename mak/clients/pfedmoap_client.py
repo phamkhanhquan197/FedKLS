@@ -139,6 +139,12 @@ class PFedMoAPClient(BaseClient):
 
                 optim.zero_grad(set_to_none=True)
                 logits = net(images)
+                
+                if not torch.isfinite(logits).all():
+                    print("[NaN/Inf] logits", torch.isnan(logits).any().item(), torch.isinf(logits).any().item())
+                    print("logits min/max", logits.nan_to_num().min().item(), logits.nan_to_num().max().item())
+                    # optional: stop early to avoid contaminating optimizer state
+                    raise RuntimeError("Non-finite logits detected")
                 loss = criterion(logits, labels)
                 loss.backward()
                 optim.step()
