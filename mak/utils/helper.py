@@ -450,7 +450,6 @@ def get_model(config, shape, classnames=None):
     num_classes = dataset_info[dataset_name]["num_classes"]
     
     # PFedMoAP CLIP guard
-    print("model_name:", model_name)
     if model_name == "clip":
         if dataset_name in TEXT_ONLY_DATASETS:
             raise ValueError(f"PFedMoAP CLIP requires image dataset, got text dataset: {dataset_name}")
