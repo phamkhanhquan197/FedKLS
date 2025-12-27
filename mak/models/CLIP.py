@@ -138,7 +138,7 @@ class _MultiheadAttention(nn.Module):
         return self.Wo(out)
 
 
-class CLIP(nn.Module):
+class Clip(nn.Module):
     """
     PFedMoAP-ready CLIP model for FedKLS.
 
