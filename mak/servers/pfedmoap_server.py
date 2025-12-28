@@ -174,7 +174,7 @@ class PFedMoAPServer(ServerSaveData):
                         class_dist,
                     )
             except Exception:
-                print(results)
+                log(results)
 
         # -------------------------
         # Aggregate
