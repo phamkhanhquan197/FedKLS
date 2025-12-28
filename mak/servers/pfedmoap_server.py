@@ -156,9 +156,8 @@ class PFedMoAPServer(ServerSaveData):
             len(results),
             len(failures),
         )
-
-        
-        log("Results:", results)
+  
+        log(INFO, "Results: %s", results)
 
         # -------------------------
         # Aggregate
