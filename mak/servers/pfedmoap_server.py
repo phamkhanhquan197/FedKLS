@@ -157,7 +157,35 @@ class PFedMoAPServer(ServerSaveData):
             len(failures),
         )
   
-        log(INFO, "Results: %s", results)
+        for i in range(len(results)):
+            client_proxy = results[i][0]
+            fit_res = results[i][1]
+            metrics = fit_res.metrics or {}
+
+            client_id = metrics.get("client_id", None)
+            if client_id is None:
+                client_id = getattr(client_proxy, "cid", "unknown")
+
+            train_samples = fit_res.num_examples
+
+            class_dist = metrics.get("class_distribution", None)
+            if class_dist is None:
+                log(INFO, "Client %s (Total training samples: %s, Class Distribution: N/A)", client_id, train_samples)
+                continue
+
+            try:
+                num_class = len(class_dist)
+            except Exception:
+                num_class = "unknown"
+
+            log(
+                INFO,
+                "Client %s (Total training samples: %s, Class Distribution (%s classes): %s)",
+                client_id,
+                train_samples,
+                num_class,
+                class_dist,
+            )
 
         # -------------------------
         # Aggregate
