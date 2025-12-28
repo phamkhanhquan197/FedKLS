@@ -1,190 +1,154 @@
-# mak/servers/pfedmoap_server.py
+# mak/clients/pfedmoap_clip_client.py
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple
-import timeit
-import numpy as np
+from typing import Dict, Tuple
+import torch
+from torch.utils.data import DataLoader
+from flwr.common import Scalar
 
-from logging import INFO, DEBUG
-from flwr.common import Parameters, Scalar
-from flwr.common.logger import log
-from flwr.server.server import FitResultsAndFailures
-
-from mak.servers.custom_server import ServerSaveData, fit_clients
+from mak.clients.base_client import BaseClient
 
 
-def _bytes_of_expert_prompts_from_config(cfg: Dict[str, Any]) -> int:
-    prompts = cfg.get("pfedmoap_expert_prompts", None)
-    if not prompts:
-        return 0
-    total = 0
-    for p in prompts:
-        try:
-            total += int(np.asarray(p, dtype=np.float32).nbytes)
-        except Exception:
-            continue
-    return total
-
-
-class PFedMoAPServer(ServerSaveData):
+class PFedMoAPClient(BaseClient):
     """
-    Same as ServerSaveData, but communication tracking includes:
-      - broadcast parameters bytes
-      - extra per-client config bytes (pfedmoap_expert_prompts)
-
-    Also prints logs similar to custom_server.fit_round.
+    Client behavior:
+      1) receives global prompt only
+      2) loads nonlocal expert prompts from config (if provided)
+      3) trains prompt and gating only
+      4) returns updated local prompt only
     """
-
-    def fit_round(
-        self,
-        server_round: int,
-        timeout: Optional[float],
-    ) -> Optional[Tuple[Optional[Parameters], Dict[str, Scalar], FitResultsAndFailures]]:
-        curr_round_start_time = timeit.default_timer()
-
-        # Get clients and their respective instructions from strategy
-        client_instructions = self.strategy.configure_fit(
-            server_round=server_round,
-            parameters=self.parameters,
-            client_manager=self._client_manager,
+    def __init__(
+        self, client_id, model, trainset, valset, config_sim, device, save_dir, kl_norm=None, dataset=None, apply_transforms=None
+    ):
+        super().__init__(
+            client_id, model, trainset, valset, config_sim, device, save_dir, dataset=dataset, apply_transforms=apply_transforms
         )
+    
+    def _build_optimizer(self, lr: float) -> torch.optim.Optimizer:
+        pf = self.config_sim.get("pfedmoap_config", {})
+        prompt_lr = float(pf.get("prompt_lr", lr))
+        gating_lr = float(pf.get("gating_lr", lr))
+        wd = float(pf.get("weight_decay", 0.0))
 
-        # If no clients selected
-        if not client_instructions:
-            log(INFO, "======================================Round %s======================================", server_round)
-            log(INFO, "Start trainining: no clients selected, cancel")
-            return None
-
-        # -------------------------
-        # Compute download payload
-        # -------------------------
-        # params bytes (server -> clients)
-        param_bytes = sum(len(t) for t in self.parameters.tensors)
-
-        # extra cfg bytes per client (expert prompts)
-        cfg_bytes_total = 0
-        for _, fitins in client_instructions:
-            cfg_bytes_total += _bytes_of_expert_prompts_from_config(fitins.config)
-
-        # total download = params broadcast to each client + cfg bytes
-        num_clients = len(client_instructions)
-        download_gb = (param_bytes * num_clients + cfg_bytes_total) / 1e9
-        param_size_gb = param_bytes / 1e9
-
-        # -------------------------
-        # Tracker: ensure keys exist
-        # -------------------------
-        if server_round not in self.comm_tracker.per_round:
-            self.comm_tracker.per_round[server_round] = {"upload": 0.0, "download": 0.0}
-        else:
-            self.comm_tracker.per_round[server_round].setdefault("upload", 0.0)
-            self.comm_tracker.per_round[server_round].setdefault("download", 0.0)
-
-        # set download explicitly
-        self.comm_tracker.per_round[server_round]["download"] = float(download_gb)
-        self.comm_tracker.total_download += float(download_gb)
-
-        # -------------------------
-        # Logs similar to custom_server
-        # -------------------------
-        log(INFO, "======================================Round %s======================================", server_round)
-        log(INFO, f"Model size: {param_size_gb:.6f} GB = {param_size_gb*1024:.6f} MB")
-        log(
-            INFO,
-            "Round %s download: params_bytes=%s, cfg_bytes=%s, total=%.6f GB",
-            server_round,
-            param_bytes,
-            cfg_bytes_total,
-            download_gb,
-        )
-        log(
-            DEBUG,
-            "Start training: sampled %s clients (out of %s)",
-            len(client_instructions),
-            self._client_manager.num_available(),
-        )
-
-        # -------------------------
-        # Fit selected clients
-        # -------------------------
-        results, failures = fit_clients(
-            client_instructions=client_instructions,
-            max_workers=self.max_workers,
-            timeout=timeout,
-            num_threads=self.num_train_thread,
-        )
-
-        # -------------------------
-        # Compute upload payload
-        # -------------------------
-        upload_bytes_total = 0
-        upload_size_gb = 0.0
-
-        for client_proxy, fit_res in results:
-            # per-client upload tracking (if structure exists)
-            client_upload_gb = 0.0
-            if fit_res.parameters is not None and fit_res.parameters.tensors is not None:
-                client_upload_gb = sum(len(t) for t in fit_res.parameters.tensors) / 1e9
-
-            upload_bytes_total += int(client_upload_gb * 1e9)
-            upload_size_gb += client_upload_gb
-
-            # update comm_tracker.per_client if available
-            try:
-                if hasattr(self.comm_tracker, "per_client"):
-                    if client_proxy.cid in self.comm_tracker.per_client:
-                        self.comm_tracker.per_client[client_proxy.cid].setdefault("upload", 0.0)
-                        self.comm_tracker.per_client[client_proxy.cid]["upload"] += client_upload_gb
-            except Exception:
-                pass
-
-        # set upload explicitly
-        self.comm_tracker.per_round[server_round]["upload"] = float(upload_size_gb)
-        self.comm_tracker.total_upload += float(upload_size_gb)
-
-        log(
-            INFO,
-            f"Round {server_round} upload size: {upload_size_gb:.6f} GB = {upload_size_gb*1024:.6f} MB, "
-            f"download size: {download_gb:.6f} GB = {download_gb*1024:.6f} MB, "
-            f"total: {(upload_size_gb + download_gb):.6f} GB = {(upload_size_gb + download_gb)*1024:.6f} MB"
-        )
-
-        log(
-            DEBUG,
-            "Server training with %s results and %s failures",
-            len(results),
-            len(failures),
-        )
-
-        # Optional: print client-side training stats if present (same vibe as custom_server)
-        for _, fit_res in results:
-            try:
-                metrics = fit_res.metrics or {}
-                client_id = metrics.get("client_id", None)
-                train_samples = fit_res.num_examples
-                class_dist = metrics.get("class_distribution", None)
-                if client_id is not None and class_dist is not None:
-                    num_class = len(class_dist)
-                    log(
-                        INFO,
-                        "Client %s (Total training samples: %s, Class Distribution (%s classes): %s)",
-                        client_id,
-                        train_samples,
-                        num_class,
-                        class_dist,
-                    )
-            except Exception:
+        # Ensure only prompt and gating are trainable
+        params_prompt = []
+        params_gating = []
+        for name, p in self.model.named_parameters():
+            if not p.requires_grad:
                 continue
+            if "prompt_learner" in name or name.endswith("prompt") or "ctx" in name:
+                params_prompt.append(p)
+            else:
+                params_gating.append(p)
 
-        # -------------------------
-        # Aggregate
-        # -------------------------
-        parameters_aggregated, metrics_aggregated = self.strategy.aggregate_fit(
-            server_round, results, failures
+        # If the model names differ, fallback: everything trainable goes into one group
+        if (not params_prompt) and (not params_gating):
+            trainable = [p for p in self.model.parameters() if p.requires_grad]
+            return torch.optim.AdamW(trainable, lr=lr, weight_decay=wd)
+
+        param_groups = []
+        if params_prompt:
+            param_groups.append({"params": params_prompt, "lr": prompt_lr, "weight_decay": wd})
+        if params_gating:
+            param_groups.append({"params": params_gating, "lr": gating_lr, "weight_decay": wd})
+
+        return torch.optim.AdamW(param_groups)
+
+    def get_parameters(self, config):
+        # Only send prompt to server
+        prompt = self.model.get_prompt()
+        return [prompt.numpy()]
+
+    def set_parameters(self, parameters):
+        # Only set prompt from server
+        if parameters is None or len(parameters) != 1:
+            raise ValueError(f"PFedMoAP expects 1 tensor (prompt) from server, got {0 if parameters is None else len(parameters)}")
+        prompt = torch.tensor(parameters[0], dtype=torch.float32, device=self.device)
+        self.model.set_prompt(prompt)
+
+    def fit(self, parameters, config: Dict) -> Tuple[list, int, Dict]:
+        # 1) Set global prompt
+        self.set_parameters(parameters)
+
+        # 2) Load nonlocal experts from config
+        has_experts = bool(config.get("pfedmoap_has_experts", False))
+        if has_experts:
+            expert_prompts = config.get("pfedmoap_expert_prompts", [])
+            expert_tensors = [torch.tensor(p, dtype=torch.float32, device=self.device) for p in expert_prompts]
+            self.model.load_nonlocal_prompts(expert_tensors)
+        else:
+            self.model.clear_nonlocal()
+
+        # 3) Train
+        batch_size = int(config["batch_size"])
+        epochs = int(config["epochs"])
+        lr = float(config["lr"])
+
+        trainloader = DataLoader(self.trainset, batch_size=batch_size, shuffle=True)
+
+        self.optimizer = self._build_optimizer(lr=lr)
+        scheduler = self.scheduler  # keep existing if your BaseClient uses it
+        if scheduler is None:
+            scheduler = None
+
+        # Use BaseClient.train for image branch, it calls criterion(net(images), labels)
+        self.train(
+            net=self.model,
+            trainloader=trainloader,
+            optim=self.optimizer,
+            epochs=epochs,
+            device=self.device,
+            config=config,
+            scheduler=scheduler,
         )
 
-        # You can add this line if you want an explicit processing time log for training round:
-        # log(INFO, "Round %s fit_round time: %.6fs", server_round, timeit.default_timer() - curr_round_start_time)
+        # 4) Return updated prompt only
+        new_prompt = self.model.get_prompt()
+        return [new_prompt.numpy()], len(trainloader.dataset), {}
+    
+    def train(
+        self,
+        net,
+        trainloader,
+        optim,
+        epochs: int,
+        device,
+        config: Dict[str, Scalar],
+        scheduler=None,
+    ):
+        net.train()
 
-        return parameters_aggregated, metrics_aggregated, (results, failures)
+        criterion = self.get_loss(loss=config["loss"])
+
+        feature_key = getattr(self, "feature_key", None)
+        label_key = getattr(self, "output_column", None)
+
+        if feature_key is None or label_key is None:
+            raise ValueError("PFedMoAPClient requires self.feature_key and self.output_column to be set")
+
+        for _ in range(int(epochs)):
+            for batch in trainloader:
+                if feature_key not in batch or label_key not in batch:
+                    raise KeyError(
+                        f"Batch missing keys. Need ({feature_key}, {label_key}), got {list(batch.keys())}"
+                    )
+
+                images = batch[feature_key].to(device)
+                labels = batch[label_key].to(device)
+
+                optim.zero_grad(set_to_none=True)
+                with torch.cuda.amp.autocast(enabled=False):
+                    logits = net(images.float())
+                
+                if not torch.isfinite(logits).all():
+                    print("[NaN/Inf] logits", torch.isnan(logits).any().item(), torch.isinf(logits).any().item())
+                    print("logits min/max", logits.nan_to_num().min().item(), logits.nan_to_num().max().item())
+                    # optional: stop early to avoid contaminating optimizer state
+                    raise RuntimeError("Non-finite logits detected")
+                loss = criterion(logits, labels)
+                loss.backward()
+                optim.step()
+
+            if scheduler is not None:
+                scheduler.step()
