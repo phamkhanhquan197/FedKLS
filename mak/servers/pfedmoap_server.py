@@ -156,6 +156,24 @@ class PFedMoAPServer(ServerSaveData):
             len(results),
             len(failures),
         )
+        
+        from pprint import pformat
+
+        log(INFO, "===== DEBUG: RAW FIT RESULTS METRICS =====")
+        for i in range(len(results)):
+            client_proxy, fit_res = results[i]
+            log(
+                INFO,
+                "Client %s raw metrics keys: %s",
+                getattr(client_proxy, "cid", "unknown"),
+                list((fit_res.metrics or {}).keys()),
+            )
+            log(
+                INFO,
+                "Client %s raw metrics content:\n%s",
+                getattr(client_proxy, "cid", "unknown"),
+                pformat(fit_res.metrics),
+            )
   
         for i in range(len(results)):
             client_proxy = results[i][0]
