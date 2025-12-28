@@ -281,13 +281,11 @@ class Clip(nn.Module):
         feats = []
         for ctx in self.nonlocal_ctx_list:
             self.prompt_learner.set_ctx(ctx)
-            prompt_embeddings = self.prompt_learner()  # (C, L, D) float32
+            prompt_embeddings = self.prompt_learner()  # (C, L, D) 
             tokenized = self.prompt_learner.tokenized_prompts  # (C, L)
 
-            with torch.cuda.amp.autocast(enabled=False):
-                text_feat = self.text_encoder(prompt_embeddings.float(), tokenized)
-                text_feat = torch.nan_to_num(text_feat, nan=0.0, posinf=0.0, neginf=0.0)
-                text_feat = F.normalize(text_feat, dim=-1)
+            text_feat = self.text_encoder(prompt_embeddings, tokenized)
+            text_feat = F.normalize(text_feat, dim=-1)
 
             feats.append(text_feat)
 
@@ -312,64 +310,52 @@ class Clip(nn.Module):
     # Forward
     # -------------------------
     def forward(self, images: torch.Tensor) -> torch.Tensor:
-        # Run in float32 to avoid fp16 instability in text branch
-        with torch.cuda.amp.autocast(enabled=False):
-            images_f = images.to(dtype=torch.float32)
+        # Encode image
+        img_feat = self.image_encoder(images.type(self.dtype))
+        img_feat = F.normalize(img_feat, dim=-1)  # (B, D)
 
-            # Encode image
-            img_feat = self.image_encoder(images_f)
-            img_feat = torch.nan_to_num(img_feat, nan=0.0, posinf=0.0, neginf=0.0)
-            img_feat = F.normalize(img_feat, dim=-1)  # (B, D)
+        # Encode local text prompts
+        prompt_embeddings = self.prompt_learner()  # (C, L, D)
+        tokenized = self.prompt_learner.tokenized_prompts
+        txt_feat_local = self.text_encoder(prompt_embeddings, tokenized)  # (C, D)
+        txt_feat_local = F.normalize(txt_feat_local, dim=-1)
 
-            # Encode local text prompts
-            prompt_embeddings = self.prompt_learner()  # (C, L, D) float32
-            tokenized = self.prompt_learner.tokenized_prompts
-            txt_feat_local = self.text_encoder(prompt_embeddings.float(), tokenized)  # (C, D)
-            txt_feat_local = torch.nan_to_num(txt_feat_local, nan=0.0, posinf=0.0, neginf=0.0)
-            txt_feat_local = F.normalize(txt_feat_local, dim=-1)
+        logit_scale = self.logit_scale.exp()
+        local_logits = logit_scale * (img_feat @ txt_feat_local.t())  # (B, C)
 
-            self._stat("images", images_f)
-            self._stat("img_feat", img_feat)
-            self._stat("txt_feat_local", txt_feat_local)
+        # If no non-local experts, return local logits
+        if self.nonlocal_text_features is None:
+            return local_logits
 
-            if self.debug:
-                ls = self.logit_scale.detach().float()
-                print(f"[PFedMoAP][DBG] logit_scale raw={ls.item():.6f} exp={ls.exp().item():.6f}")
+        # Experts for each class: local + nonlocal
+        # local: (C, D)
+        # nonlocal: (K, C, D)
+        # stack to (C, E, D) where E = 1 + K
+        experts = torch.cat(
+            [txt_feat_local.unsqueeze(0), self.nonlocal_text_features],
+            dim=0,
+        )  # (E, C, D)
+        experts = experts.permute(1, 0, 2).contiguous()  # (C, E, D)
 
-            # Numeric safety: clamp logit_scale and compute logits in fp32
-            logit_scale = self.logit_scale.float().exp().clamp(max=100.0)
-            local_logits = logit_scale * (img_feat @ txt_feat_local.t())  # (B, C)
+        # Pool for gating
+        img_g = self.img_pool(img_feat)  # (B, dg)
+        exp_g = self.txt_pool(experts)  # (C, E, dg)
 
-            # If no non-local experts, return local logits
-            if self.nonlocal_text_features is None:
-                return local_logits
+        # Build Q, K, V for attention per (B, C)
+        B = img_g.size(0)
+        C = exp_g.size(0)
+        E = exp_g.size(1)
+        dg = exp_g.size(2)
 
-            # Experts for each class: local + nonlocal
-            experts = torch.cat(
-                [txt_feat_local.unsqueeze(0), self.nonlocal_text_features.float()],
-                dim=0,
-            )  # (E, C, D)
-            experts = experts.permute(1, 0, 2).contiguous()  # (C, E, D)
+        Q = img_g.unsqueeze(1).expand(B, C, dg).reshape(B * C, 1, dg)  # (BC, 1, dg)
+        K = exp_g.unsqueeze(0).expand(B, C, E, dg).reshape(B * C, E, dg)  # (BC, E, dg)
+        V = K
 
-            # Pool for gating
-            img_g = self.img_pool(img_feat)  # (B, dg)
-            exp_g = self.txt_pool(experts)  # (C, E, dg)
+        fused_g = self.attn(Q, K, V).squeeze(1)  # (BC, dg)
+        fused = self.txt_up(fused_g).view(B, C, -1)  # (B, C, D)
+        fused = F.normalize(fused, dim=-1)
 
-            # Build Q, K, V for attention per (B, C)
-            B = img_g.size(0)
-            C = exp_g.size(0)
-            E = exp_g.size(1)
-            dg = exp_g.size(2)
+        # Similarity between image feat and fused per class
+        moe_logits = logit_scale * torch.sum(img_feat.unsqueeze(1) * fused, dim=-1)  # (B, C)
 
-            Q = img_g.unsqueeze(1).expand(B, C, dg).reshape(B * C, 1, dg)  # (BC, 1, dg)
-            K = exp_g.unsqueeze(0).expand(B, C, E, dg).reshape(B * C, E, dg)  # (BC, E, dg)
-            V = K
-
-            fused_g = self.attn(Q, K, V).squeeze(1)  # (BC, dg)
-            fused = self.txt_up(fused_g).view(B, C, -1)  # (B, C, D)
-            fused = torch.nan_to_num(fused, nan=0.0, posinf=0.0, neginf=0.0)
-            fused = F.normalize(fused, dim=-1)
-
-            moe_logits = logit_scale * torch.sum(img_feat.unsqueeze(1) * fused, dim=-1)  # (B, C)
-
-            return moe_logits + (self.lambda_local * local_logits)
+        return moe_logits + (self.lambda_local * local_logits)
