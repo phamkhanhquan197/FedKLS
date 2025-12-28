@@ -8,6 +8,8 @@ from torch.utils.data import DataLoader
 from flwr.common import Scalar
 
 from mak.clients.base_client import BaseClient
+from collections import Counter
+
 
 
 class PFedMoAPClient(BaseClient):
@@ -66,6 +68,19 @@ class PFedMoAPClient(BaseClient):
             raise ValueError(f"PFedMoAP expects 1 tensor (prompt) from server, got {0 if parameters is None else len(parameters)}")
         prompt = torch.tensor(parameters[0], dtype=torch.float32, device=self.device)
         self.model.set_prompt(prompt)
+        
+    def _compute_class_distribution(self, trainloader):
+        labels = []
+        label_key = self.output_column
+
+        for batch in trainloader:
+            y = batch[label_key]
+            if isinstance(y, torch.Tensor):
+                labels.extend(y.cpu().tolist())
+            else:
+                labels.extend(list(y))
+
+        return dict(Counter(labels))
 
     def fit(self, parameters, config: Dict) -> Tuple[list, int, Dict]:
         # 1) Set global prompt
@@ -104,8 +119,15 @@ class PFedMoAPClient(BaseClient):
         )
 
         # 4) Return updated prompt only
+        class_dist = self._compute_class_distribution(trainloader)
+
+        metrics = {
+            "client_id": int(self.cid),
+            "class_distribution": class_dist,
+        }
+
         new_prompt = self.model.get_prompt()
-        return [new_prompt.numpy()], len(trainloader.dataset), {}
+        return [new_prompt.numpy()], len(trainloader.dataset), metrics
     
     def train(
         self,
