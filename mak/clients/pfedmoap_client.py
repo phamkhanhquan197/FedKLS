@@ -85,6 +85,8 @@ class PFedMoAPClient(BaseClient):
     def fit(self, parameters, config: Dict) -> Tuple[list, int, Dict]:
         # 1) Set global prompt
         self.set_parameters(parameters)
+        
+        print("[CLIENT ATTR DEBUG] keys:", [k for k in ["cid","client_id","client_id_int","id"] if hasattr(self, k)])
 
         # 2) Load nonlocal experts from config
         has_experts = bool(config.get("pfedmoap_has_experts", False))
