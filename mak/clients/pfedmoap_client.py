@@ -138,8 +138,7 @@ class PFedMoAPClient(BaseClient):
                 labels = batch[label_key].to(device)
 
                 optim.zero_grad(set_to_none=True)
-                with torch.cuda.amp.autocast(enabled=False):
-                    logits = net(images.float())
+                logits = net(images.float())
                 
                 if not torch.isfinite(logits).all():
                     print("[NaN/Inf] logits", torch.isnan(logits).any().item(), torch.isinf(logits).any().item())

@@ -21,7 +21,7 @@ server:
   num_rounds : 50
   address : 127.0.0.1
   fraction_fit : 1 # fraction of clients to be selected for training
-  min_fit_clients : 3 # minimum number of clients to be selected for training
+  min_fit_clients : 2 # minimum number of clients to be selected for training
   num_clients : 3 # total number of clients participating in training
   fraction_evaluate : 1 # fraction of clients to be selected for evaluation
   min_evaluate_clients : 3 # minimum number of clients to be selected for evaluation
