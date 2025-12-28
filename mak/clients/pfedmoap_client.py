@@ -86,8 +86,6 @@ class PFedMoAPClient(BaseClient):
         # 1) Set global prompt
         self.set_parameters(parameters)
         
-        print("[CLIENT ATTR DEBUG] keys:", [k for k in ["cid","client_id","client_id_int","id"] if hasattr(self, k)])
-
         # 2) Load nonlocal experts from config
         has_experts = bool(config.get("pfedmoap_has_experts", False))
         if has_experts:
@@ -124,8 +122,8 @@ class PFedMoAPClient(BaseClient):
         class_dist = self._compute_class_distribution(trainloader)
 
         metrics = {
-            "client_id": int(self.cid),
-            "class_distribution": class_dist,
+            "client_id": int(self.client_id),
+            "class_distribution": {int(k): int(v) for k, v in class_dist.items()},
         }
 
         new_prompt = self.model.get_prompt()
