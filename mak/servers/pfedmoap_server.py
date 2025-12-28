@@ -157,24 +157,8 @@ class PFedMoAPServer(ServerSaveData):
             len(failures),
         )
 
-        for _, fit_res in results:
-            try:
-                metrics = fit_res.metrics or {}
-                client_id = metrics.get("client_id", None)
-                train_samples = fit_res.num_examples
-                class_dist = metrics.get("class_distribution", None)
-                if client_id is not None and class_dist is not None:
-                    num_class = len(class_dist)
-                    log(
-                        INFO,
-                        "Client %s (Total training samples: %s, Class Distribution (%s classes): %s)",
-                        client_id,
-                        train_samples,
-                        num_class,
-                        class_dist,
-                    )
-            except Exception:
-                log(results)
+        
+        log("Results:", results)
 
         # -------------------------
         # Aggregate

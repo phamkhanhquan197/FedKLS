@@ -74,10 +74,8 @@ powd_config:
   candidate_client_set: 20 # the d parameter (client fraction ≤ d ≤ total clients)
 
 pfedmoap_config:
-  num_prompts: 8 # not sure if used
-  prompt_len: 16
-  non_local_k: 4
-  dgating: 128
-  heads: 8
-  lambda_local: 1.0
-  temperature: 1.0
+  prompt_len: 16        # number of learnable prompt tokens; the prompt is the ONLY parameter trained and exchanged each round
+  non_local_k: 4        # number of non-local expert prompts (from other clients) selected by the server and sent to each client
+  dgating: 128          # hidden dimension of the gating network used to mix the local prompt with expert prompts
+  heads: 8              # number of attention heads for multi-head attention when combining local and expert prompts
+  lambda_local: 1.0     # regularization weight for the local prompt; higher favors personalization, lower relies more on experts
