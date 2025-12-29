@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Optional, Tuple
+from flwr.server.history import History
 import timeit
 import numpy as np
 
@@ -199,3 +200,20 @@ class PFedMoAPServer(ServerSaveData):
         # log(INFO, "Round %s fit_round time: %.6fs", server_round, timeit.default_timer() - curr_round_start_time)
 
         return parameters_aggregated, metrics_aggregated, (results, failures)
+
+    def fit(self, num_rounds: int, timeout: Optional[float]) -> History:
+        """Override to return History (Flower expects History, not tuple)."""
+        res = super().fit(num_rounds=num_rounds, timeout=timeout)
+
+        # Your ServerSaveData.fit returns (History, total_time) in this repo
+        if isinstance(res, tuple):
+            history = res[0]
+            # optional: keep total time for later use
+            try:
+                self.last_fit_seconds = float(res[1])
+            except Exception:
+                self.last_fit_seconds = None
+            return history
+
+        # In case upstream changes and returns History directly
+        return res
