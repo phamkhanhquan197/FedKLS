@@ -6,6 +6,7 @@ from mak.clients.fedprox_client import FedProxClient
 from mak.clients.scaffold_client import ScaffoldClient
 from mak.clients.fedklsvd_client import FedKLSVDClient
 from mak.clients.fedawa_client import FedAWAClient
+from mak.clients.ffa_lora_client import FFALoRAClient
 from logging import INFO
 from flwr.common.logger import log
 
@@ -19,7 +20,7 @@ def get_client_fn(
     kl_norm_dict: dict = None, #Precomputed KL divergence values from server, if available
     data_scheduler = None, # NEW: DynamicDataScheduler for round-aware allocation
 ):
-    strategy = config_sim["server"]["strategy"].lower()
+    strategy = config_sim["server"]["strategy"]
     client_class = get_client_class(strategy)
     num_clients = config_sim["server"]["num_clients"]
     method = config_sim["peft"]["method"]
@@ -85,15 +86,17 @@ def get_client_fn(
 
 
 def get_client_class(strategy: str):
-    if strategy == "fedprox":
+    if strategy == "FedProx":
         return FedProxClient
-    elif strategy == "scaffold":
+    elif strategy == "Scaffold":
         return ScaffoldClient
-    elif strategy == "fednova":
+    elif strategy == "FedNova":
         return FedNovaClient
-    elif strategy == "fedklsvd":
+    elif strategy == "FedKLSVD":
         return FedKLSVDClient
-    elif strategy == "fedawa":
+    elif strategy == "FedAWA":
         return FedAWAClient
+    elif strategy == "FFALoRA":
+        return FFALoRAClient
     else:
         return FedAvgClient
