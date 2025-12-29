@@ -8,6 +8,7 @@ from mak.utils.helper import get_optimizer
 from mak.utils.dataset_info import dataset_info
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from flwr.common.logger import log
+from torch.utils.data import ConcatDataset
 from logging import INFO
 
 class BaseClient(fl.client.NumPyClient):
@@ -52,7 +53,7 @@ class BaseClient(fl.client.NumPyClient):
     def __repr__(self) -> str:
         return " Flwr base client"
 
-    def get_parameters(self, config):
+    def get_parameters(self, config): #Client -> Server
         if self.config_sim["peft"]["enabled"] == True:
             #Only send the A, B and bias parameters to the server 
             if any(key.startswith("distilbert.") for key in self.model.state_dict().keys()):
@@ -62,6 +63,7 @@ class BaseClient(fl.client.NumPyClient):
             elif any(key.startswith("model.") for key in self.model.state_dict().keys()):
                 params_to_send = {name: tensor for name, tensor in self.model.state_dict().items() if "self_attn" in name or "mlp" in name}
             else:
+                #Need to revise
                 # For other models (e.g., ResNet, CNN), send all parameters if PEFT is enabled
                 # This handles cases where the model doesn't match the above patterns
                 params_to_send = {name: tensor for name, tensor in self.model.state_dict().items()}
@@ -185,7 +187,6 @@ class BaseClient(fl.client.NumPyClient):
             config["batch_size"],
             config["epochs"]
         )
-        
         # Create a DataLoader for the training set
         trainloader = DataLoader(self.trainset, batch_size=batch, shuffle=True)
         # Count the class distribution in the training set
@@ -242,6 +243,7 @@ class BaseClient(fl.client.NumPyClient):
 
     def evaluate(self, parameters, config):
         self.set_parameters(parameters)
+
         # Reload dataset to ensure validation size is updated for current round
         # This is necessary because evaluate() may be called after fit() in the same round
         # but with different dataset allocations
