@@ -1,209 +1,207 @@
-# Copyright 2020 Flower Labs GmbH. All Rights Reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# ==============================================================================
-"""FFA-LoRA strategy."""
-from logging import WARNING, INFO
-from typing import Dict, List, Optional, Tuple, Union
+from logging import INFO
+from typing import List
 
-from flwr.common import (
-    FitRes,
-    Parameters,
-    Scalar,
-    NDArrays,
-    ndarrays_to_parameters,
-    parameters_to_ndarrays,
-)
-import flwr as fl
+import numpy as np
+import torch
+
 from flwr.common.logger import log
-from flwr.server.client_proxy import ClientProxy
-from flwr.server.strategy import FedAvg
-from flwr.server.strategy.aggregate import aggregate
+from mak.clients.base_client import BaseClient
+from collections import OrderedDict
 
-class FFALoRAStrategy(FedAvg):
-    """FFA-LoRA Strategy
+class FFALoRAClient(BaseClient):
+    """
+    FFA-LoRA Client (paper-faithful implementation)
 
-    - Clients control uplink payload:
-        * Round 1   : [A1, B1, A2, B2, ...]
-        * Round > 1 : [B1, B2, ...]
-
-    - Server aggregation:
-        * Weighted average over received tensors
-        * No A/B inspection
-
-    - Server downlink:
-        * Round 1   : full parameters
-        * Round > 1 : B-only parameters
+    - A is initialized once and frozen forever
+    - First communication: full (A + B)
+    - Later communications: B only
+    - Client infers protocol from parameter length or server flag
     """
 
-    def __init__(self, config: dict, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(
+        self, client_id, model, trainset, valset, config_sim, device, save_dir, kl_norm=None, dataset=None, apply_transforms=None, data_scheduler=None
+    ):
+        super().__init__(client_id, model, trainset, valset, config_sim, device, save_dir, dataset=dataset, apply_transforms=apply_transforms, data_scheduler=data_scheduler)
 
-    # ------------------------------------------------------------------
-    # Aggregation (uplink)
-    # ------------------------------------------------------------------
-    def aggregate_fit(
-        self,
-        server_round: int,
-        results: List[Tuple[ClientProxy, FitRes]],
-        failures: List[Union[Tuple[ClientProxy, FitRes], BaseException]],
-    ) -> Tuple[Optional[Parameters], Dict[str, Scalar]]:
-        """Aggregate whatever parameters the clients send (weighted average)."""
-        if not results:
-            log(WARNING, f"Round {server_round}: No results to aggregate")
-            return None, {}
-        # Do not aggregate if there are failures and failures are not accepted
-        if not self.accept_failures and failures:
-            log(WARNING, f"Round {server_round}: {len(failures)} client failures during fit")
-            return None, {}
-        
-        log(INFO, f"Round {server_round}: Aggregated parameters from {len(results)} clients")
-        
-        # --------------------------------------------------------------
-        # FedAvg (Flower reference implementation)
-        # --------------------------------------------------------------
-        weights_results = [
-            (parameters_to_ndarrays(fit_res.parameters), fit_res.num_examples)
-            for _, fit_res in results
+    def __repr__(self) -> str:
+        return " FFA-LoRA client"
+    
+    def _freeze_all_A(self) -> None:
+        for name, p in self.model.named_parameters():
+            if name.endswith(".A"):
+                p.requires_grad = False
+
+    def get_parameters(self, config):
+        """
+        Only send B adapters to the server.
+        """
+        model_state = self.model.state_dict()
+
+        if any(key.startswith("distilbert.") for key in model_state.keys()):  # DistilBERT-based model
+            params_to_send = {
+                name: tensor for name, tensor in model_state.items()
+                if name.endswith(".B") or (name.endswith(".bias") and "lin" in name)
+            }
+
+        elif any(key.startswith("bert.") for key in model_state.keys()):  # BERT-based model
+            params_to_send = {
+                name: tensor for name, tensor in model_state.items()
+                if name.endswith(".B")
+                or (name.endswith(".bias") and "self" in name)
+                or (name.endswith(".bias") and "dense" in name)
+            }
+
+        elif any(key.startswith("model.") for key in model_state.keys()):
+            params_to_send = {
+                name: tensor for name, tensor in model_state.items()
+                if name.endswith(".B")
+                or (name.endswith(".bias") and "self_attn" in name)
+                or (name.endswith(".bias") and "mlp" in name)
+            }
+
+        else:
+            raise NotImplementedError("Unsupported model type for FFA-LoRA")
+
+        # Minimal but critical fix: enforce deterministic order
+        return [
+            tensor.cpu().numpy()
+            for _, tensor in sorted(params_to_send.items())
         ]
-        # Convert aggregated weights back to Parameters
-        parameters_aggregated = ndarrays_to_parameters(aggregate(weights_results))
 
-        # --------------------------------------------------------------
-        # Metrics aggregation
-        # --------------------------------------------------------------
-        metrics_aggregated = {}
-        if self.fit_metrics_aggregation_fn:
-            fit_metrics = [(res.num_examples, res.metrics) for _, res in results]
-            metrics_aggregated = self.fit_metrics_aggregation_fn(fit_metrics)
-        elif server_round == 1:
-            log(WARNING, "No fit_metrics_aggregation_fn provided")
+    def set_parameters(self, parameters, device: str = "cuda"):
+        """Set model weights from a list of NumPy ndarrays."""
+        if parameters is None:
+            return
 
-        return parameters_aggregated, metrics_aggregated
+        model_state = self.model.state_dict()
 
+        log(INFO, f"FFA len(parameters): {len(parameters)}")
+        log(INFO, f"FFA len(model_state.items()): {len(model_state.items())}")
 
+        # ------------------------------------------------------
+        # Case 1: Full model update (Round 1)
+        # ------------------------------------------------------
+        if len(parameters) == len(model_state):
+            params_dict = zip(model_state.keys(), parameters)
+            state_dict = OrderedDict(
+                (k, torch.from_numpy(v).to(device))
+                for k, v in params_dict
+            )
 
-    # @staticmethod
-    # def _extract_b_from_full_ndarrays(full: List) -> List:
-    #     # full order is [A1,B1,A2,B2,...] -> B at odd indices
-    #     return [full[i] for i in range(1, len(full), 2)]
+            self.model.load_state_dict(state_dict, strict=False)
 
-    # def initialize_parameters(self, client_manager: ClientManager) -> Optional[Parameters]:
-    #     # Use initial_parameters passed in constructor (created in helper.get_strategy)
-    #     # Cache full and b_only views
-    #     if self.initial_parameters is None:
-    #         return None
+            log(INFO, "FFA-LoRA Client: Freezing all LoRA-A parameters after full model initialization.")
+            self._freeze_all_A()
+            return
 
-    #     full_nd = fl.common.parameters_to_ndarrays(self.initial_parameters)
-    #     b_nd = self._extract_b_from_full_ndarrays(full_nd)
+        # ------------------------------------------------------
+        # Case 2: LoRA-only update (Round > 1)
+        # ------------------------------------------------------
+        # Identify LoRA-B + bias keys explicitly (order does NOT matter globally,
+        # but MUST be deterministic locally)
+        if any(k.startswith("distilbert.") for k in model_state.keys()):
+            lora_keys = [
+                k for k in model_state.keys()
+                if k.endswith(".B") or (k.endswith(".bias") and "lin" in k)
+            ]
+        elif any(k.startswith("bert.") for k in model_state.keys()):
+            lora_keys = [
+                k for k in model_state.keys()
+                if (
+                    k.endswith(".B")
+                    or (k.endswith(".bias") and "self" in k)
+                    or (k.endswith(".bias") and "dense" in k)
+                )
+            ]
+        elif any(k.startswith("model.") for k in model_state.keys()):
+            lora_keys = [
+                k for k in model_state.keys()
+                if (
+                    k.endswith(".B")
+                    or (k.endswith(".bias") and "self_attn" in k)
+                    or (k.endswith(".bias") and "mlp" in k)
+                )
+            ]
+        else:
+            raise ValueError("Unsupported model type for FFA-LoRA set_parameters")
 
-    #     self._global_full = self.initial_parameters
-    #     self._global_b_only = fl.common.ndarrays_to_parameters(b_nd)
+        # Safety check
+        assert len(lora_keys) == len(parameters), (
+            f"Mismatch: {len(lora_keys)} LoRA keys vs {len(parameters)} received tensors"
+        )
 
-    #     log(INFO, f"FFALoRAStrategy: initialize_parameters cached full_len={len(full_nd)} b_len={len(b_nd)}")
-    #     return self.initial_parameters
+        # Name-based update (this is the critical fix)
+        for key, array in zip(lora_keys, parameters):
+            model_state[key] = torch.from_numpy(array).to(device)
 
-    # def configure_fit(
-    #     self,
-    #     server_round: int,
-    #     parameters: Parameters,
-    #     client_manager: ClientManager,
-    # ) -> List[Tuple[ClientProxy, FitIns]]:
-    #     # Build FitIns list similar to FedAvg but choose params based on round.
-    #     if self._global_full is None or self._global_b_only is None:
-    #         # fallback compute from passed parameters
-    #         full_nd = fl.common.parameters_to_ndarrays(parameters)
-    #         self._global_full = parameters
-    #         self._global_b_only = fl.common.ndarrays_to_parameters(self._extract_b_from_full_ndarrays(full_nd))
+        self.model.load_state_dict(model_state, strict=True)
 
-    #     if server_round == 1:
-    #         params_to_send = self._global_full
-    #         log(INFO, "FFALoRAStrategy: Round 1 downlink sending FULL (A+B)")
+    # def set_parameters(self, parameters, device: str = "cuda"):
+    #     """Set model weights from a list of NumPy ndarrays."""
+    #     model_state = self.model.state_dict()
+    #     if parameters is None:
+    #         return
+
+    #     print(f"FFA len(parameters): {len(parameters)}")
+    #     print(f"FFA len(model_state.items()): {len(model_state.items())}")
+
+    #     # ------------------------------------------------------
+    #     # LoRA-only update (Round > 1)
+    #     # ------------------------------------------------------
+    #     if len(model_state.items()) != len(parameters):
+
+    #         if any(key.startswith("distilbert.") for key in model_state.keys()):
+    #             lora_keys = sorted(
+    #                 k for k in model_state.keys()
+    #                 if k.endswith(".B") or (k.endswith(".bias") and "lin" in k)
+    #             )
+    #             log(INFO, f"FFA LoRA keys: {len(lora_keys)}")
+
+    #         elif any(key.startswith("bert.") for key in model_state.keys()):
+    #             lora_keys = sorted(
+    #                 k for k in model_state.keys()
+    #                 if (
+    #                     k.endswith(".B")
+    #                     or (k.endswith(".bias") and "self" in k)
+    #                     or (k.endswith(".bias") and "dense" in k)
+    #                 )
+    #             )
+
+    #         elif any(key.startswith("model.") for key in model_state.keys()):
+    #             lora_keys = sorted(
+    #                 k for k in model_state.keys()
+    #                 if (
+    #                     k.endswith(".B")
+    #                     or (k.endswith(".bias") and "self_attn" in k)
+    #                     or (k.endswith(".bias") and "mlp" in k)
+    #                 )
+    #             )
+    #         else:
+    #             raise NotImplementedError("Unsupported model type for FFA-LoRA")
+
+    #         # Minimal but critical fix: stable key ↔ tensor alignment
+    #         lora_params = OrderedDict()
+    #         for key, array in zip(lora_keys, parameters):
+    #             lora_params[key] = torch.from_numpy(array).to(device)
+
+    #         model_state.update(lora_params)
+    #         self.model.load_state_dict(model_state, strict=True)
+
+    #     # ------------------------------------------------------
+    #     # Full model update (Round 1)
+    #     # ------------------------------------------------------
     #     else:
-    #         params_to_send = self._global_b_only
-    #         log(INFO, f"FFALoRAStrategy: Round {server_round} downlink sending B-ONLY")
-
-    #     # Let FedAvg decide which clients to sample
-    #     sample_size, min_num_clients = self.num_fit_clients(client_manager.num_available())
-    #     clients = client_manager.sample(num_clients=sample_size, min_num_clients=min_num_clients)
-
-    #     fit_config = self.on_fit_config_fn(server_round) if self.on_fit_config_fn else {}
-    #     # Ensure client can decide round behavior
-    #     fit_config = dict(fit_config)
-    #     fit_config["server_round"] = server_round
-    #     fit_config["round"] = server_round
-
-    #     return [(client, FitIns(params_to_send, fit_config)) for client in clients]
-
-    # def aggregate_fit(
-    #     self,
-    #     server_round: int,
-    #     results,
-    #     failures,
-    # ):
-    #     # Aggregate only B matrices.
-    #     if not results:
-    #         return None, {}
-
-    #     # Convert each client result to ndarrays
-    #     client_nds: List[List] = []
-    #     weights: List[int] = []
-
-    #     for _, fit_res in results:
-    #         nds = fl.common.parameters_to_ndarrays(fit_res.parameters)
-    #         client_nds.append(nds)
-    #         weights.append(fit_res.num_examples)
-
-    #     # Determine if clients returned full or b_only
-    #     first_len = len(client_nds[0])
-    #     if self._global_full is None:
-    #         raise ValueError("FFALoRAStrategy: global parameters not initialized")
-    #     global_full_nd = fl.common.parameters_to_ndarrays(self._global_full)
-    #     global_b_nd = self._extract_b_from_full_ndarrays(global_full_nd)
-
-    #     if first_len == len(global_b_nd):
-    #         # already B-only
-    #         b_updates = client_nds
-    #     elif first_len == len(global_full_nd):
-    #         # full, extract B
-    #         b_updates = [self._extract_b_from_full_ndarrays(nd) for nd in client_nds]
-    #     else:
-    #         raise ValueError(
-    #             f"FFALoRAStrategy: unexpected client param len={first_len}; "
-    #             f"expected b_len={len(global_b_nd)} or full_len={len(global_full_nd)}"
+    #         params_dict = zip(model_state.keys(), parameters)
+    #         state_dict = OrderedDict(
+    #             (k, v.clone().detach().to(device) if isinstance(v, torch.Tensor)
+    #             else torch.tensor(v, device=device))
+    #             for k, v in params_dict
     #         )
+    #         print("len(state_dict): ", len(state_dict))
+    #         print("len(params_dict): ", len(list(params_dict)))
+    #         self.model.load_state_dict(state_dict, strict=False)
+    #         log(INFO, "FFA-LoRA Client: Freezing all LoRA-A parameters after full model initialization.")
+    #         self._freeze_all_A()
 
-    #     # Weighted average elementwise over list positions
-    #     total_examples = sum(weights)
-    #     agg_b: List = []
-    #     for j in range(len(global_b_nd)):
-    #         weighted = None
-    #         for nds, num_ex in zip(b_updates, weights):
-    #             contrib = nds[j] * (num_ex / total_examples)
-    #             weighted = contrib if weighted is None else (weighted + contrib)
-    #         agg_b.append(weighted)
 
-    #     # Update cached globals
-    #     self._global_b_only = fl.common.ndarrays_to_parameters(agg_b)
 
-    #     # Also update full by replacing B slots, keep A unchanged
-    #     new_full = list(global_full_nd)
-    #     for b_i, full_pos in zip(agg_b, range(1, len(new_full), 2)):
-    #         new_full[full_pos] = b_i
-    #     self._global_full = fl.common.ndarrays_to_parameters(new_full)
-
-    #     log(INFO, f"FFALoRAStrategy: Round {server_round} aggregated B-only (b_len={len(agg_b)})")
-
-    #     # Return parameters for next round (Flower passes into configure_fit)
-    #     # We return full for consistency, configure_fit decides what to send.
-    #     return self._global_full, {}
