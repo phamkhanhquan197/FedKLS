@@ -6,6 +6,7 @@ from mak.clients.fedprox_client import FedProxClient
 from mak.clients.scaffold_client import ScaffoldClient
 from mak.clients.fedklsvd_client import FedKLSVDClient
 from mak.clients.fedawa_client import FedAWAClient
+from mak.clients.ffa_lora_client import FFALoRAClient
 from mak.clients.pfedmoap_client import PFedMoAPClient
 
 from logging import INFO
@@ -19,8 +20,9 @@ def get_client_fn(
     apply_transforms,
     save_dir,
     kl_norm_dict: dict = None, #Precomputed KL divergence values from server, if available
+    data_scheduler = None, # NEW: DynamicDataScheduler for round-aware allocation
 ):
-    strategy = config_sim["server"]["strategy"].lower()
+    strategy = config_sim["server"]["strategy"]
     client_class = get_client_class(strategy)
     num_clients = config_sim["server"]["num_clients"]
     method = config_sim["peft"]["method"]
@@ -49,12 +51,20 @@ def get_client_fn(
 
 
     def client_fn(cid: str) -> fl.client.Client:
-        #Access precomputed client partitions
-        client_dataset_total = dataset.load_partition(partition_id = int(cid))
-        client_dataset_splits = client_dataset_total.train_test_split(test_size=0.2, seed=config_sim["common"]["seed"])
-        
-        trainset = client_dataset_splits["train"].with_transform(apply_transforms)
-        valset = client_dataset_splits["test"].with_transform(apply_transforms)
+        # Use scheduler if available (new approach with round-aware allocation)
+        if data_scheduler is not None:
+            trainset, valset = data_scheduler.get_client_round_datasets(
+                client_id=int(cid),
+                round_num=1, #Initial round
+                apply_transforms=apply_transforms,
+            )
+        else:
+            # Fallback to old approach
+            client_dataset_total = dataset.load_partition(partition_id = int(cid))
+            client_dataset_splits = client_dataset_total.train_test_split(test_size=0.2, seed=config_sim["common"]["seed"])
+            
+            trainset = client_dataset_splits["train"].with_transform(apply_transforms)
+            valset = client_dataset_splits["test"].with_transform(apply_transforms)
 
         #Pass the normalized KL divergence to the client
         kl_norm = kl_normalized_per_client[int(cid)] if method == "fedkls" else 0.0
@@ -66,9 +76,10 @@ def get_client_fn(
             config_sim=config_sim, 
             device=device,
             save_dir=save_dir,
-            kl_norm=kl_norm,
-            dataset=dataset,                 # NEW: Pass dataset reference
-            apply_transforms=apply_transforms, # NEW: Pass transform function
+            kl_norm=kl_norm,  
+            dataset=dataset,
+            apply_transforms=apply_transforms,
+            data_scheduler=data_scheduler, # NEW: DynamicDataScheduler for round-aware allocation
         )
         return client.to_client()
     
@@ -77,17 +88,19 @@ def get_client_fn(
 
 
 def get_client_class(strategy: str):
-    if strategy == "fedprox":
+    if strategy == "FedProx":
         return FedProxClient
-    elif strategy == "scaffold":
+    elif strategy == "Scaffold":
         return ScaffoldClient
-    elif strategy == "fednova":
+    elif strategy == "FedNova":
         return FedNovaClient
-    elif strategy == "fedklsvd":
+    elif strategy == "FedKLSVD":
         return FedKLSVDClient
-    elif strategy == "fedawa":
+    elif strategy == "FedAWA":
         return FedAWAClient
-    elif strategy == "pfedmoap":
+    elif strategy == "FFALoRA":
+        return FFALoRAClient
+    elif strategy == "PFedMoAP":
         return PFedMoAPClient
     else:
         return FedAvgClient
