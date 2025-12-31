@@ -1,105 +1,99 @@
+from __future__ import annotations
+
 from logging import INFO
-from typing import List
+from typing import Any, List
 
 import numpy as np
-
+import torch
 from flwr.common.logger import log
 
 from mak.clients.base_client import BaseClient
 
 
 class FFALoRAClient(BaseClient):
-    """FFA-LoRA Client: A frozen forever, train and communicate B only after round 1.
+    """FFA-LoRA client (Phase 1 refactor).
 
-    Communication protocol (List NDArrays, ordered):
-    - Round 1 downlink: full LoRA params [A1, B1, A2, B2, ...]
-    - Round >1 downlink: B-only [B1, B2, ...]
+    Rules:
+    - Inherit from BaseClient (no duplicated training loop).
+    - Source of truth: requires_grad.
+      * A must be frozen forever ("lora_A" or ".A" parameters).
+      * Only trainable params are communicated after round 1.
 
-    - Uplink Round 1: full LoRA params [A1, B1, A2, B2, ...] (as requested)
-    - Uplink Round >1: B-only [B1, B2, ...]
+    Protocol:
+    - Round 1 downlink: FULL model parameters (all parameters).
+    - Round >1 downlink: PARTIAL parameters (trainable-only).
 
-    NOTE: We freeze A externally (do not modify adapter classes).
+    Note: We keep the logic robust by using a length-based handshake and
+    a safety lock that forces A frozen immediately after any load.
     """
 
-    def __init__(
-        self, client_id, model, trainset, valset, config_sim, device, save_dir, kl_norm=None
-    ):
-        super().__init__(client_id, model, trainset, valset, config_sim, device, save_dir)
-        self._full_lora_param_names = self._get_full_lora_param_names()
-        self._b_only_param_names = [n for n in self._full_lora_param_names if n.endswith(".B")]
-
     def __repr__(self) -> str:
-        return " FFA-LoRA client"
+        return "FFA-LoRA client"
 
-    def _get_full_lora_param_names(self) -> List[str]:
-        """Full LoRA parameter order as they appear in model.named_parameters()."""
-        names: List[str] = []
-        for name, _ in self.model.named_parameters():
-            if name.endswith(".A") or name.endswith(".B"):
-                names.append(name)
-        return names
+    def set_parameters(self, parameters: List[np.ndarray], config: Any | None = None) -> None:
+        """Set parameters with Round-1 full-load vs later trainable-only injection.
 
-    def _freeze_all_A(self) -> None:
-        for name, p in self.model.named_parameters():
-            if name.endswith(".A"):
-                p.requires_grad = False
+        Round detection (as requested):
+        - Round 1 iff len(parameters) == len(list(self.model.parameters()))
 
-    def set_parameters(self, parameters):
-        """Set parameters based on list length: full (A+B) or B-only."""
-        # Defensive conversion (Flower provides list of numpy arrays)
+        Safety lock:
+        - After loading, force any parameter with name containing "lora_A" or ".A"
+          to have requires_grad=False.
+        """
         if parameters is None:
             return
 
-        num_incoming = len(parameters)
-        full_len = len(self._full_lora_param_names)
-        b_len = len(self._b_only_param_names)
+        incoming_len = len(parameters)
+        total_param_len = len(list(self.model.parameters()))
 
-        if num_incoming == full_len:
-            # Round 1: load A and B
-            state = self.model.state_dict()
-            for name, arr in zip(self._full_lora_param_names, parameters):
-                tensor = np.array(arr)
-                state[name] = state[name].new_tensor(tensor)
-            self.model.load_state_dict(state, strict=False)
-            self._freeze_all_A()
-            log(INFO, f"Client {self.client_id}: Loaded full LoRA params (A+B) and froze A.")
+        # Round 1: FULL parameters
+        if incoming_len == total_param_len:
+            super().set_parameters(parameters)
 
-        elif num_incoming == b_len:
-            # Round >1: load only B
-            state = self.model.state_dict()
-            for name, arr in zip(self._b_only_param_names, parameters):
-                tensor = np.array(arr)
-                state[name] = state[name].new_tensor(tensor)
-            self.model.load_state_dict(state, strict=False)
-            self._freeze_all_A()
-            log(INFO, f"Client {self.client_id}: Loaded B-only params and kept A frozen.")
+            # CRITICAL SAFETY LOCK: force-freeze A
+            frozen = 0
+            for name, param in self.model.named_parameters():
+                if ("lora_A" in name) or (".A" in name):
+                    if param.requires_grad:
+                        frozen += 1
+                    param.requires_grad = False
 
-        else:
+            log(
+                INFO,
+                f"Client {self.client_id}: Loaded FULL parameters (len={incoming_len}). "
+                f"Safety-lock applied (froze {frozen} A-params if they were trainable).",
+            )
+            return
+
+        # Round >1: PARTIAL parameters (trainable-only)
+        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        expected = len(trainable_params)
+
+        if incoming_len != expected:
             raise ValueError(
-                f"Client {self.client_id}: Unexpected parameters length {num_incoming}. "
-                f"Expected full_len={full_len} or b_len={b_len}."
+                f"Client {self.client_id}: size mismatch in partial update. "
+                f"Client expects {expected} trainable tensors, Server sent {incoming_len}."
             )
 
-    def get_parameters(self, config):
-        """Return parameters based on round:
+        with torch.no_grad():
+            for local_p, incoming_p in zip(trainable_params, parameters):
+                # Ensure dtype/device match
+                t = torch.from_numpy(np.asarray(incoming_p)).to(device=local_p.device, dtype=local_p.dtype)
+                if local_p.data.shape != t.shape:
+                    raise RuntimeError(
+                        f"Client {self.client_id}: tensor shape mismatch while injecting trainable params: "
+                        f"local={tuple(local_p.data.shape)} incoming={tuple(t.shape)}"
+                    )
+                local_p.data[:] = t
 
-        - Round 1 (config['round']==1): full [A1,B1,...]
-        - Round >1: B-only [B1,B2,...]
+        # Safety lock again (paranoia): ensure A stays frozen
+        for name, param in self.model.named_parameters():
+            if ("lora_A" in name) or (".A" in name):
+                param.requires_grad = False
 
-        If 'round' not provided, default to B-only (safer for comms).
-        """
-        server_round = None
-        if isinstance(config, dict):
-            server_round = config.get("round") or config.get("server_round")
+        log(INFO, f"Client {self.client_id}: Injected trainable-only parameters (len={incoming_len}).")
 
-        # Extract tensors from state_dict in the same order
-        state = self.model.state_dict()
-
-        if server_round == 1:
-            names = self._full_lora_param_names
-        else:
-            names = self._b_only_param_names
-
-        params_to_send = [state[n].cpu().numpy() for n in names]
-        return params_to_send
+    def get_parameters(self, config: Any | None = None) -> List[np.ndarray]:
+        """Return trainable-only parameters based on requires_grad."""
+        return [p.detach().cpu().numpy() for p in self.model.parameters() if p.requires_grad]
 

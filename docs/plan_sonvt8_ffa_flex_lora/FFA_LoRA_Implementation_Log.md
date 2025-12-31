@@ -78,11 +78,58 @@ Uplink aggregation (aggregate_fit):
 
 ---
 
-## Remaining verification checklist (manual)
+## Phase 1 Refactor (2025-12-31): requires_grad Index-Mapping + Size-Mismatch Fix
+
+### Summary
+- Refactored **FFA-LoRA Client/Strategy** to use **requires_grad-based index mapping**.
+- Fixed critical `RuntimeError: size mismatch` by:
+  - Server maintaining a **FULL global parameter snapshot** (`current_full_parameters`).
+  - Server sending **FULL parameters** in round 1, then **trainable-only parameters** from round 2+.
+  - Server aggregating **trainable-only tensors** via `super().aggregate_fit(...)` and then **reconstructing** a FULL parameter list before returning.
+- Added **Safety Locks** to guarantee **Frozen-A** on clients (even if upstream config/protocol is wrong).
+
+### What changed
+1) `mak/clients/ffa_lora_client.py`
+- Removed custom `fit()` (BaseClient handles standard train/eval).
+- `set_parameters` now:
+  - Detects round-1 by `len(incoming) == len(list(self.model.parameters()))`.
+  - Round 1: calls `super().set_parameters(...)`, then **forces** `requires_grad=False` for any param name containing `"lora_A"` or `".A"`.
+  - Round >1: validates incoming length equals number of current trainable params; injects tensors into trainables only.
+- `get_parameters` now returns **only trainable params**: `[p for p in model.parameters() if p.requires_grad]`.
+
+2) `mak/strategies/ffa_lora_strategy.py`
+- Added:
+  - `self.current_full_parameters: List[np.ndarray]`
+  - `self.trainable_indices: List[int]`
+- `initialize_parameters`:
+  - Safety check: raise if any `lora_A`/`.A` has `requires_grad=True`.
+  - Snapshot full params and build trainable index list.
+- `configure_fit`:
+  - Round 1 sends FULL.
+  - Round >1 sends trainable-only via `trainable_indices`.
+- `aggregate_fit`:
+  - Uses `super().aggregate_fit` to aggregate trainables.
+  - Reconstructs FULL list by merging aggregated tensors back into `current_full_parameters`.
+  - Returns FULL parameters to keep server global model consistent.
+
+### Remaining verification checklist (manual)
 - [ ] Run with `--method ffa_lora --strategy FFALoRA --enabled True`
-- [ ] Confirm in logs that A params have `requires_grad=False` on clients.
-- [ ] Confirm round 1 sends full params, round 2+ sends B-only.
-- [ ] Confirm server aggregates only B (A constant across rounds).
+- [ ] Confirm in logs that A params have `requires_grad=False` on clients before training.
+- [ ] Confirm round 1 sends FULL params, round 2+ sends trainable-only params.
+- [ ] Confirm server returns FULL parameters after aggregation (reconstruction), avoiding size mismatch.
+
+---
+
+## Phase 1 COMPLETE (2025-12-31): Non-invasive Integration Wiring
+- Integrated `ffa_lora` into `main.py` LoRA allow-list and configured `helper.py` strategy kwargs.
+- Preserved original function signatures and logic flows (non-invasive hook only).
+- Status: **PHASE 1 COMPLETE - READY FOR LAB TESTING.**
+
+## Phase 1 Integration Verification (2025-12-31)
+- Verified `main.py` passes `server_model` into `get_strategy(..., model=server_model)`.
+- Verified execution order: `apply_svd_to_model(...)` is executed and completes before `get_strategy(...)` is called, ensuring Frozen-A (`requires_grad=False` for A) before Strategy builds requires_grad index mapping.
+- Verified `mak/utils/helper.py:get_strategy` injects both `model` and `config` into `FFALoRAStrategy.__init__`, preventing `TypeError` due to signature mismatch.
+- Final Status: **PHASE 1 COMPLETE - READY FOR LAB TEST.**
 
 ---
 

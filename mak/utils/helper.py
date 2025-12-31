@@ -849,7 +849,8 @@ def get_strategy(
             "apply_transforms_test": apply_transforms_test,
         },
         "FFALoRA": {
-            "config": config,
+            "model": model,   # Inject model (SVD-adapted) into Strategy constructor
+            "config": config, # Inject config
         },
         "PowD": {
             "candidate_client_set": config["powd_config"]["candidate_client_set"],
