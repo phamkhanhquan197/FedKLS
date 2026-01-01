@@ -20,7 +20,7 @@ def get_client_fn(
     kl_norm_dict: dict = None, #Precomputed KL divergence values from server, if available
     data_scheduler = None, # NEW: DynamicDataScheduler for round-aware allocation
 ):
-    strategy = config_sim["server"]["strategy"].lower()
+    strategy = config_sim["server"]["strategy"]
     client_class = get_client_class(strategy)
     num_clients = config_sim["server"]["num_clients"]
     method = config_sim["peft"]["method"]
@@ -86,17 +86,17 @@ def get_client_fn(
 
 
 def get_client_class(strategy: str):
-    if strategy == "fedprox":
+    if strategy == "FedProx":
         return FedProxClient
-    elif strategy == "scaffold":
+    elif strategy == "Scaffold":
         return ScaffoldClient
-    elif strategy == "fednova":
+    elif strategy == "FedNova":
         return FedNovaClient
-    elif strategy == "fedklsvd":
+    elif strategy == "FedKLSVD":
         return FedKLSVDClient
-    elif strategy == "fedawa":
+    elif strategy == "FedAWA":
         return FedAWAClient
-    elif strategy == "ffalora":
+    elif strategy == "FFALoRA":
         return FFALoRAClient
     else:
         return FedAvgClient
