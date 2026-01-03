@@ -28,10 +28,12 @@ from mak.servers.fedklsvd_server import FedKLSVDServer
 from mak.servers.ffa_lora_server import FFALoRAServer
 from mak.servers.fednova_server import FedNovaServer
 from mak.servers.scaffold_server import ScaffoldServer
+from mak.servers.pfedmoap_server import PFedMoAPServer
 from mak.strategies.fednova_strategy import FedNovaStrategy
 from mak.strategies.scaffold_strategy import ScaffoldStrategy
 from mak.strategies.fedklsvd_strategy import FedKLSVDStrategy
 from mak.strategies.ffa_lora_strategy import FFALoRAStrategy
+from mak.strategies.pfedmoap_strategy import PFedMoAPStrategy
 from mak.utils.dataset_info import dataset_info
 from mak.utils.general import set_params, test, weighted_average
 from mak.models.svd_model import SVDAdapter, ConvAdapter
@@ -239,7 +241,19 @@ def get_dataset(config_sim):
         # get test column name
         test_set = dataset_info[dataset_name]["test_set"]
         centralized_testset = fds.load_split(test_set)
-        return fds, centralized_testset
+
+        # get class names for pFedMoAP
+        out_col = dataset_info[dataset_name]["output_column"]
+        feat = centralized_testset.features.get(out_col, None)
+        if feat is not None and hasattr(feat, "names") and feat.names:
+            classnames = list(feat.names)
+        else:
+            num_classes = dataset_info[dataset_name]["num_classes"]
+            classnames = [f"class{i}" for i in range(num_classes)]
+
+        return fds, centralized_testset, classnames
+    
+
 
 # def get_dataset(config_sim):
 #     # partitioner = get_partitioner(config_sim=config_sim)
@@ -390,15 +404,15 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
                 elif init_method == "orthogonal":
                     A = torch.empty(c_out, rank, device=weight_matrix.device, dtype=weight_matrix.dtype)
                     init.orthogonal_(A)
-                else:  # svd
+                else:  # svd-> need to be fixed
                     U, S, Vh = torch.linalg.svd(W_flat.float(), full_matrices=False)
                     max_possible_rank = Vh.size(0)
                     if rank > max_possible_rank:
                         log(INFO, f"Warning: Requested rank {rank} for layer {name} > max possible rank {max_possible_rank}.")
                         rank = max_possible_rank
-                    # FIX (CRITICAL): For FFA-LoRA SVD init, use LEFT singular vectors
-                    # SVDAdapter computes ΔW = A @ B, so A must be [d_out, rank]
-                    A = U[:, :rank].to(device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    # FIX (CRITICAL): For FFA-LoRA SVD init, use right singular vectors
+                    # W = U @ diag(S) @ Vh, with Vh shape [In, In]. LoRA A must be [rank, In].
+                    A = Vh[:rank, :].to(device=weight_matrix.device, dtype=weight_matrix.dtype)
 
                 B = torch.zeros(rank, d_in, device=weight_matrix.device, dtype=weight_matrix.dtype)
                 W_res = weight_matrix
@@ -421,9 +435,8 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
                     if rank > max_possible_rank:
                         log(INFO, f"Warning: Requested rank {rank} for layer {name} > max possible rank {max_possible_rank}.")
                         rank = max_possible_rank
-                    # FIX (CRITICAL): Use LEFT singular vectors for A (shape [d_out, rank])
-                    # SVDAdapter computes ΔW = A @ B
-                    A = U[:, :rank].to(device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    # FIX (CRITICAL): Use right singular vectors for A (shape [rank, In])
+                    A = Vh[:rank, :].to(device=weight_matrix.device, dtype=weight_matrix.dtype)
 
                 B = torch.zeros(rank, d_in, device=weight_matrix.device, dtype=weight_matrix.dtype)
                 W_res = weight_matrix
@@ -443,7 +456,6 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
                     log(INFO, f"Warning: Requested rank {rank} for layer {name} > max possible rank {max_possible_rank}.")
                     rank = max_possible_rank
                 
-
                 # Select components based on method
                 if method == 'pissa':
                     # Principal component as adapter (PiSSA)
@@ -538,7 +550,7 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
             new_layer = ConvAdapter(original_conv=layer, W_res=W_res, A=A, B=B, alpha=alpha, rank=rank)
         else:
             new_layer = SVDAdapter(W_res=W_res, A=A, B=B, alpha=alpha, rank=rank, original_bias=original_bias)
-
+        
         # Freeze A for FFA-LoRA (external control)
         if method == "ffa_lora":
             try:
@@ -549,7 +561,7 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
         # Split layer name and replace the original layer
         parent_name, child_name = name.rsplit(".", 1)
         parent = model.get_submodule(parent_name)
-        setattr(parent, child_name, new_layer)
+        setattr(parent, child_name, new_layer)  
     
     return model
 
@@ -619,12 +631,34 @@ def compute_client_distributions(config, dataset, num_clients: int) -> dict:
     
     return client_distributions
 
-def get_model(config, shape):
+def get_model(config, shape, classnames=None):
     model_name = config["common"]["model"]
     # get num_classes
     dataset_name = config["common"]["dataset"]
     num_classes = dataset_info[dataset_name]["num_classes"]
 
+    TEXT_ONLY_DATASETS = {"SetFit/20_newsgroups", "legacy-datasets/banking77", "fancyzhx/dbpedia_14"}
+    # PFedMoAP CLIP guard
+    if model_name == "clip":
+        if dataset_name in TEXT_ONLY_DATASETS:
+            raise ValueError(f"PFedMoAP CLIP requires image dataset, got text dataset: {dataset_name}")
+
+        pf = config["pfedmoap_config"]
+        if classnames is None:
+            classnames = [f"class{i}" for i in range(num_classes)]
+        model = getattr(__import__("mak.models", fromlist=[model_name]), model_name)(
+            num_classes=num_classes,
+            input_shape=shape,
+            backbone_name=pf.get("backbone_name", "ViT-B/32"),
+            classnames=classnames,
+            prompt_len=pf["prompt_len"],
+            num_experts=pf.get("num_experts", 4),
+            dgating=pf["dgating"],
+            gating_heads=pf.get("heads", pf.get("gating_heads", 4)),
+            lambda_local=pf.get("lambda_local", 1.0),
+            freeze_text=True,
+        )
+        return model
     # check if model is from huggingface
     if model_name in ["distilbert-base-uncased", "Qwen/Qwen1.5-0.5B", "openai/clip-vit-base-patch32"""]:  # Add more as needed
         from transformers import AutoModelForSequenceClassification, BitsAndBytesConfig, CLIPModel
@@ -697,8 +731,23 @@ def get_evaluate_fn(
     def evaluate(
         server_round: int, parameters: fl.common.NDArrays, config: Dict[str, Scalar]
     ):  
-        ## model = get_model(config=config_sim, shape=shape)
-        set_params(model, parameters)
+        
+        strategy = config_sim.get("server", {}).get("strategy", "")
+        method = config_sim.get("peft", {}).get("method", "")
+        bias = config_sim.get("peft", {}).get("bias", "")
+        if strategy == "PFedMoAP":
+            if len(parameters) != 1:
+                raise ValueError(f"PFedMoAP centralized eval expects 1 prompt, got {len(parameters)}")
+
+            prompt = torch.from_numpy(np.asarray(parameters[0])).to(device=device)
+            # Use model API directly
+            if hasattr(model, "set_prompt"):
+                model.set_prompt(prompt)
+            if hasattr(model, "clear_nonlocal"):
+                model.clear_nonlocal()
+        else:
+            ## model = get_model(config=config_sim, shape=shape)
+            set_params(model, parameters, method=method, bias=bias)
 
         model.to(device)
 
@@ -837,6 +886,15 @@ def get_server(strategy, client_manager, out_file_path, target_acc, num_train_th
             num_train_thread=num_train_thread,
             num_test_thread=num_test_thread,
         )
+    elif isinstance(strategy, PFedMoAPStrategy):
+        return PFedMoAPServer(
+            strategy=strategy,
+            client_manager=client_manager,
+            out_file_path=out_file_path,
+            target_acc=target_acc,
+            num_train_thread=num_train_thread,
+            num_test_thread=num_test_thread,
+        )
     else:
         return ServerSaveData(
             strategy=strategy,
@@ -902,13 +960,30 @@ def get_strategy(
             "apply_transforms_test": apply_transforms_test,
         },
         "FFALoRA": {
-            "model": model,   # Inject model (SVD-adapted) into Strategy constructor
-            "config": config, # Inject config
+            "config": config,
+        },
+        "PFedMoAP": {
+            "config": config,
         },
         "PowD": {
             "candidate_client_set": config["powd_config"]["candidate_client_set"],
         },
     } 
+
+    if STRATEGY == "PFedMoAP":
+        prompt_len = config["pfedmoap_config"]["prompt_len"]
+        
+        prompt_dim = int(model.prompt_learner.ctx.shape[1])
+        config["pfedmoap_config"]["prompt_dim"] = prompt_dim 
+
+        # init global prompt
+        prompt0 = (0.02 * np.random.randn(prompt_len, prompt_dim)).astype(np.float32)
+        init_params = fl.common.ndarrays_to_parameters([prompt0])
+    else:
+        init_params = fl.common.ndarrays_to_parameters(
+            [val.cpu().numpy() for _, val in model.state_dict().items()]
+        )
+
     return getattr(__import__("mak.strategies", fromlist=[STRATEGY]), STRATEGY)(
         fraction_fit=FRACTION_FIT,
         fraction_evaluate=FRACTION_EVAL,
@@ -927,8 +1002,7 @@ def get_strategy(
         evaluate_metrics_aggregation_fn=weighted_average,
         on_fit_config_fn=get_fit_config_fn(config_sim=config),
         on_evaluate_config_fn=get_evaluate_config_fn(config_sim=config),
-        initial_parameters=fl.common.ndarrays_to_parameters(
-            [val.cpu().numpy() for _, val in model.state_dict().items()]),
+        initial_parameters=init_params,
         **kwargs.get(STRATEGY, {}),
     )
 
@@ -957,7 +1031,6 @@ def get_config(file_path):
 def get_fit_config_fn(config_sim):
     def fit_config(server_round: int):
         """Return training configuration dict for each round.
-
         passes the current round number to the client
         """
         config = {
@@ -989,21 +1062,6 @@ def get_evaluate_config_fn(config_sim):
         return config
     
     return evaluate_config
-
-def get_evaluate_config_fn(config_sim):
-    def evaluate_config(server_round: int):
-        """Return evaluation configuration dict for each round.
-        
-        passes the current round number to the client
-        """
-        config = {
-            "round": server_round,
-            "current_round": server_round,  # Add current_round for dynamic data updates
-        }
-        return config
-    
-    return evaluate_config
-
 
 def get_mode_and_shape(partition):
     data_set_keys = list(partition.features.keys())
