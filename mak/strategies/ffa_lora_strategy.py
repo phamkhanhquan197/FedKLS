@@ -1,108 +1,92 @@
-"""FFA-LoRA strategy (Phase 1) - Deterministic Name-Based Aggregation.
+# Copyright 2020 Flower Labs GmbH. All Rights Reserved.
 
-Key principles:
-- Communication standard: model.state_dict() (NOT model.parameters()).
-- Deterministic mapping: Name Filter -> Sort -> Key-based injection.
-- Aggregation scope: only LoRA B + selected bias + classifier/head weights.
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
 
-Round protocol:
-- Round 1 downlink: FULL state_dict values.
-- Round >=2 downlink: PARTIAL values filtered by get_ffa_target_keys(model).
-- Client uplink: ALWAYS PARTIAL values in the same sorted-key order.
+#     http://www.apache.org/licenses/LICENSE-2.0
 
-The server aggregates the PARTIAL tensors with FedAvg and injects them back into
-its server-side model state_dict before returning a FULL snapshot.
-"""
-
-from __future__ import annotations
-
-from logging import WARNING
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+"""FFA-LoRA strategy."""
+from logging import WARNING, INFO
 from typing import Dict, List, Optional, Tuple, Union
 
-import numpy as np
-import torch
-
-from flwr.common import FitRes, NDArrays, Parameters, Scalar, ndarrays_to_parameters, parameters_to_ndarrays
+from flwr.common import (
+    FitRes,
+    Parameters,
+    Scalar,
+    NDArrays,
+    ndarrays_to_parameters,
+    parameters_to_ndarrays,
+)
+import flwr as fl
 from flwr.common.logger import log
 from flwr.server.client_proxy import ClientProxy
 from flwr.server.strategy import FedAvg
-
-from mak.utils.helper import get_ffa_target_keys
-
+from flwr.server.strategy.aggregate import aggregate
 
 class FFALoRAStrategy(FedAvg):
-    """FFA-LoRA Strategy with deterministic name-based parameter mapping."""
+    """FFA-LoRA Strategy
 
-    def __init__(self, model, config: dict, *args, **kwargs):
+    - Clients control uplink payload:
+        * Round 1   : [A1, B1, A2, B2, ...]
+        * Round > 1 : [B1, B2, ...]
+
+    - Server aggregation:
+        * Weighted average over received tensors
+        * No A/B inspection
+
+    - Server downlink:
+        * Round 1   : full parameters
+        * Round > 1 : B-only parameters
+    """
+
+    def __init__(self, config: dict, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Server-side reference model used for key filtering + key injection
-        self.model = model
-        self.config_sim = config
 
-    def initialize_parameters(self, client_manager) -> Optional[Parameters]:
-        """Return initial global model parameters as FULL state_dict values."""
-        full = [val.detach().cpu().numpy() for val in self.model.state_dict().values()]
-        return ndarrays_to_parameters(full)
-
-    def configure_fit(self, server_round: int, parameters: Parameters, client_manager):
-        """Round 1: send FULL state_dict. Round>1: send PARTIAL by sorted keys."""
-        if server_round == 1:
-            params_to_send = ndarrays_to_parameters(
-                [val.detach().cpu().numpy() for val in self.model.state_dict().values()]
-            )
-            log_msg = "FFALoRA configure_fit: Round 1 sending FULL state_dict"
-        else:
-            keys = get_ffa_target_keys(self.model)
-            sd = self.model.state_dict()
-            params_to_send = ndarrays_to_parameters([sd[k].detach().cpu().numpy() for k in keys])
-            log_msg = f"FFALoRA configure_fit: Round {server_round} sending PARTIAL (len={len(keys)})"
-
-        log(WARNING, log_msg)
-
-        # FedAvg sampling logic
-        sample_size, min_num_clients = self.num_fit_clients(client_manager.num_available())
-        clients = client_manager.sample(num_clients=sample_size, min_num_clients=min_num_clients)
-
-        fit_config = self.on_fit_config_fn(server_round) if self.on_fit_config_fn else {}
-        fit_config = dict(fit_config)
-        fit_config["server_round"] = server_round
-        fit_config["round"] = server_round
-
-        from flwr.common import FitIns
-
-        return [(client, FitIns(params_to_send, fit_config)) for client in clients]
-
+    # ------------------------------------------------------------------
+    # Aggregation (uplink)
+    # ------------------------------------------------------------------
     def aggregate_fit(
         self,
         server_round: int,
         results: List[Tuple[ClientProxy, FitRes]],
         failures: List[Union[Tuple[ClientProxy, FitRes], BaseException]],
     ) -> Tuple[Optional[Parameters], Dict[str, Scalar]]:
-        """Aggregate partial tensors, inject into server model, return FULL snapshot."""
-        aggregated_parameters, metrics_aggregated = super().aggregate_fit(server_round, results, failures)
-        if aggregated_parameters is None:
-            return None, metrics_aggregated
+        """Aggregate whatever parameters the clients send (weighted average)."""
+        if not results:
+            log(WARNING, f"Round {server_round}: No results to aggregate")
+            return None, {}
+        # Do not aggregate if there are failures and failures are not accepted
+        if not self.accept_failures and failures:
+            log(WARNING, f"Round {server_round}: {len(failures)} client failures during fit")
+            return None, {}
+        
+        log(INFO, f"Round {server_round}: Aggregated parameters from {len(results)} clients")
+        
+        # --------------------------------------------------------------
+        # FedAvg (Flower reference implementation)
+        # --------------------------------------------------------------
+        weights_results = [
+            (parameters_to_ndarrays(fit_res.parameters), fit_res.num_examples)
+            for _, fit_res in results
+        ]
+        # Convert aggregated weights back to Parameters
+        parameters_aggregated = ndarrays_to_parameters(aggregate(weights_results))
 
-        aggregated_ndarrays: NDArrays = parameters_to_ndarrays(aggregated_parameters)
+        # --------------------------------------------------------------
+        # Metrics aggregation
+        # --------------------------------------------------------------
+        metrics_aggregated = {}
+        if self.fit_metrics_aggregation_fn:
+            fit_metrics = [(res.num_examples, res.metrics) for _, res in results]
+            metrics_aggregated = self.fit_metrics_aggregation_fn(fit_metrics)
+        elif server_round == 1:
+            log(WARNING, "No fit_metrics_aggregation_fn provided")
 
-        # Inject aggregated partials into server model by deterministic keys
-        keys = get_ffa_target_keys(self.model)
-        if len(keys) != len(aggregated_ndarrays):
-            raise ValueError(
-                f"FFALoRAStrategy: aggregated length mismatch. expected={len(keys)} got={len(aggregated_ndarrays)}"
-            )
-
-        sd = self.model.state_dict()
-        with torch.no_grad():
-            for k, v in zip(keys, aggregated_ndarrays):
-                t = torch.from_numpy(np.asarray(v)).to(device=sd[k].device, dtype=sd[k].dtype)
-                if sd[k].shape != t.shape:
-                    raise RuntimeError(
-                        f"FFALoRAStrategy: tensor shape mismatch for key '{k}': "
-                        f"local={tuple(sd[k].shape)} incoming={tuple(t.shape)}"
-                    )
-                sd[k].copy_(t)
-
-        # Return FULL snapshot for global sync
-        full_snapshot = [val.detach().cpu().numpy() for val in self.model.state_dict().values()]
-        return ndarrays_to_parameters(full_snapshot), metrics_aggregated
+        return parameters_aggregated, metrics_aggregated
