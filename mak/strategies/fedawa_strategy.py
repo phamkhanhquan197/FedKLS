@@ -74,6 +74,8 @@ class FedAWAStrategy(FedAvg):
         self.config["dataset"] = config["common"]["dataset"]
         self.config["batch_size"] = config["client"]["batch_size"]
         self.config["peft_enabled"] = config["peft"]["enabled"]
+        self.bias = config["peft"].get("bias", True)
+        self.method = config["peft"].get("method", "lora")
         self.apply_transforms = apply_transforms_test
         self.valid_set = self._get_valid_set()
         self.global_parameters: NDArrays = None
@@ -105,14 +107,26 @@ class FedAWAStrategy(FedAvg):
         filtered_params = []
         filtered_names = []
         if any("distilbert." in n for n in self.param_names):
-            filtered_params = [p for i, p in enumerate(self.global_parameters) if "lin" in self.param_names[i]]
-            filtered_names = [n for n in self.param_names if "lin" in n]
+            if self.bias:
+                filtered_params = [p for i, p in enumerate(self.global_parameters) if "lin" in self.param_names[i]]
+                filtered_names = [n for n in self.param_names if "lin" in n]
+            else:
+                filtered_params = [p for i, p in enumerate(self.global_parameters) if self.param_names[i].endswith(".A") or self.param_names[i].endswith(".B")]
+                filtered_names = [n for n in self.param_names if n.endswith(".A") or n.endswith(".B")]
         elif any("bert." in n for n in self.param_names):
-            filtered_params = [p for i, p in enumerate(self.global_parameters) if "self" in self.param_names[i] or "dense" in self.param_names[i]]
-            filtered_names = [n for n in self.param_names if "self" in n or "dense" in n]
+            if self.bias:
+                filtered_params = [p for i, p in enumerate(self.global_parameters) if "self" in self.param_names[i] or "dense" in self.param_names[i]]
+                filtered_names = [n for n in self.param_names if "self" in n or "dense" in n]
+            else:
+                filtered_params = [p for i, p in enumerate(self.global_parameters) if self.param_names[i].endswith(".A") or self.param_names[i].endswith(".B")]
+                filtered_names = [n for n in self.param_names if n.endswith(".A") or n.endswith(".B")]
         elif any("model." in n for n in self.param_names):
-            filtered_params = [p for i, p in enumerate(self.global_parameters) if "self_attn" in self.param_names[i] or "mlp" in self.param_names[i]]
-            filtered_names = [n for n in self.param_names if "self_attn" in n or "mlp" in n]
+            if self.bias:
+                filtered_params = [p for i, p in enumerate(self.global_parameters) if "self_attn" in self.param_names[i] or "mlp" in self.param_names[i]]
+                filtered_names = [n for n in self.param_names if "self_attn" in n or "mlp" in n]
+            else:
+                filtered_params = [p for i, p in enumerate(self.global_parameters) if self.param_names[i].endswith(".A") or self.param_names[i].endswith(".B")]
+                filtered_names = [n for n in self.param_names if n.endswith(".A") or n.endswith(".B")]
         else:
             log(WARNING, "Unknown model architecture for PEFT filtering")
             return
@@ -238,7 +252,7 @@ class FedAWAStrategy(FedAvg):
 
                     #Convert model_params to NumPy arrays before passing to set_params
                     model_params_np = [param.detach().cpu().numpy() for param in model_params]
-                    set_params(self.model, model_params_np)
+                    set_params(self.model, model_params_np, method=self.method, bias=self.bias)
 
                     optimizer.zero_grad()
                     output = self.model(input_ids=input_ids, attention_mask=attention_mask).logits
