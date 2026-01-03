@@ -42,58 +42,6 @@ from collections import Counter
 import torch.nn.init as init
 from datasets import load_dataset
 
-
-def get_ffa_target_keys(model) -> List[str]:
-    """Return sorted parameter names for FFA-LoRA deterministic aggregation.
-
-    Selection rules (union of groups):
-    1) LoRA B matrices: name.endswith('.B')
-    2) Bias terms for transformer/CNN/heads:
-       name.endswith('.bias') and name contains any keyword in:
-       ["lin", "self", "dense", "mlp", "out_lin", "q_lin", "k_lin", "v_lin",
-        "conv", "bn", "downsample", "classifier", "head", "fc", "pre_classifier"]
-    3) Classifier/head weights:
-       name.endswith('.weight') and name contains any keyword in:
-       ["classifier", "head", "fc", "pre_classifier"]
-
-    Determinism: ALWAYS sort.
-    """
-
-    bias_keywords = {
-        "lin",
-        "self",
-        "dense",
-        "mlp",
-        "out_lin",
-        "q_lin",
-        "k_lin",
-        "v_lin",
-        "conv",
-        "bn",
-        "downsample",
-        "classifier",
-        "head",
-        "fc",
-        "pre_classifier",
-    }
-    head_keywords = {"classifier", "head", "fc", "pre_classifier"}
-
-    keys: List[str] = []
-    for name, _ in model.named_parameters():
-        if name.endswith(".B"):
-            keys.append(name)
-            continue
-
-        if name.endswith(".bias") and any(k in name for k in bias_keywords):
-            keys.append(name)
-            continue
-
-        if name.endswith(".weight") and any(k in name for k in head_keywords):
-            keys.append(name)
-            continue
-
-    return sorted(keys)
-
 def get_device_and_resources(config_sim):
     # Check if GPU is available
     device = torch.device(
