@@ -1,12 +1,3 @@
-from __future__ import annotations
-
-from logging import INFO
-from typing import Any, List
-
-import numpy as np
-import torch
-from flwr.common.logger import log
-from collections import OrderedDict
 from mak.clients.base_client import BaseClient
 
 
