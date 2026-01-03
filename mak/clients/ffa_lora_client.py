@@ -8,7 +8,6 @@ import torch
 from flwr.common.logger import log
 from collections import OrderedDict
 from mak.clients.base_client import BaseClient
-from mak.utils.helper import get_ffa_target_keys
 
 
 class FFALoRAClient(BaseClient):
