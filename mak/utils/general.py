@@ -67,40 +67,100 @@ def test(net, testloader, device: str, feature_key: str) -> Tuple[float, float, 
 
         return loss, accuracy, f1
 
-def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays], device: str = "cuda"):
+def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays], 
+               device: str = "cuda", method: str = None, bias: str = None):
 
     """Set model weights from a list of NumPy ndarrays."""
     model_state = model.state_dict()
     if params is None:
         return  # Skip if parameters is None
-        
-    if len(model_state.items()) != len(params): # Handle LoRA parameter update
-        if any(key.startswith("distilbert.") for key in model_state.keys()):
-            lora_keys = [k for k in model_state.keys() 
-                        if ("lin" in k)]
-        elif any(key.startswith("bert.") for key in model_state.keys()):
-            lora_keys = [k for k in model_state.keys() 
-                        if ("self" in k or "dense" in k)]
-        elif any(key.startswith("model.") for key in model_state.keys()):
-            lora_keys = [k for k in model_state.keys() 
-                        if ("self_attn" in k or "mlp" in k)]
 
-        # Create state dict with only LoRA parameters
-        lora_params = OrderedDict()
-        for key, array in zip(lora_keys, params):
-            lora_params[key] = torch.from_numpy(array)
-        
-        # Update model with LoRA parameters only
-        model_state.update(lora_params)
-        model.load_state_dict(model_state, strict=True)
-
-
-    else: #Full parameter update
+    # print(f"len(params): {len(params)}") #108 -> For round > 1 -> this shows # of layers sent by server
+    # print(f"len(model_state.items()): {len(model_state.items())}") #140 all the times -> this shows # of layers in local model
+    if len(model_state.items()) == len(params): #Full model update (Round = 1)
         params_dict = zip(model_state.keys(), params)
-        # state_dict = OrderedDict({k: torch.tensor(v, device=device).clone().detach() for k, v in params_dict})
         state_dict = OrderedDict({k: v.clone().detach().to(device) if isinstance(v, torch.Tensor) else torch.tensor(v, device=device)
                                   for k, v in params_dict})
         model.load_state_dict(state_dict, strict=False)
+        if method == "ffa_lora": #Freeze all A adapters after full model update
+            [p.__setattr__("requires_grad", False) for name, p in model.named_parameters() if name.endswith(".A")]
+        return
+
+    # Handle LoRA-only update (Round > 1)
+    elif len(model_state.items()) != len(params) and method != "ffa_lora": # Handle normal LoRA parameter update
+        if any(key.startswith("distilbert.") for key in model_state.keys()):
+            if bias:
+                lora_keys = [k for k in model_state.keys() 
+                        if ("lin" in k)]
+            else:
+                lora_keys = [k for k in model_state.keys() 
+                        if k.endswith(".B") or k.endswith(".A")]
+                
+        elif any(key.startswith("bert.") for key in model_state.keys()):
+            if bias:
+                lora_keys = [k for k in model_state.keys() 
+                        if ("self" in k or "dense" in k)]
+            else:
+                lora_keys = [k for k in model_state.keys() 
+                        if k.endswith(".B") or k.endswith(".A")]
+        elif any(key.startswith("model.") for key in model_state.keys()):
+            if bias:
+                lora_keys = [k for k in model_state.keys() 
+                        if ("self_attn" in k or "mlp" in k)]
+            else:
+                lora_keys = [k for k in model_state.keys() 
+                        if k.endswith(".B") or k.endswith(".A")]
+
+    elif len(model_state.items()) != len(params) and method == "ffa_lora": #Handle FFA-LoRA parameter update
+        if any(k.startswith("distilbert.") for k in model_state.keys()):
+            if bias:
+                lora_keys = [
+                    k for k in model_state.keys()
+                    if k.endswith(".B") or (k.endswith(".bias") and "lin" in k)
+                ]
+            else:
+                lora_keys = [
+                    k for k in model_state.keys()
+                    if k.endswith(".B")
+                ]
+        elif any(k.startswith("bert.") for k in model_state.keys()):
+            if bias:
+                lora_keys = [
+                    k for k in model_state.keys()
+                    if (
+                        k.endswith(".B")
+                        or (k.endswith(".bias") and "self" in k)
+                        or (k.endswith(".bias") and "dense" in k)
+                    )
+                ]
+            else:
+                lora_keys = [
+                    k for k in model_state.keys()
+                    if k.endswith(".B")
+                ]
+        elif any(k.startswith("model.") for k in model_state.keys()):
+            if bias:
+                lora_keys = [
+                    k for k in model_state.keys()
+                    if (
+                        k.endswith(".B")
+                        or (k.endswith(".bias") and "self_attn" in k)
+                        or (k.endswith(".bias") and "mlp" in k)
+                    )
+                ]
+            else:
+                lora_keys = [
+                    k for k in model_state.keys()
+                    if k.endswith(".B")
+                ]
+    # Create state dict with only LoRA-B parameters
+    lora_params = OrderedDict()
+    for key, array in zip(lora_keys, params):
+        lora_params[key] = torch.from_numpy(array)
+    # Update model with LoRA-B parameters only
+    model_state.update(lora_params)
+    model.load_state_dict(model_state, strict=True)
+
 
 
 

@@ -26,6 +26,7 @@ class BaseClient(fl.client.NumPyClient):
         dataset=None, # NEW: FederatedDataset reference
         apply_transforms=None, # NEW: transform function
         data_scheduler=None, # NEW: DynamicDataScheduler for round-aware allocation
+        bias=None,
     ):
         self.client_id = client_id
         self.config_sim = config_sim
@@ -39,7 +40,7 @@ class BaseClient(fl.client.NumPyClient):
         self.dataset_name = self.config_sim["common"]["dataset"]
         self.feature_key = dataset_info[self.dataset_name]["feature_key"]
         self.output_column = dataset_info[self.dataset_name]["output_column"]
-
+        self.bias = self.config_sim.get("peft", {}).get("bias", True)
         #NEW: Store dataset reference and transform function for dynamic reload
         self.dataset = dataset
         self.apply_transforms = apply_transforms
@@ -57,11 +58,20 @@ class BaseClient(fl.client.NumPyClient):
         if self.config_sim["peft"]["enabled"] == True:
             #Only send the A, B and bias parameters to the server 
             if any(key.startswith("distilbert.") for key in self.model.state_dict().keys()):
-                params_to_send = {name: tensor for name, tensor in self.model.state_dict().items() if "lin" in name}
+                if self.bias:
+                    params_to_send = {name: tensor for name, tensor in self.model.state_dict().items() if "lin" in name}
+                else:
+                    params_to_send = {name: tensor for name, tensor in self.model.state_dict().items() if name.endswith(".B") or name.endswith(".A")}
             elif any(key.startswith("bert.") for key in self.model.state_dict().keys()):
-                params_to_send = {name: tensor for name, tensor in self.model.state_dict().items() if "self" in name or "dense" in name}
+                if self.bias:
+                    params_to_send = {name: tensor for name, tensor in self.model.state_dict().items() if "self" in name or "dense" in name}
+                else:
+                    params_to_send = {name: tensor for name, tensor in self.model.state_dict().items() if name.endswith(".B") or name.endswith(".A")}
             elif any(key.startswith("model.") for key in self.model.state_dict().keys()):
-                params_to_send = {name: tensor for name, tensor in self.model.state_dict().items() if "self_attn" in name or "mlp" in name}
+                if self.bias:
+                    params_to_send = {name: tensor for name, tensor in self.model.state_dict().items() if "self_attn" in name or "mlp" in name}
+                else:
+                    params_to_send = {name: tensor for name, tensor in self.model.state_dict().items() if name.endswith(".B") or name.endswith(".A")}
             else:
                 #Need to revise
                 # For other models (e.g., ResNet, CNN), send all parameters if PEFT is enabled
@@ -80,11 +90,11 @@ class BaseClient(fl.client.NumPyClient):
             # Send full model parameters to server
             return [val.cpu().numpy() for _, val in self.model.state_dict().items()]
 
-    def _load_full_partition_once(self):
-        if self.full_partition is None:
-            self.full_partition = self.dataset.load_partition(
-                partition_id=self.partition_id
-            )
+    # def _load_full_partition_once(self):
+    #     if self.full_partition is None:
+    #         self.full_partition = self.dataset.load_partition(
+    #             partition_id=self.partition_id
+    #         )
 
     def reload_dataset(self, mode: str, round_num: int=1):
         """
@@ -135,7 +145,9 @@ class BaseClient(fl.client.NumPyClient):
             self.valset = new_valset
 
     def set_parameters(self, parameters):
-        set_params(self.model, parameters)
+        method = self.config_sim["peft"]["method"] if self.config_sim["peft"]["enabled"] else None
+        bias = self.config_sim["peft"]["bias"] if self.config_sim["peft"]["enabled"] else None
+        set_params(self.model, parameters, method=method, bias=bias)
 
     def count_class_distribution(self, dataset):
         """Count the class distribution in the dataset."""
