@@ -68,7 +68,7 @@ def test(net, testloader, device: str, feature_key: str) -> Tuple[float, float, 
         return loss, accuracy, f1
 
 def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays], 
-               device: str = "cuda", method: str = None, bias: str = None):
+               device: str = "cuda", method: str = None, bias: str = True):
 
     """Set model weights from a list of NumPy ndarrays."""
     model_state = model.state_dict()
@@ -153,6 +153,7 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays],
                     k for k in model_state.keys()
                     if k.endswith(".B")
                 ]
+    
     # Create state dict with only LoRA-B parameters
     lora_params = OrderedDict()
     for key, array in zip(lora_keys, params):
