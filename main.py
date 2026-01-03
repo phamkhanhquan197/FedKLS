@@ -5,7 +5,7 @@ from datasets.utils.logging import disable_progress_bar
 import os
 from mak.utils.helper import get_device_and_resources
 from mak.utils.helper import gen_dir_outfile_server, get_model, get_strategy, get_server, save_simulation_history,get_dataset, get_size_weights
-from mak.utils.pytorch_transformations import TransformationPipeline, TextTransformationPipeline
+from mak.utils.pytorch_transformations import TransformationPipeline, TextTransformationPipeline, CLIPTransformationPipeline
 from mak.clients import get_client_fn
 from mak.utils.dataset_info import dataset_info
 from mak.utils.helper import get_config, set_seed, parse_args, apply_svd_to_model
@@ -37,17 +37,19 @@ def main():
 
     set_seed(seed=config_sim['common']['seed'])
 
-    fds, centralized_testset = get_dataset(config_sim=config_sim)
+    fds, centralized_testset, classnames = get_dataset(config_sim=config_sim)
 
     if config_sim['server']['strategy'] == 'FedLaw':
         size_weights = get_size_weights(federated_dataset=fds,num_clients=config_sim['server']['num_clients']) #for fedlaw only
     else:
         size_weights = []
     
-    # dataset_name = fds._dataset_name
-    # dataset_name = fds._dataset_name if hasattr(fds, "_dataset_name") else fds["name"]
     model_name = config_sim['common']['model']
     shape = dataset_info[dataset_name]["input_shape"]
+
+    if model_name == "clip" or config_sim["server"]["strategy"] == "PFedMoAP":
+        # optional: derive img_size from pfedmoap_config/backbone
+        transformation_pipeline = CLIPTransformationPipeline(dataset_name=dataset_name, img_size=224)
 
     # Check if the dataset is a text dataset and use the appropriate transformation pipeline
     if dataset_name in ['SetFit/20_newsgroups', 'legacy-datasets/banking77', 'fancyzhx/dbpedia_14'] or model_name in ['distilbert-base-uncased', 'microsoft/deberta-v3-base', 'llama2-7b']:
@@ -98,7 +100,7 @@ def main():
         fl.common.logger.configure(identifier="FLNCLAB", filename=os.path.join(saved_models_path,'log.txt'))
 
     #Base model
-    base_model = get_model(config_sim,shape = shape)
+    base_model = get_model(config_sim,shape = shape, classnames=classnames)
     # Move base_model to CPU to reduce GPU memory usage
     base_model = base_model.cpu()  ### CHANGE ###: Ensure base_model is on CPU
 
@@ -110,12 +112,12 @@ def main():
     log(INFO,"*"*75)
     #Prepare the server and client models based on the strategy and method
     lora_enabled = config_sim['peft']['enabled']
-    lora_method =  config_sim['peft']['method']
+    peft_method =  config_sim['peft']['method']
     
     #Apply SVD if LoRA is enabled
     if lora_enabled:
         #Decide the client model based on the LoRA method
-        if lora_method == "fedkls":
+        if peft_method == "fedkls":
             #Compute client distributions and kl_norm values
             client_distributions = compute_client_distributions(config = config_sim, dataset=fds,num_clients=config_sim['server']['num_clients'])
             kl_normalized_per_client = compute_KL_divergence(client_distributions, num_classes=dataset_info[dataset_name]["num_classes"])
@@ -153,7 +155,7 @@ def main():
             #Server always needs the SVD-adapted model when LoRA is enabled
             server_model = svd_model
             
-        elif lora_method in ["pissa", "milora", "middle", "lora"]:
+        elif peft_method in ["pissa", "milora", "middle", "lora", "ffa_lora"]:
             log(INFO, "Applying SVD to create svd model for server...")
             # Create a deep copy of base_model to avoid modifying it
             model_for_svd = copy.deepcopy(base_model)
@@ -166,12 +168,11 @@ def main():
             server_model = svd_model
             client_model = svd_model
             _ = compute_client_distributions(config = config_sim, dataset=fds,num_clients=config_sim['server']['num_clients'])
-            log(INFO, f"=>>>>> Method {lora_method.upper()}: Sending svd_model to clients.")
+            log(INFO, f"=>>>>> Method {peft_method.upper()}: Sending svd_model to clients.")
         else:
-            log(INFO, f"Unknown LoRA method {lora_method}. Defaulting to base_model for clients.")
+            log(INFO, f"Unknown PEFT method {peft_method}. Defaulting to base_model for clients.")
             import sys
-            sys.exit(0)  # Exit if an unknown LoRA method is specified
-
+            sys.exit(0)  # Exit if an unknown PEFT method is specified
     else: # If LoRA is not enabled, use the base model for both server and clients (Full fine-tuning)
         log(INFO, "=>>>>> LoRA is not enabled: Using base_model for both server and clients.")
         log(INFO, "=>>>>> Full fine-tuning training!!!")
@@ -230,9 +231,7 @@ def main():
     #Update client_fn to pass kl_norm along with the model
     def client_fn_with_models(cid):
         cid = int(cid)
-        if lora_method == "fedkls":
-            # model = client_models[cid]
-            # kl_norm = kl_normalized_per_client[cid]
+        if peft_method == "fedkls":
             # Load model from disk
             model_path = client_models[cid]
             model = torch.load(model_path, map_location=device, weights_only = False)  # Load model from file
@@ -248,7 +247,7 @@ def main():
             device=device,
             apply_transforms=apply_transforms,
             save_dir=saved_models_path,
-            kl_norm_dict=kl_normalized_per_client if lora_method == "fedkls" else None,  # Pass precomputed kl_norms
+            kl_norm_dict=kl_normalized_per_client if peft_method == "fedkls" else None,  # Pass precomputed kl_norms
             data_scheduler=data_scheduler,  # NEW: Pass data scheduler for dynamic data allocation
         )(cid)
 
