@@ -132,9 +132,7 @@ class ServerSaveData:
                 )
 
             # Evaluate model using strategy implementation
-            print("ERROR HERE")
             res_cen = self.strategy.evaluate(current_round, parameters=self.parameters)
-            print("ERROR HERE")
             if res_cen is not None:
                 loss_cen, metrics_cen = res_cen
                 log(
@@ -393,8 +391,8 @@ class ServerSaveData:
         parameters_aggregated, metrics_aggregated = self.strategy.aggregate_fit(
             server_round, results, failures
         )
-        
-        #Check how many tensor the model performs aggregating
+
+        # Check how many tensor the model performs aggregating
         # aggregated_ndarrays = parameters_to_ndarrays(parameters_aggregated)
         # log(INFO, f"Aggregated parameters ({len(aggregated_ndarrays)} tensors):")
         # for i, arr in enumerate(aggregated_ndarrays):
