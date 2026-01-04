@@ -93,7 +93,7 @@ class ServerSaveData:
         return self._client_manager
 
     # pylint: disable=too-many-locals
-    def fit(self, num_rounds: int, timeout: Optional[float]) -> Tuple[History, float]:
+    def fit(self, num_rounds: int, timeout: Optional[float]) -> History:
         """Run federated averaging for a number of rounds."""
         history = History()
 
@@ -189,7 +189,7 @@ class ServerSaveData:
             except (KeyError, TypeError, AttributeError):
                 global_accuracy = None
                 global_f1 = None
-            # log(INFO, f"Accuracy: {acc}")
+
             if self.out_file_path is not None:
                 field_names = ["round", "global_accuracy", "global_f1_score", "global_loss", "local_accuracy", "local_f1", "local_loss", "processing_time", "upload_gb", "download_gb"]
                 row_dict = {
@@ -208,7 +208,6 @@ class ServerSaveData:
                     dictwriter_object = csv.DictWriter(f, fieldnames=field_names)
                     dictwriter_object.writerow(row_dict)
                     f.close()
-            # Safely check target accuracy - handle None case
             if global_accuracy is not None and global_accuracy >= float(self.target_acc):
                 log(
                     INFO,
@@ -228,14 +227,13 @@ class ServerSaveData:
         elapsed = end_time - start_time
         log(INFO, "FL finished in %s = %s minutes = %s hours", elapsed, elapsed / 60, elapsed / 3600)
 
-        return history, elapsed
+        return history
 
     def evaluate_round(
         self,
         server_round: int,
         timeout: Optional[float],
-        curr_round_start_time: float,
-    ) -> Optional[Tuple[Optional[float], Dict[str, Scalar], EvaluateResultsAndFailures]]:
+        curr_round_start_time: float,) -> Optional[Tuple[Optional[float], Dict[str, Scalar], EvaluateResultsAndFailures]]:
         """Validate current global model on a number of clients."""
         # Get clients and their respective instructions from strategy
         client_instructions = self.strategy.configure_evaluate(
@@ -393,7 +391,8 @@ class ServerSaveData:
         parameters_aggregated, metrics_aggregated = self.strategy.aggregate_fit(
             server_round, results, failures
         )
-        ##Check how many tensor the model performs aggregating
+
+        # Check how many tensor the model performs aggregating
         # aggregated_ndarrays = parameters_to_ndarrays(parameters_aggregated)
         # log(INFO, f"Aggregated parameters ({len(aggregated_ndarrays)} tensors):")
         # for i, arr in enumerate(aggregated_ndarrays):

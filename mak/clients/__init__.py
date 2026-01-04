@@ -21,6 +21,7 @@ def get_client_fn(
     save_dir,
     kl_norm_dict: dict = None, #Precomputed KL divergence values from server, if available
     data_scheduler = None, # NEW: DynamicDataScheduler for round-aware allocation
+    bias = None,
 ):
     strategy = config_sim["server"]["strategy"]
     client_class = get_client_class(strategy)
@@ -80,6 +81,7 @@ def get_client_fn(
             dataset=dataset,
             apply_transforms=apply_transforms,
             data_scheduler=data_scheduler, # NEW: DynamicDataScheduler for round-aware allocation
+            bias=bias,
         )
         return client.to_client()
     

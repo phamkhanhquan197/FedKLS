@@ -188,7 +188,6 @@ class TransformationPipeline:
         else:
             return self.apply_transforms_default, self.apply_transforms_test
 
-
 class CLIPTransformationPipeline:
     def __init__(self, dataset_name, img_size=224):
         self.dataset_name = dataset_name
@@ -213,4 +212,4 @@ class CLIPTransformationPipeline:
         return batch
 
     def get_transformations(self):
-        return self.apply_transform, self.apply_transform
+        return self.apply_transform, self.apply_transformf

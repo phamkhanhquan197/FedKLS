@@ -103,8 +103,6 @@ class FedKLSVDStrategy(FedAvg):
         # ]
         # # aggregated_parameters = aggregate(weights_results)
 
-
-
         # Convert aggregated weights back to Parameters
         parameters_aggregated = ndarrays_to_parameters(aggregated_parameters)
 
