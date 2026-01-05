@@ -55,8 +55,6 @@ def main():
     if dataset_name in ['SetFit/20_newsgroups', 'legacy-datasets/banking77', 'fancyzhx/dbpedia_14'] or model_name in ['distilbert-base-uncased', 'microsoft/deberta-v3-base', 'llama2-7b']:
         # For text datasets, we need to use a different transformation pipeline
         transformation_pipeline = TextTransformationPipeline(dataset_name=dataset_name, model_name=model_name)
-        # Get the transformations for train and test data
-        apply_transforms, apply_transforms_test = transformation_pipeline.get_transformations()
     elif dataset_name in ['pranavmr/MM-IMDb']:
         # Get multimodal feature keys from dataset_info
         features = dataset_info[dataset_name]["feature_key"]
@@ -90,8 +88,9 @@ def main():
     else: 
         # For image datasets, we can use the existing transformation pipeline
         transformation_pipeline = TransformationPipeline(dataset_name=dataset_name)
-        # Get the transformations for train and test data
-        apply_transforms, apply_transforms_test = transformation_pipeline.get_transformations()
+        
+    # Get the transformations for train and test data
+    apply_transforms, apply_transforms_test = transformation_pipeline.get_transformations()
 
     device, ray_init_args, client_res = get_device_and_resources(config_sim=config_sim)
     out_file_path, saved_models_path = gen_dir_outfile_server(config=config_sim)
