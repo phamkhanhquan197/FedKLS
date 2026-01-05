@@ -57,10 +57,8 @@ dynamic_data:
 
 # FFA-LoRA baseline config
 ffa_lora_config:
-  seed: 42
   # Options: kaiming | gaussian | orthogonal | svd
   init_method: "kaiming"
-  method: lora # ['pissa', 'milora', 'middle', 'fedkls', 'lora']
 
 pfedmoap_config:
   prompt_len: 16        # number of learnable prompt tokens; the prompt is the ONLY parameter trained and exchanged each round
@@ -88,3 +86,4 @@ fedprox:
 
 powd_config:
   candidate_client_set: 20 # the d parameter (client fraction ≤ d ≤ total clients)
+
