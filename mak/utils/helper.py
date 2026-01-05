@@ -325,7 +325,7 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
         elif method == 'ffa_lora':
             # FFA-LoRA: Initialize A (configurable), B = 0, freeze A forever (external control)
             ffa_cfg = config.get("ffa_lora_config", {})
-            seed = ffa_cfg.get("seed", 42)
+            seed = config["common"]["seed"]
             init_method = ffa_cfg.get("init_method", "kaiming")
 
             if seed is not None:
@@ -1099,3 +1099,4 @@ def get_size_weights(federated_dataset, num_clients):
         sample_size.append(len(federated_dataset.load_partition(i)))
     size_weights = [i / sum(sample_size) for i in sample_size]
     return size_weights
+
