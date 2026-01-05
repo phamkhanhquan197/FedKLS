@@ -212,4 +212,4 @@ class CLIPTransformationPipeline:
         return batch
 
     def get_transformations(self):
-        return self.apply_transform, self.apply_transformf
+        return self.apply_transform, self.apply_transform
