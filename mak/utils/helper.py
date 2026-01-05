@@ -5,7 +5,7 @@ import os
 import random
 from datetime import date, datetime
 from logging import INFO
-from typing import Dict, List
+from typing import Dict
 
 import flwr as fl
 import numpy as np
@@ -41,6 +41,7 @@ import math
 from collections import Counter
 import torch.nn.init as init
 from datasets import load_dataset
+
 
 def get_device_and_resources(config_sim):
     # Check if GPU is available
@@ -549,7 +550,6 @@ def compute_KL_divergence(client_distributions: dict, num_classes: int) -> dict:
 
     return kl_normalized  
 
-
 def compute_client_distributions(config, dataset, num_clients: int) -> dict:
     """
     Compute the label distribution for each client in the federated dataset.
@@ -608,7 +608,7 @@ def get_model(config, shape, classnames=None):
         )
         return model
     # check if model is from huggingface
-    if model_name in ["distilbert-base-uncased", "Qwen/Qwen1.5-0.5B", "openai/clip-vit-base-patch32"""]:  # Add more as needed
+    elif model_name in ["distilbert-base-uncased", "Qwen/Qwen1.5-0.5B", "openai/clip-vit-base-patch32"""]:  # Add more as needed
         from transformers import AutoModelForSequenceClassification, BitsAndBytesConfig, CLIPModel
         if model_name == "Qwen/Qwen1.5-0.5B": #Need to check again when applying the quantization -> still error
             quantization_8_bit_config = BitsAndBytesConfig(
@@ -683,7 +683,8 @@ def get_evaluate_fn(
         strategy = config_sim.get("server", {}).get("strategy", "")
         method = config_sim.get("peft", {}).get("method", "")
         bias = config_sim.get("peft", {}).get("bias", "")
-        if strategy == "PFedMoAP":
+
+        if strategy == "PFedMoAP" or method == "pfedmoap":
             if len(parameters) != 1:
                 raise ValueError(f"PFedMoAP centralized eval expects 1 prompt, got {len(parameters)}")
 
