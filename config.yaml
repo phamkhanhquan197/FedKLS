@@ -2,21 +2,21 @@
 
 common:
   data_type : dirichlet_niid # data_type = data distribution one among ['iid','dirichlet_niid']
-  # dataset : cifar10 # data_set = data set used one among ['kkim0451/UPMC-Food101', 'pranavmr/MM-IMDb','SetFit/20_newsgroups', 'legacy-datasets/banking77', 'fancyzhx/dbpedia_14', 'cifar10', 'cifar100', 'mnist', 'fashion_mnist', 'sasha/dog-food', 'zh-plus/tiny-imagenet', 'Mike0307/MNIST-M', 'flwrlabs/usps']
+  dataset : zh-plus/tiny-imagenet # data_set = data set used one among ['kkim0451/UPMC-Food101', 'pranavmr/MM-IMDb','SetFit/20_newsgroups', 'legacy-datasets/banking77', 'fancyzhx/dbpedia_14', 'cifar10', 'cifar100', 'mnist', 'fashion_mnist', 'sasha/dog-food', 'zh-plus/tiny-imagenet', 'Mike0307/MNIST-M', 'flwrlabs/usps']
   # dataset: SetFit/20_newsgroups
-  dataset: legacy-datasets/banking77
+  # dataset: legacy-datasets/banking77
   dirichlet_alpha : 0.05 #dirichlet concentration parameter (only used if data_type is dirchlet-niid)
   target_acc : 0.99
   # model : Qwen/Qwen1.5-0.5B # one among [distilbert-base-uncased, bert-base-uncased, meta-llama/Llama-2-7b-hf, Qwen/Qwen1.5-0.5B, Net, CifarNet, SimpleCNN, KerasExpCNN, MNISTCNN, SimpleDNN, FMCNNModel,FedAVGCNN,Resnet18, Resnet34,ResNet18Pretrained, ResNet34Pretrained,ResNet18Small, ResNet20Small,MobileNetV2,EfficientNetB0,LSTMModel]
-  model: distilbert-base-uncased
-  # model: Clip
+  # model: distilbert-base-uncased
+  model: Clip
   optimizer : sgd # one among [sgd,adam]
   sgd_momentum : 0.9
   seed : 123  #123 456 789
   multi_node : False
   save_log : True
-  num_train_thread: 10 #Save the most memory when setting to 1
-  num_test_thread: 10
+  num_train_thread: 5 #Save the most memory when setting to 1
+  num_test_thread: 5
 
 server:
   num_rounds : 1000
@@ -26,7 +26,7 @@ server:
   num_clients : 10 # total number of clients participating in training
   fraction_evaluate : 1 # fraction of clients to be selected for evaluation
   min_evaluate_clients : 10 # minimum number of clients to be selected for evaluation
-  strategy : FFALoRA  #[FedAWA, FedKLSVD, FedAvg, FFALoRA, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova]
+  strategy : PFedMoAP  #[FedAWA, FedKLSVD, FedAvg, FFALoRA, PFedMoAP, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova]
 
 client:
   loss: FocalLoss # [CrossEntropyLoss, FocalLoss]
@@ -39,14 +39,14 @@ client:
   total_gpus : 1 # no. of GPU's assigned for whole simulation
   gpu : True  # True or Faslse, Use GPU for training or not.
   num_cpus : 4  # no. of CPU cores that are assigned for each actor
-  num_gpus : 0.5 #  no. of GPU that are assigned for each actor (it can be fraction value as well)
+  num_gpus : 0.05 #  no. of GPU that are assigned for each actor (it can be fraction value as well)
 
 peft:
-  enabled: True #False = FFT, do not set method = fedkls when running FFT
+  enabled: False #False = FFT, do not set method = fedkls when running FFT, pfedmoap do not run with peft=True
   rank: 32
   alpha: 32 #Equal to the rank
-  method: ffa_lora # ['pissa', 'milora', 'middle', 'fedkls', 'lora', 'ffa_lora']
-  bias: False #To send the bias layer(after A/B) to server for aggregation or not
+  method: pfedmoap # ['pissa', 'milora', 'middle', 'fedkls', 'lora', 'ffa_lora', 'pfedmoap']
+  bias: True #To send the bias layer(after A/B) to server for aggregation or not
 
 # NEW: Dynamic Data Updates Configuration
 dynamic_data:
