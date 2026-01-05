@@ -337,58 +337,68 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
                 raise ValueError(
                     f"Unknown init_method: {init_method}. Options: kaiming | gaussian | orthogonal | svd"
                 )
-
+            # --------------------------------------------------
+            # Conv2d
+            # --------------------------------------------------
             if isinstance(layer, torch.nn.Conv2d):
                 c_out, c_in, k1, k2 = weight_matrix.shape
                 d_in = c_in * k1 * k2
                 W_flat = weight_matrix.view(c_out, -1)
 
                 # A init
-                if init_method == "kaiming":
-                    A = torch.empty(c_out, rank, device=weight_matrix.device, dtype=weight_matrix.dtype)
-                    init.kaiming_normal_(A, mode="fan_out", nonlinearity="relu")
-                elif init_method == "gaussian":
-                    A = torch.empty(c_out, rank, device=weight_matrix.device, dtype=weight_matrix.dtype)
-                    init.normal_(A, mean=0.0, std=0.01)
-                elif init_method == "orthogonal":
-                    A = torch.empty(c_out, rank, device=weight_matrix.device, dtype=weight_matrix.dtype)
-                    init.orthogonal_(A)
-                else:  # svd-> need to be fixed
-                    U, S, Vh = torch.linalg.svd(W_flat.float(), full_matrices=False)
-                    max_possible_rank = Vh.size(0)
+                if init_method =="svd":
+                    U, S, Vt = torch.linalg.svd(W_flat, full_matrices=False)
+                    max_possible_rank = S.size(0)
                     if rank > max_possible_rank:
                         log(INFO, f"Warning: Requested rank {rank} for layer {name} > max possible rank {max_possible_rank}.")
                         rank = max_possible_rank
-                    # FIX (CRITICAL): For FFA-LoRA SVD init, use right singular vectors
-                    # W = U @ diag(S) @ Vh, with Vh shape [In, In]. LoRA A must be [rank, In].
-                    A = Vh[:rank, :].to(device=weight_matrix.device, dtype=weight_matrix.dtype)
-
-                B = torch.zeros(rank, d_in, device=weight_matrix.device, dtype=weight_matrix.dtype)
-                W_res = weight_matrix
-
+                    U_select = U[:, :rank]
+                    S_select = S[:rank]
+                    Vt_select = Vt[:rank, :]
+                    
+                    A = U_select @ torch.diag(torch.sqrt(S_select))  # Shape: [c_out, rank]
+                    B = torch.diag(torch.sqrt(S_select)) @ Vt_select  # Shape: [rank, d_in]
+                    W_res = weight_matrix - (U_select @ torch.diag(S_select) @ Vt_select).view(c_out, c_in, k1, k2)
+                else:
+                    A = torch.empty(c_out, rank, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    if init_method == "kaiming":
+                        init.kaiming_normal_(A, mode="fan_out", nonlinearity="relu")
+                    elif init_method == "gaussian":
+                        init.normal_(A, mean=0.0, std=0.01)
+                    elif init_method == "orthogonal":
+                        init.orthogonal_(A)
+                    B = torch.zeros(rank, d_in, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    W_res = weight_matrix
+            # --------------------------------------------------
+            # Linear
+            # --------------------------------------------------
             else:
                 d_out, d_in = weight_matrix.shape
 
-                if init_method == "kaiming":
-                    A = torch.empty(d_out, rank, device=weight_matrix.device, dtype=weight_matrix.dtype)
-                    init.kaiming_normal_(A, mode="fan_out", nonlinearity="relu")
-                elif init_method == "gaussian":
-                    A = torch.empty(d_out, rank, device=weight_matrix.device, dtype=weight_matrix.dtype)
-                    init.normal_(A, mean=0.0, std=0.01)
-                elif init_method == "orthogonal":
-                    A = torch.empty(d_out, rank, device=weight_matrix.device, dtype=weight_matrix.dtype)
-                    init.orthogonal_(A)
-                else:  # svd
-                    U, S, Vh = torch.linalg.svd(weight_matrix.float(), full_matrices=False)
-                    max_possible_rank = Vh.size(0)
+                # A init
+                if init_method =="svd":
+                    U, S, Vt = torch.linalg.svd(weight_matrix, full_matrices=False)
+                    max_possible_rank = S.size(0)
                     if rank > max_possible_rank:
                         log(INFO, f"Warning: Requested rank {rank} for layer {name} > max possible rank {max_possible_rank}.")
                         rank = max_possible_rank
-                    # FIX (CRITICAL): Use right singular vectors for A (shape [rank, In])
-                    A = Vh[:rank, :].to(device=weight_matrix.device, dtype=weight_matrix.dtype)
-
-                B = torch.zeros(rank, d_in, device=weight_matrix.device, dtype=weight_matrix.dtype)
-                W_res = weight_matrix
+                    U_select = U[:, :rank]
+                    S_select = S[:rank]
+                    Vt_select = Vt[:rank, :]
+                    
+                    A = U_select @ torch.diag(torch.sqrt(S_select))  # Shape: [d_out, rank]
+                    B = torch.diag(torch.sqrt(S_select)) @ Vt_select  # Shape: [rank, d_in]
+                    W_res = weight_matrix - (U_select @ torch.diag(S_select) @ Vt_select)
+                else:
+                    A = torch.empty(d_out, rank, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    if init_method == "kaiming":
+                        init.kaiming_normal_(A, mode="fan_out", nonlinearity="relu")
+                    elif init_method == "gaussian":
+                        init.normal_(A, mean=0.0, std=0.01)
+                    elif init_method == "orthogonal":
+                        init.orthogonal_(A)
+                    B = torch.zeros(rank, d_in, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    W_res = weight_matrix
 
             log(INFO, f"Layer {name}: Applied FFA-LoRA with rank {rank} (A init={init_method}, B=zero, A frozen).")
 
