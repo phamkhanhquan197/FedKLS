@@ -14,6 +14,7 @@ import copy
 import ray
 import gc
 import torch
+import numpy as np
 
 def main():
     # Parse arguments and configs
@@ -239,6 +240,33 @@ def main():
         else:
             model = client_model
             kl_norm = None
+        # FlexLoRA: build deterministic client rank map from config (resource mocking)
+        rank_map = None
+        if config_sim.get("server", {}).get("strategy") == "FlexLoRA":
+            flex_cfg = config_sim.get("flex_lora_config", {})
+            dist = flex_cfg.get("rank_distribution", [])
+            global_rank = int(flex_cfg.get("global_rank", config_sim.get("peft", {}).get("rank", 32)))
+            seed_rl = int(flex_cfg.get("seed", config_sim.get("common", {}).get("seed", 42)))
+
+            rng = np.random.default_rng(seed_rl)
+            ranks = []
+            probs = []
+            for item in dist:
+                ranks.append(int(item["rank"]))
+                probs.append(float(item["ratio"]))
+            probs = np.asarray(probs, dtype=np.float64)
+            probs = probs / probs.sum() if probs.sum() > 0 else np.ones_like(probs) / len(probs)
+
+            num_clients = int(config_sim["server"]["num_clients"])
+            sampled = rng.choice(np.asarray(ranks), size=num_clients, replace=True, p=probs)
+
+            # Ensure at least one client uses the global rank (sanity)
+            sampled[0] = global_rank
+            rank_map = {i: int(sampled[i]) for i in range(num_clients)}
+
+            # Store for strategy wiring
+            config_sim.setdefault("flex_lora_config", {})["client_rank_map"] = rank_map
+
         return get_client_fn(
             config_sim=config_sim,
             dataset=fds,
@@ -248,6 +276,7 @@ def main():
             save_dir=saved_models_path,
             kl_norm_dict=kl_normalized_per_client if peft_method == "fedkls" else None,  # Pass precomputed kl_norms
             data_scheduler=data_scheduler,  # NEW: Pass data scheduler for dynamic data allocation
+            rank_map=rank_map,
         )(cid)
 
     

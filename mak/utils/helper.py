@@ -26,6 +26,7 @@ import mak
 from mak.servers.custom_server import ServerSaveData
 from mak.servers.fedklsvd_server import FedKLSVDServer
 from mak.servers.ffa_lora_server import FFALoRAServer
+from mak.servers.flex_lora_server import FlexLoRAServer
 from mak.servers.fednova_server import FedNovaServer
 from mak.servers.scaffold_server import ScaffoldServer
 from mak.servers.pfedmoap_server import PFedMoAPServer
@@ -33,6 +34,7 @@ from mak.strategies.fednova_strategy import FedNovaStrategy
 from mak.strategies.scaffold_strategy import ScaffoldStrategy
 from mak.strategies.fedklsvd_strategy import FedKLSVDStrategy
 from mak.strategies.ffa_lora_strategy import FFALoRAStrategy
+from mak.strategies.flex_lora_strategy import FlexLoRAStrategy
 from mak.strategies.pfedmoap_strategy import PFedMoAPStrategy
 from mak.utils.dataset_info import dataset_info
 from mak.utils.general import set_params, test, weighted_average
@@ -854,6 +856,15 @@ def get_server(strategy, client_manager, out_file_path, target_acc, num_train_th
             num_train_thread=num_train_thread,
             num_test_thread=num_test_thread,
         )
+    elif isinstance(strategy, FlexLoRAStrategy):
+        return FlexLoRAServer(
+            strategy=strategy,
+            client_manager=client_manager,
+            out_file_path=out_file_path,
+            target_acc=target_acc,
+            num_train_thread=num_train_thread,
+            num_test_thread=num_test_thread,
+        )
     else:
         return ServerSaveData(
             strategy=strategy,
@@ -920,6 +931,12 @@ def get_strategy(
         },
         "FFALoRA": {
             "config": config,
+        },
+        "FlexLoRA": {
+            "config": config,
+            "model": model,
+            "rank_map": config.get("flex_lora_config", {}).get("client_rank_map", {}),
+            "global_rank": config.get("flex_lora_config", {}).get("global_rank", config.get("peft", {}).get("rank", 32)),
         },
         "PFedMoAP": {
             "config": config,

@@ -7,4 +7,5 @@ from mak.strategies.scaffold_strategy import ScaffoldStrategy as Scaffold
 from mak.strategies.fedklsvd_strategy import FedKLSVDStrategy as FedKLSVD
 from mak.strategies.fedawa_strategy import FedAWAStrategy as FedAWA
 from mak.strategies.ffa_lora_strategy import FFALoRAStrategy as FFALoRA
+from mak.strategies.flex_lora_strategy import FlexLoRAStrategy as FlexLoRA
 from mak.strategies.pfedmoap_strategy import PFedMoAPStrategy as PFedMoAP

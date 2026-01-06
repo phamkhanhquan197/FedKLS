@@ -67,8 +67,53 @@ def test(net, testloader, device: str, feature_key: str) -> Tuple[float, float, 
 
         return loss, accuracy, f1
 
-def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays], 
-               device: str = "cuda", method: str = None, bias: str = True):
+def _slice_pad_lora_params(t: torch.Tensor, target_rank: int, param_type: str) -> torch.Tensor:
+    """Slice or zero-pad LoRA factor to match target_rank.
+
+    Args:
+        t: Source tensor.
+        target_rank: Desired rank dimension.
+        param_type: "A" or "B".
+            - A has shape [out, r] -> rank axis = 1
+            - B has shape [r, in]  -> rank axis = 0
+
+    Returns:
+        Tensor with rank dimension adapted to target_rank.
+    """
+    if param_type == "A":
+        if t.dim() != 2:
+            return t
+        out, r = t.shape
+        if r > target_rank:
+            return t[:, :target_rank]
+        if r < target_rank:
+            pad_cols = target_rank - r
+            return F.pad(t, (0, pad_cols, 0, 0), mode="constant", value=0.0)
+        return t
+
+    if param_type == "B":
+        if t.dim() != 2:
+            return t
+        r, inn = t.shape
+        if r > target_rank:
+            return t[:target_rank, :]
+        if r < target_rank:
+            pad_rows = target_rank - r
+            return F.pad(t, (0, 0, 0, pad_rows), mode="constant", value=0.0)
+        return t
+
+    return t
+
+
+def set_params(
+    model: torch.nn.ModuleList,
+    params: List[fl.common.NDArrays],
+    device: str = "cuda",
+    method: str = None,
+    bias: str = True,
+    rank_map: dict | None = None,
+    client_id: int | None = None,
+):
 
     """Set model weights from a list of NumPy ndarrays."""
     model_state = model.state_dict()
@@ -154,11 +199,26 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays],
                     if k.endswith(".B")
                 ]
     
-    # Create state dict with only LoRA-B parameters
+    # Build partial update state_dict
     lora_params = OrderedDict()
+
+    # FlexLoRA rank adaptation (safe extend): only active when method == 'flex_lora'
+    target_rank = None
+    if method == "flex_lora":
+        if rank_map is None or client_id is None:
+            raise ValueError("FlexLoRA set_params requires rank_map and client_id")
+        target_rank = int(rank_map[int(client_id)])
+
     for key, array in zip(lora_keys, params):
-        lora_params[key] = torch.from_numpy(array)
-    # Update model with LoRA-B parameters only
+        t = torch.from_numpy(np.asarray(array))
+
+        if method == "flex_lora" and (key.endswith(".A") or key.endswith(".B")):
+            param_type = "A" if key.endswith(".A") else "B"
+            t = _slice_pad_lora_params(t, target_rank=target_rank, param_type=param_type)
+
+        lora_params[key] = t
+
+    # Update model with partial parameters only
     model_state.update(lora_params)
     model.load_state_dict(model_state, strict=True)
 
