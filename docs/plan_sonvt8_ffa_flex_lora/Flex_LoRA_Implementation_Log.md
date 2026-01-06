@@ -93,5 +93,49 @@ Example:
 
 ---
 
+## 5) Fix Log (Aggregation Math Bug)
+
+### 5.1 Problem
+The previous FlexLoRA server aggregation was mathematically incorrect when it **aggregated A and B separately** (e.g., `Avg(A)` and `Avg(B)` via FedAvg-style aggregation).
+
+Reason: averaging factors independently destroys the correlation between A and B and does **not** preserve the correct low-rank update semantics used by this repo:
+
+\[
+\Delta W = A \times B
+\]
+
+### 5.2 Fix (Implemented in `mak/strategies/flex_lora_strategy.py::aggregate_fit`)
+We changed the aggregation rule to:
+
+- **Rejected:** `Avg(A)` and `Avg(B)`
+- **Accepted:** `SVD(Avg(A @ B))`
+
+Concretely, for each LoRA layer (pair of `.A` and `.B`):
+
+1) Reconstruct each client update:
+\[
+\Delta W_i = A_i B_i
+\]
+
+2) Weighted-average in matrix space (layer-wise, memory-safe):
+\[
+\Delta W_{agg} = \sum_i \frac{n_i}{\sum_j n_j} \Delta W_i
+\]
+
+3) SVD merge and energy-preserving reprojection:
+\[
+\Delta W_{agg} = U S V^T,\quad
+A_{new}=U\sqrt{S},\quad
+B_{new}=\sqrt{S}V^T
+\]
+
+For **standard trainable params** (e.g., `.bias`, `classifier.weight`, ...), we keep **FedAvg weighted average**.
+
+### 5.3 Protocol handling
+- Round 1: server sends FULL `state_dict` (init)
+- Round > 1:
+  - client uplink: **all trainable params** in a partial ordered list
+  - server downlink: **partial** ordered list (LoRA A/B after SVD-merge + standard params after weighted avg)
+
 *End of log.*
 

@@ -12,6 +12,8 @@ from flwr.server.client_proxy import ClientProxy
 from flwr.server.strategy import FedAvg
 from flwr.server.strategy.aggregate import aggregate
 
+from mak.utils.helper import get_ffa_target_keys
+
 
 class FlexLoRAStrategy(FedAvg):
     """FlexLoRA Strategy.
@@ -72,6 +74,19 @@ class FlexLoRAStrategy(FedAvg):
         results: List[Tuple[ClientProxy, FitRes]],
         failures: List[Union[Tuple[ClientProxy, FitRes], BaseException]],
     ) -> Tuple[Optional[Parameters], Dict[str, Scalar]]:
+        """Aggregate client updates for FlexLoRA.
+
+        Protocol (as confirmed):
+        - Round 1 downlink: FULL state_dict (handled by initialize_parameters / BaseClient).
+        - Round >1 uplink: client sends ALL trainable params as a *partial* named-less list.
+          This includes: .A, .B, and standard trainables (bias/head/classifier).
+        - Round >1 downlink: server sends PARTIAL list for the same target keys.
+
+        Math fix (critical):
+        - Do NOT avg(A) and avg(B) independently.
+        - Correct: per layer compute ΔW_i = A_i @ B_i, then ΔW_agg = Σ w_i ΔW_i,
+          then SVD(ΔW_agg) and energy-preserving reprojection to (A_new, B_new).
+        """
         if not results:
             log(WARNING, f"Round {server_round}: No results to aggregate")
             return None, {}
@@ -79,83 +94,132 @@ class FlexLoRAStrategy(FedAvg):
             log(WARNING, f"Round {server_round}: {len(failures)} client failures during fit")
             return None, {}
 
-        # Convert each client payload into padded arrays for FedAvg
-        padded_weights_results = []
+        # Round 1: clients typically return FULL state_dict. Use vanilla FedAvg.
+        # (We keep this for compatibility with the existing infra.)
+        first_nds = parameters_to_ndarrays(results[0][1].parameters)
+        if len(first_nds) == len(self.model.state_dict()):
+            aggregated, metrics = super().aggregate_fit(server_round, results, failures)
+            return aggregated, metrics
+
+        # Round > 1: partial payload aligned with get_ffa_target_keys(self.model)
+        if get_ffa_target_keys is None:
+            raise RuntimeError(
+                "FlexLoRA requires mak.utils.helper.get_ffa_target_keys(model) but it was not found. "
+                "Please implement/export it to define the exact partial payload key order."
+            )
+        target_keys = get_ffa_target_keys(self.model)
+
+        # Total examples for weighting
+        n_total = sum(fit_res.num_examples for _, fit_res in results)
+        if n_total <= 0:
+            log(WARNING, f"Round {server_round}: Total num_examples is 0")
+            return None, {}
+
+        # Parse each client's payload into a dict[key] = ndarray for O(1) access.
+        client_payloads: List[Tuple[int, int, Dict[str, np.ndarray]]] = []
         for client, fit_res in results:
             cid = int(client.cid)
             nds = parameters_to_ndarrays(fit_res.parameters)
 
-            # If full model update is sent (round 1), fallback to FedAvg behavior
-            if len(nds) == len(self.model.state_dict()):
-                padded_weights_results.append((nds, fit_res.num_examples))
-                continue
-
-            # Otherwise assume it's A/B-only payload in server key order
-            if len(nds) != len(self._ab_keys):
+            if len(nds) != len(target_keys):
                 raise ValueError(
-                    f"FlexLoRA: payload length mismatch. expected={len(self._ab_keys)} got={len(nds)} for cid={cid}"
+                    f"FlexLoRA: payload length mismatch. expected={len(target_keys)} got={len(nds)} for cid={cid}"
                 )
 
-            padded = []
-            for key, arr in zip(self._ab_keys, nds):
-                t = torch.from_numpy(np.asarray(arr)).float()
-                t = self._pad_to_global(t, key)
-                padded.append(t.cpu().numpy())
+            payload = {k: np.asarray(v) for k, v in zip(target_keys, nds)}
+            client_payloads.append((cid, fit_res.num_examples, payload))
 
-            padded_weights_results.append((padded, fit_res.num_examples))
+        # Split target keys into LoRA A/B keys and standard keys
+        a_keys = [k for k in target_keys if k.endswith(".A")]
+        b_keys_set = {k for k in target_keys if k.endswith(".B")}
+        lora_bases = []
+        for ak in a_keys:
+            base = ak[:-2]
+            bk = base + ".B"
+            if bk in b_keys_set:
+                lora_bases.append(base)
 
-        # FedAvg aggregation over padded tensors
-        aggregated = aggregate(padded_weights_results)
+        lora_keys_set = set()
+        for base in lora_bases:
+            lora_keys_set.add(base + ".A")
+            lora_keys_set.add(base + ".B")
 
-        # SVD merge step (per A/B pair): reconstruct DeltaW, SVD, reproject
-        # We operate on global-rank tensors.
-        agg_tensors = [torch.from_numpy(np.asarray(x)).float() for x in aggregated]
+        standard_keys = [k for k in target_keys if k not in lora_keys_set]
 
-        # Build mapping for aggregated A/B
-        agg_sd = {}
-        for k, t in zip(self._ab_keys, agg_tensors):
-            agg_sd[k] = t
+        # --- 1) Standard aggregation (bias/head/classifier/etc.) ---
+        standard_agg: Dict[str, np.ndarray] = {}
+        for k in standard_keys:
+            agg = None
+            for _, n_i, payload in client_payloads:
+                w = n_i / n_total
+                arr = payload[k]
+                if agg is None:
+                    agg = (arr.astype(np.float32) * w)
+                else:
+                    agg += (arr.astype(np.float32) * w)
+            standard_agg[k] = agg
+            del agg
 
-        # Reproject each (A,B) by SVD on DeltaW = A@B
-        for key in list(agg_sd.keys()):
-            if not key.endswith(".A"):
-                continue
-            base = key[:-2]
+        # --- 2) LoRA aggregation (SVD(Avg(A@B))) - layer-wise to save RAM ---
+        lora_agg: Dict[str, np.ndarray] = {}
+
+        # Choose device for SVD merge (GPU if available, else CPU)
+        svd_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        for base in lora_bases:
             a_key = base + ".A"
             b_key = base + ".B"
-            if b_key not in agg_sd:
+
+            delta_w_agg = None  # torch.Tensor [d_out, d_in]
+
+            # Layer-wise accumulation over clients
+            for _, n_i, payload in client_payloads:
+                w = n_i / n_total
+
+                A_i = torch.from_numpy(payload[a_key]).to(device=svd_device, dtype=torch.float32)
+                B_i = torch.from_numpy(payload[b_key]).to(device=svd_device, dtype=torch.float32)
+
+                # ΔW_i = A_i @ B_i
+                dwi = A_i @ B_i
+
+                if delta_w_agg is None:
+                    delta_w_agg = dwi.mul(w)
+                else:
+                    delta_w_agg.add_(dwi, alpha=float(w))
+
+                # free temps ASAP
+                del A_i, B_i, dwi
+
+            if delta_w_agg is None:
                 continue
 
-            A = agg_sd[a_key]
-            B = agg_sd[b_key]
-            delta = A @ B
-            # SVD
-            U, S, Vh = torch.linalg.svd(delta, full_matrices=False)
-            r = min(self.global_rank, S.shape[0])
+            # SVD merge on aggregated update
+            U, S, Vh = torch.linalg.svd(delta_w_agg, full_matrices=False)
+
+            r = min(int(self.global_rank), int(S.shape[0]))
+            Ur = U[:, :r]
             Sr = S[:r]
+            Vhr = Vh[:r, :]
+
+            # Energy-preserving reprojection
             sqrtS = torch.diag(torch.sqrt(Sr + 1e-12))
-            A_new = U[:, :r] @ sqrtS
-            B_new = sqrtS @ Vh[:r, :]
-            agg_sd[a_key] = A_new
-            agg_sd[b_key] = B_new
+            A_new = Ur @ sqrtS
+            B_new = sqrtS @ Vhr
 
-        # Inject back into server model (only if these keys exist in model)
-        model_sd = self.model.state_dict()
-        with torch.no_grad():
-            for k in self._ab_keys:
-                if k not in model_sd:
-                    continue
-                t = agg_sd[k].to(device=model_sd[k].device, dtype=model_sd[k].dtype)
-                # Align to server model's current rank (may differ); slice if needed
-                if model_sd[k].shape != t.shape:
-                    # minimal safe alignment
-                    if k.endswith(".A"):
-                        t = t[:, : model_sd[k].shape[1]]
-                    elif k.endswith(".B"):
-                        t = t[: model_sd[k].shape[0], :]
-                model_sd[k].copy_(t)
+            # Store as numpy (server downlink is partial list)
+            lora_agg[a_key] = A_new.detach().cpu().numpy()
+            lora_agg[b_key] = B_new.detach().cpu().numpy()
 
-        # Return FULL model snapshot to keep global sync consistent with existing infra
-        full_snapshot = [val.detach().cpu().numpy() for val in self.model.state_dict().values()]
-        return ndarrays_to_parameters(full_snapshot), {}
+            # free per-layer tensors
+            del delta_w_agg, U, S, Vh, Ur, Sr, Vhr, sqrtS, A_new, B_new
+
+        # --- 3) Build final aggregated payload in target_keys order ---
+        out_nds: List[np.ndarray] = []
+        for k in target_keys:
+            if k in lora_agg:
+                out_nds.append(lora_agg[k])
+            else:
+                out_nds.append(standard_agg[k])
+
+        return ndarrays_to_parameters(out_nds), {}
 
