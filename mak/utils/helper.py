@@ -436,7 +436,7 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
                     S_select = S[middle_index_start:middle_index_end]
                     Vt_select = Vt[middle_index_start:middle_index_end, :]
 
-                elif method == 'fedkls':
+                elif method == 'fedkls' or method == 'flex_lora':
                     index_start = math.floor(kl_norm * (max_possible_rank - rank)) if kl_norm is not None else 0
                     index_end = index_start + rank
                     if client_id is not None:
@@ -484,7 +484,7 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
                     S_select = S[middle_index_start:middle_index_end]
                     Vt_select = Vt[middle_index_start:middle_index_end, :]
 
-                elif method == 'fedkls':
+                elif method == 'fedkls' or method == 'flex_lora':
                     index_start = math.floor(kl_norm * (max_possible_rank - rank)) if kl_norm is not None else 0
                     index_end = index_start + rank
                     if client_id is not None:
