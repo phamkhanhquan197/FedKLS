@@ -406,11 +406,9 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
             # FedSA-LoRA: Train both A and B locally, but only A is aggregated (handled in client/strategy)
             # Init: A configurable (default kaiming), B = 0, W_res = W
 
-            fedsa_cfg = config.get("fedsa_lora_config", {}) 
-
             seed = config["common"]["seed"]
-            init_method = fedsa_cfg.get("init_method", "kaiming")
-
+            init_method = config["fedsa_lora_config"]["init_method"]
+            
             if seed is not None:
                 torch.manual_seed(seed)
                 if torch.cuda.is_available():
