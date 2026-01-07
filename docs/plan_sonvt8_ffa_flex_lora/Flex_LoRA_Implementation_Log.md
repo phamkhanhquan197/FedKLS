@@ -1,6 +1,6 @@
 # FlexLoRA Implementation Log (Phase 2)
 
-*Last updated: 2026-01-06*
+*Last updated: 2026-01-07*
 
 This document records the **technical rationale** and non-negotiable decisions made before implementing the FlexLoRA baseline in this repository.
 
@@ -137,5 +137,26 @@ For **standard trainable params** (e.g., `.bias`, `classifier.weight`, ...), we 
   - client uplink: **all trainable params** in a partial ordered list
   - server downlink: **partial** ordered list (LoRA A/B after SVD-merge + standard params after weighted avg)
 
-*End of log.*
+---
 
+## 6) Final Integration (Helper + Protocol Freeze)
+
+### 6.1 Helper Utils Update
+- Added/confirmed `get_ffa_target_keys(model)` in `mak/utils/helper.py`.
+- This function is the **Single Source of Truth** for selecting communication parameters across Client and Server.
+- Filtering rules (as implemented):
+  - LoRA factors: `.A`, `.B`
+  - Bias terms: `.bias`
+  - Head weights: `.weight` containing keywords (`classifier`, `head`, `fc`, `score`, `linear`)
+- Return value is always `sorted(set(keys))` for determinism.
+
+### 6.2 Protocol Finalization
+- The final communication protocol is:
+  - **Deterministic Sorted List** based on **keys returned by `get_ffa_target_keys(model)`**.
+- This mirrors Phase 1 (FFA-LoRA) and prevents payload mismatch.
+
+### 6.3 Code Freeze
+- Client, Strategy, Server, Utils, Config have been aligned to the same protocol and math.
+- This codebase is considered **ready for release** as the FlexLoRA Phase 2 “Golden Release”.
+
+*End of log.*
