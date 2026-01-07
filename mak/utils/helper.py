@@ -5,7 +5,7 @@ import os
 import random
 from datetime import date, datetime
 from logging import INFO
-from typing import Dict
+from typing import Dict, List
 
 import flwr as fl
 import numpy as np
@@ -42,6 +42,35 @@ import math
 from collections import Counter
 import torch.nn.init as init
 from datasets import load_dataset
+
+
+def get_ffa_target_keys(model) -> List[str]:
+    """Return deterministic sorted list of target parameter names for FFA/Flex LoRA.
+
+    Includes:
+    1) Adapter matrices (.A, .B)
+    2) All biases (.bias)
+    3) Classifier/head weights (e.g., classifier/head/fc/score/linear *.weight)
+
+    This function is intentionally model-agnostic and must remain deterministic.
+    """
+    sd = model.state_dict()
+    head_keywords = ["classifier", "head", "fc", "score", "linear"]
+
+    keys: List[str] = []
+    for k in sd.keys():
+        # 1) LoRA Factors
+        if k.endswith(".A") or k.endswith(".B"):
+            keys.append(k)
+        # 2) Biases
+        elif k.endswith(".bias"):
+            keys.append(k)
+        # 3) Classifier / head weights
+        elif k.endswith(".weight") and any(h in k for h in head_keywords):
+            keys.append(k)
+
+    # Unique + deterministic order
+    return sorted(set(keys))
 
 
 def get_device_and_resources(config_sim):
@@ -943,7 +972,6 @@ def get_strategy(
         "PFedMoAP": {
             "config": config,
         },
-        # FlexLoRA kwargs (lazy import in strategy module; here we only pass data)
         "FlexLoRA": {
             "config": config,
             "model": model,

@@ -154,8 +154,8 @@ def main():
             log(INFO, f"=>>>>>>>>>>>>>>>>>Number of layers: {len(svd_model.state_dict())}")
             #Server always needs the SVD-adapted model when LoRA is enabled
             server_model = svd_model
-            
-                elif peft_method in ["pissa", "milora", "middle", "lora", "ffa_lora", "flex_lora"]:
+
+        elif peft_method in ["pissa", "milora", "middle", "lora", "ffa_lora", "flex_lora"]:
             log(INFO, "Applying SVD to create svd model for server...")
             # Create a deep copy of base_model to avoid modifying it
             model_for_svd = copy.deepcopy(base_model)
