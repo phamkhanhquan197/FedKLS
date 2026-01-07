@@ -2,7 +2,6 @@ import copy
 from collections import OrderedDict
 from typing import List, Tuple
 import numpy as np
-import os
 
 import flwr as fl
 import torch
@@ -103,13 +102,6 @@ def set_params(
 
     # FedSA-LoRA partial update (Round > 1): A-only (+ optional bias), keep B untouched
     elif len(model_state.items()) != len(params) and method == "fedsa_lora":
-        _fedsa_asserts = True
-
-        # Snapshot B before update to ensure B is never overwritten by broadcast
-        if _fedsa_asserts:
-            b_keys = [k for k in model_state.keys() if k.endswith(".B")]
-            b_before = {k: model_state[k].detach().cpu().clone() for k in b_keys}
-        
         if any(k.startswith("distilbert.") for k in model_state.keys()):
             if bias:
                 lora_keys = [
@@ -160,47 +152,8 @@ def set_params(
         for key, array in zip(lora_keys, params):
             lora_params[key] = torch.from_numpy(array)
 
-        # Snapshot A before update so we can confirm A changes (except rare identical updates)
-        if _fedsa_asserts:
-            a_before = {k: model_state[k].detach().cpu().clone() for k in lora_keys}
-
         model_state.update({k: v.clone().detach().to(device) for k, v in lora_params.items()})
         model.load_state_dict(model_state, strict=False)
-
-        # Post-update asserts: A matches payload, B unchanged
-        if _fedsa_asserts:
-            st = model.state_dict()
-
-            # 1) A and bias keys must exactly match received params
-            for k, arr in zip(lora_keys, params):
-                got = st[k].detach().cpu()
-                exp = torch.from_numpy(arr).detach().cpu()
-                assert got.shape == exp.shape, f"[FedSA-LoRA][ASSERT] Shape mismatch for {k}: {got.shape} vs {exp.shape}"
-                assert torch.allclose(got, exp, rtol=0.0, atol=0.0), f"[FedSA-LoRA][ASSERT] Value mismatch for {k}"
-
-            # 2) Only require "A changed" if the incoming payload actually differs from the previous A.
-            # This avoids false positives during evaluate(), where the same parameters may be applied multiple times.
-            any_payload_diff = False
-            for k, arr in zip(lora_keys, params):
-                exp = torch.from_numpy(arr).detach().cpu()
-                if not torch.allclose(a_before[k], exp, rtol=0.0, atol=0.0):
-                    any_payload_diff = True
-                    break
-
-            if any_payload_diff:
-                any_changed = False
-                for k in lora_keys:
-                    if not torch.allclose(a_before[k], st[k].detach().cpu(), rtol=0.0, atol=0.0):
-                        any_changed = True
-                        break
-                assert any_changed, "[FedSA-LoRA][ASSERT] Payload differs but none of A/bias keys changed after set_params (mapping/load bug?)"
-
-
-            # 3) B must remain unchanged after broadcast
-            for k in b_before.keys():
-                now = st[k].detach().cpu()
-                assert torch.allclose(now, b_before[k], rtol=0.0, atol=0.0), f"[FedSA-LoRA][ASSERT] B was overwritten by broadcast: {k}"
-
         return
 
     # Handle normal LoRA parameter update (Round > 1) (exclude ffa_lora)
