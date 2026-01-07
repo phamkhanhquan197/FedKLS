@@ -405,7 +405,12 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
         elif method == "fedsa_lora":
             # FedSA-LoRA: Train both A and B locally, but only A is aggregated (handled in client/strategy)
             # Init: A configurable (default kaiming), B = 0, W_res = W
+            print(config)
+            
+            print("3"*100)
+            print()
             fedsa_cfg = config.get("fedsa_lora_config", {})  # new config section
+            print(fedsa_cfg)
             seed = config["common"]["seed"]
             init_method = fedsa_cfg.init_method
 
