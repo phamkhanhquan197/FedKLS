@@ -30,9 +30,6 @@ from mak.servers.fednova_server import FedNovaServer
 from mak.servers.scaffold_server import ScaffoldServer
 from mak.servers.pfedmoap_server import PFedMoAPServer
 
-# IMPORTANT (FlexLoRA): avoid circular import by NOT importing FlexLoRA server/strategy at module import time.
-# We will do lazy imports inside get_server/get_strategy.
-
 from mak.strategies.fednova_strategy import FedNovaStrategy
 from mak.strategies.scaffold_strategy import ScaffoldStrategy
 from mak.strategies.fedklsvd_strategy import FedKLSVDStrategy
