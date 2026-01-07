@@ -71,6 +71,9 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays],
                device: str = "cuda", method: str = None, bias: str = True):
 
     """Set model weights from a list of NumPy ndarrays."""
+    
+    print(f"[set_params] method={method} bias={bias} len_state={len(model_state)} len_params={len(params)}")
+
     model_state = model.state_dict()
     if params is None:
         return  # Skip if parameters is None
