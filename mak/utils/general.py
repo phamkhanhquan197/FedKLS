@@ -103,7 +103,7 @@ def set_params(
 
     # FedSA-LoRA partial update (Round > 1): A-only (+ optional bias), keep B untouched
     elif len(model_state.items()) != len(params) and method == "fedsa_lora":
-        _fedsa_asserts = os.getenv("FEDSA_LORA_ASSERTS", "0") == "1"
+        _fedsa_asserts = True
 
         # Snapshot B before update to ensure B is never overwritten by broadcast
         if _fedsa_asserts:
