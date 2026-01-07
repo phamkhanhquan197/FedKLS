@@ -155,6 +155,8 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays],
                 ]
     # Handle LoRA-only update (Round > 1)
     elif len(model_state.items()) != len(params) and method == "fedsa_lora":
+        # FedSA-LoRA: ONLY update A (and optional bias), keep B untouched
+
         if any(k.startswith("distilbert.") for k in model_state.keys()):
             if bias:
                 lora_keys = [
@@ -189,6 +191,29 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays],
                 ]
             else:
                 lora_keys = [k for k in model_state.keys() if k.endswith(".A")]
+
+        else:
+            raise NotImplementedError("Unsupported model type for FedSA-LoRA")
+
+        # Client sends params in sorted(key) order → server MUST match
+        lora_keys = sorted(lora_keys)
+
+        if len(lora_keys) != len(params):
+            raise ValueError(
+                f"[FedSA-LoRA] Key/param mismatch: "
+                f"{len(lora_keys)} keys vs {len(params)} params"
+            )
+
+        lora_params = {}
+        for key, array in zip(lora_keys, params):
+            lora_params[key] = torch.from_numpy(array)
+
+        model_state.update(
+            {k: v.clone().detach().to(device) for k, v in lora_params.items()}
+        )
+        model.load_state_dict(model_state, strict=False)
+        return
+
     # Create state dict with only LoRA-B parameters
     lora_params = OrderedDict()
     for key, array in zip(lora_keys, params):
