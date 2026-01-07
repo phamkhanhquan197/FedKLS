@@ -178,14 +178,23 @@ def set_params(
                 assert got.shape == exp.shape, f"[FedSA-LoRA][ASSERT] Shape mismatch for {k}: {got.shape} vs {exp.shape}"
                 assert torch.allclose(got, exp, rtol=0.0, atol=0.0), f"[FedSA-LoRA][ASSERT] Value mismatch for {k}"
 
-            # 2) A should change compared to previous state in most rounds
-            # If it does not change, we require at least one key changed.
-            any_changed = False
-            for k in lora_keys:
-                if not torch.allclose(a_before[k], st[k].detach().cpu(), rtol=0.0, atol=0.0):
-                    any_changed = True
+            # 2) Only require "A changed" if the incoming payload actually differs from the previous A.
+            # This avoids false positives during evaluate(), where the same parameters may be applied multiple times.
+            any_payload_diff = False
+            for k, arr in zip(lora_keys, params):
+                exp = torch.from_numpy(arr).detach().cpu()
+                if not torch.allclose(a_before[k], exp, rtol=0.0, atol=0.0):
+                    any_payload_diff = True
                     break
-            assert any_changed, "[FedSA-LoRA][ASSERT] None of A/bias keys changed after broadcast (unexpected unless identical update)"
+
+            if any_payload_diff:
+                any_changed = False
+                for k in lora_keys:
+                    if not torch.allclose(a_before[k], st[k].detach().cpu(), rtol=0.0, atol=0.0):
+                        any_changed = True
+                        break
+                assert any_changed, "[FedSA-LoRA][ASSERT] Payload differs but none of A/bias keys changed after set_params (mapping/load bug?)"
+
 
             # 3) B must remain unchanged after broadcast
             for k in b_before.keys():
