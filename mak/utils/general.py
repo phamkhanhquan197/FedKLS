@@ -153,7 +153,42 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays],
                     k for k in model_state.keys()
                     if k.endswith(".B")
                 ]
-    
+    # Handle LoRA-only update (Round > 1)
+    elif len(model_state.items()) != len(params) and method == "fedsa_lora":
+        if any(k.startswith("distilbert.") for k in model_state.keys()):
+            if bias:
+                lora_keys = [
+                    k for k in model_state.keys()
+                    if k.endswith(".A") or (k.endswith(".bias") and "lin" in k)
+                ]
+            else:
+                lora_keys = [k for k in model_state.keys() if k.endswith(".A")]
+
+        elif any(k.startswith("bert.") for k in model_state.keys()):
+            if bias:
+                lora_keys = [
+                    k for k in model_state.keys()
+                    if (
+                        k.endswith(".A")
+                        or (k.endswith(".bias") and "self" in k)
+                        or (k.endswith(".bias") and "dense" in k)
+                    )
+                ]
+            else:
+                lora_keys = [k for k in model_state.keys() if k.endswith(".A")]
+
+        elif any(k.startswith("model.") for k in model_state.keys()):
+            if bias:
+                lora_keys = [
+                    k for k in model_state.keys()
+                    if (
+                        k.endswith(".A")
+                        or (k.endswith(".bias") and "self_attn" in k)
+                        or (k.endswith(".bias") and "mlp" in k)
+                    )
+                ]
+            else:
+                lora_keys = [k for k in model_state.keys() if k.endswith(".A")]
     # Create state dict with only LoRA-B parameters
     lora_params = OrderedDict()
     for key, array in zip(lora_keys, params):
