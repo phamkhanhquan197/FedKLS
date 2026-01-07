@@ -402,6 +402,90 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
 
             log(INFO, f"Layer {name}: Applied FFA-LoRA with rank {rank} (A init={init_method}, B=zero, A frozen).")
 
+        elif method == "fedsa_lora":
+            # FedSA-LoRA: Train both A and B locally, but only A is aggregated (handled in client/strategy)
+            # Init: A configurable (default kaiming), B = 0, W_res = W
+            fedsa_cfg = config.get("fedsa_lora_config", {})  # new config section
+            seed = config["common"]["seed"]
+            init_method = fedsa_cfg.init_method
+
+            if seed is not None:
+                torch.manual_seed(seed)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(seed)
+
+            if init_method not in {"kaiming", "gaussian", "orthogonal", "svd"}:
+                raise ValueError(
+                    f"Unknown init_method: {init_method}. Options: kaiming | gaussian | orthogonal | svd"
+                )
+
+            # --------------------------
+            # Conv2d
+            # --------------------------
+            if isinstance(layer, torch.nn.Conv2d):
+                c_out, c_in, k1, k2 = weight_matrix.shape
+                d_in = c_in * k1 * k2
+                W_flat = weight_matrix.view(c_out, -1)
+
+                if init_method == "svd":
+                    U, S, Vt = torch.linalg.svd(W_flat, full_matrices=False)
+                    max_possible_rank = S.size(0)
+                    rr = rank
+                    if rr > max_possible_rank:
+                        log(INFO, f"Warning: Requested rank {rr} for layer {name} > max possible rank {max_possible_rank}.")
+                        rr = max_possible_rank
+                    U_select = U[:, :rr]
+                    S_select = S[:rr]
+                    Vt_select = Vt[:rr, :]
+
+                    A = U_select @ torch.diag(torch.sqrt(S_select))  # [c_out, r]
+                    # FedSA default: B zero, do not preload low-rank recon into adapter
+                    B = torch.zeros(rr, d_in, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    W_res = weight_matrix
+                else:
+                    A = torch.empty(c_out, rank, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    if init_method == "kaiming":
+                        init.kaiming_normal_(A, mode="fan_out", nonlinearity="relu")
+                    elif init_method == "gaussian":
+                        init.normal_(A, mean=0.0, std=0.01)
+                    elif init_method == "orthogonal":
+                        init.orthogonal_(A)
+                    B = torch.zeros(rank, d_in, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    W_res = weight_matrix
+
+            # --------------------------
+            # Linear
+            # --------------------------
+            else:
+                d_out, d_in = weight_matrix.shape
+
+                if init_method == "svd":
+                    U, S, Vt = torch.linalg.svd(weight_matrix, full_matrices=False)
+                    max_possible_rank = S.size(0)
+                    rr = rank
+                    if rr > max_possible_rank:
+                        log(INFO, f"Warning: Requested rank {rr} for layer {name} > max possible rank {max_possible_rank}.")
+                        rr = max_possible_rank
+                    U_select = U[:, :rr]
+                    S_select = S[:rr]
+                    # A from SVD, B zero
+                    A = U_select @ torch.diag(torch.sqrt(S_select))  # [d_out, r]
+                    B = torch.zeros(rr, d_in, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    W_res = weight_matrix
+                else:
+                    A = torch.empty(d_out, rank, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    if init_method == "kaiming":
+                        init.kaiming_normal_(A, mode="fan_out", nonlinearity="relu")
+                    elif init_method == "gaussian":
+                        init.normal_(A, mean=0.0, std=0.01)
+                    elif init_method == "orthogonal":
+                        init.orthogonal_(A)
+                    B = torch.zeros(rank, d_in, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    W_res = weight_matrix
+
+            log(INFO, f"Layer {name}: Applied FedSA-LoRA with rank {rank} (A init={init_method}, B=zero).")
+
+
         else:
             if isinstance(layer, torch.nn.Conv2d): #Conv2d layer SVD
                 # weight_matrix = weight_matrix.view(weight_matrix.size(0), -1)  # Flatten Conv2d weights
@@ -926,6 +1010,9 @@ def get_strategy(
         },
         "PowD": {
             "candidate_client_set": config["powd_config"]["candidate_client_set"],
+        },
+        "FedSALoRA": {
+            "config": config,
         },
     } 
 

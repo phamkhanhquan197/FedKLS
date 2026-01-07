@@ -2,7 +2,7 @@
 
 common:
   data_type : dirichlet_niid # data_type = data distribution one among ['iid','dirichlet_niid']
-  dataset : zh-plus/tiny-imagenet # data_set = data set used one among ['kkim0451/UPMC-Food101', 'pranavmr/MM-IMDb','SetFit/20_newsgroups', 'legacy-datasets/banking77', 'fancyzhx/dbpedia_14', 'cifar10', 'cifar100', 'mnist', 'fashion_mnist', 'sasha/dog-food', 'zh-plus/tiny-imagenet', 'Mike0307/MNIST-M', 'flwrlabs/usps']
+  dataset : SetFit/20_newsgroups # data_set = data set used one among ['kkim0451/UPMC-Food101', 'pranavmr/MM-IMDb','SetFit/20_newsgroups', 'legacy-datasets/banking77', 'fancyzhx/dbpedia_14', 'cifar10', 'cifar100', 'mnist', 'fashion_mnist', 'sasha/dog-food', 'zh-plus/tiny-imagenet', 'Mike0307/MNIST-M', 'flwrlabs/usps']
   # dataset: SetFit/20_newsgroups
   # dataset: legacy-datasets/banking77
   dirichlet_alpha : 0.05 #dirichlet concentration parameter (only used if data_type is dirchlet-niid)
@@ -85,4 +85,7 @@ fedprox:
 
 powd_config:
   candidate_client_set: 20 # the d parameter (client fraction ≤ d ≤ total clients)
+
+fedsa_lora_config:
+  init_method: kaiming   # kaiming | gaussian | orthogonal | svd
 
