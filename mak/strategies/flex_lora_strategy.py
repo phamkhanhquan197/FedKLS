@@ -12,7 +12,6 @@ from flwr.server.client_proxy import ClientProxy
 from flwr.server.strategy import FedAvg
 from flwr.server.strategy.aggregate import aggregate
 
-from mak.utils.helper import get_ffa_target_keys
 
 
 class FlexLoRAStrategy(FedAvg):
@@ -102,11 +101,9 @@ class FlexLoRAStrategy(FedAvg):
             return aggregated, metrics
 
         # Round > 1: partial payload aligned with get_ffa_target_keys(self.model)
-        if get_ffa_target_keys is None:
-            raise RuntimeError(
-                "FlexLoRA requires mak.utils.helper.get_ffa_target_keys(model) but it was not found. "
-                "Please implement/export it to define the exact partial payload key order."
-            )
+        # Lazy import to avoid circular imports (helper -> server -> strategy -> helper).
+        from mak.utils.helper import get_ffa_target_keys
+
         target_keys = get_ffa_target_keys(self.model)
 
         # Total examples for weighting
