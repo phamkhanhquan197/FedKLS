@@ -411,6 +411,7 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
             print()
             fedsa_cfg = config.get("fedsa_lora_config", {})  # new config section
             print(fedsa_cfg)
+            print(config.fedsa_cfg.init_method)
             seed = config["common"]["seed"]
             init_method = fedsa_cfg.init_method
 
