@@ -72,11 +72,12 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays],
 
     """Set model weights from a list of NumPy ndarrays."""
     
-    print(f"[set_params] method={method} bias={bias} len_state={len(model_state)} len_params={len(params)}")
 
     model_state = model.state_dict()
     if params is None:
         return  # Skip if parameters is None
+
+    print(f"[set_params] method={method} bias={bias} len_state={len(model_state)} len_params={len(params)}")
 
     # print(f"len(params): {len(params)}") #108 -> For round > 1 -> this shows # of layers sent by server
     # print(f"len(model_state.items()): {len(model_state.items())}") #140 all the times -> this shows # of layers in local model
