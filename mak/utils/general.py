@@ -1,4 +1,3 @@
-import copy
 from collections import OrderedDict
 from typing import List, Tuple
 import numpy as np
@@ -6,7 +5,6 @@ import numpy as np
 import flwr as fl
 import torch
 from flwr.common import Metrics
-from mak.utils.dataset_info import dataset_info
 import torch.nn.functional as F
 from sklearn.metrics import f1_score
 
@@ -146,11 +144,15 @@ def set_params(
 
         if rank_map is None or client_id is None:
             raise ValueError("FlexLoRA set_params requires rank_map and client_id")
+        # target_rank here is the client's local adapter rank
         target_rank = int(rank_map[int(client_id)])
+
+        # Ensure tensors are created on the requested device
+        dev = torch.device(device) if isinstance(device, str) else device
 
         update = OrderedDict()
         for key, array in zip(target_keys, params):
-            t = torch.from_numpy(np.asarray(array))
+            t = torch.from_numpy(np.asarray(array)).to(device=dev)
 
             # Slice/pad LoRA factors from global_rank payload to local_rank model
             if key.endswith(".A"):
@@ -161,7 +163,9 @@ def set_params(
             update[key] = t
 
         model_state.update(update)
-        model.load_state_dict(model_state, strict=True)
+        # Allow missing/unexpected keys caused by adapter injection differences,
+        # but shapes of updated keys must match (we enforce via slice/pad above).
+        model.load_state_dict(model_state, strict=False)
         return
 
     # Handle LoRA-only update (Round > 1) for other methods

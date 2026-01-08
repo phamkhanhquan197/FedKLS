@@ -106,6 +106,17 @@ class FlexLoRAClient(BaseClient):
                 f"Parameter count mismatch: expected {len(target_keys)}, got {len(parameters)}"
             )
 
+        # Defensive: ensure local-rank adapters are still present (the model may be
+        # reconstructed/reused by the simulation runtime across phases).
+        if not self.rank_map or int(self.client_id) not in self.rank_map:
+            raise ValueError("FlexLoRA requires rank_map[client_id] for partial update slicing")
+        local_rank = int(self.rank_map[int(self.client_id)])
+        self.model = ensure_local_rank_adapters(
+            model=self.model,
+            base_config=self.config_sim,
+            local_rank=local_rank,
+        )
+
         set_params(
             self.model,
             parameters,

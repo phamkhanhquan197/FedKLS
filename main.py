@@ -249,7 +249,10 @@ def main():
             model = torch.load(model_path, map_location=device, weights_only=False)
             model = model.to(device)
         else:
-            model = client_model
+            # IMPORTANT: each client must receive its own model instance.
+            # FlexLoRA mutates adapters in-place (rank-specific), so sharing the same
+            # model object across clients can lead to rank drift and size-mismatch.
+            model = copy.deepcopy(client_model)
 
         rank_map = config_sim.get("flex_lora_config", {}).get("client_rank_map", None)
 
