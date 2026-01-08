@@ -6,9 +6,7 @@ import copy
 import numpy as np
 import torch
 
-from mak.utils.helper import get_ffa_target_keys
 from mak.utils.general import _slice_pad_lora_params
-from mak.utils.helper import apply_svd_to_model
 
 
 def generate_rank_map(config: dict, num_clients: int) -> Dict[int, int]:
@@ -76,15 +74,9 @@ def ensure_local_rank_adapters(
     base_config: dict,
     local_rank: int,
 ) -> torch.nn.Module:
-    """Ensure the given model is adapted with LoRA/SVD adapters of rank==local_rank.
-
-    If the model already has adapters with the correct rank, returns as-is.
-    Otherwise, rebuild adapters by applying SVD adaptation using a config copy.
-
-    Notes:
-    - This is used on the CLIENT to support heterogeneous local ranks.
-    - We keep it conservative: if we cannot infer current adapter rank, we rebuild.
-    """
+    """Ensure the given model is adapted with LoRA/SVD adapters of rank==local_rank."""
+    # Lazy import to avoid circular dependency
+    from mak.utils.helper import apply_svd_to_model
     try:
         # Find any adapter A to infer current rank
         for k, v in model.state_dict().items():
@@ -142,19 +134,10 @@ def load_server_eval_params_flex_lora(
     model: torch.nn.Module,
     parameters: List[np.ndarray],
     device: str | torch.device,
-    bias: bool = True,
 ) -> None:
-    """Load parameters for SERVER-side centralized evaluation for FlexLoRA.
-
-    Why needed:
-    - Server receives either FULL state_dict (Round 1) or PARTIAL payload (Round > 1).
-    - Using generic set_params can mismatch key ordering and cause silent corruption.
-
-    Rules:
-    - If FULL payload: map by model.state_dict().keys() order.
-    - If PARTIAL payload: map by get_ffa_target_keys(model) order.
-    - No client slicing (server always evaluates global model).
-    """
+    """Load parameters for SERVER-side centralized evaluation for FlexLoRA."""
+    # Lazy import to avoid circular dependency
+    from mak.utils.helper import get_ffa_target_keys
     dev = torch.device(device) if isinstance(device, str) else device
 
     model_state = model.state_dict()

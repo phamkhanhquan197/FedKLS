@@ -131,7 +131,40 @@ def set_params(
             [p.__setattr__("requires_grad", False) for name, p in model.named_parameters() if name.endswith(".A")]
         return
 
-    # Handle LoRA-only update (Round > 1)
+    # FlexLoRA partial update (Round > 1): must be mapped by deterministic target keys
+    # and rank-adapted for local clients. This branch is isolated and does not affect
+    # other baselines.
+    elif method == "flex_lora":
+        # Lazy import to avoid circular dependency (helper imports general)
+        from mak.utils.helper import get_ffa_target_keys
+
+        target_keys = get_ffa_target_keys(model)
+        if len(params) != len(target_keys):
+            raise ValueError(
+                f"FlexLoRA set_params expects {len(target_keys)} params (target keys), got {len(params)}"
+            )
+
+        if rank_map is None or client_id is None:
+            raise ValueError("FlexLoRA set_params requires rank_map and client_id")
+        target_rank = int(rank_map[int(client_id)])
+
+        update = OrderedDict()
+        for key, array in zip(target_keys, params):
+            t = torch.from_numpy(np.asarray(array))
+
+            # Slice/pad LoRA factors from global_rank payload to local_rank model
+            if key.endswith(".A"):
+                t = _slice_pad_lora_params(t, target_rank=target_rank, param_type="A")
+            elif key.endswith(".B"):
+                t = _slice_pad_lora_params(t, target_rank=target_rank, param_type="B")
+
+            update[key] = t
+
+        model_state.update(update)
+        model.load_state_dict(model_state, strict=True)
+        return
+
+    # Handle LoRA-only update (Round > 1) for other methods
     elif len(model_state.items()) != len(params) and method != "ffa_lora": # Handle normal LoRA parameter update
         if any(key.startswith("distilbert.") for key in model_state.keys()):
             if bias:
@@ -202,20 +235,8 @@ def set_params(
     # Build partial update state_dict
     lora_params = OrderedDict()
 
-    # FlexLoRA rank adaptation (safe extend): only active when method == 'flex_lora'
-    target_rank = None
-    if method == "flex_lora":
-        if rank_map is None or client_id is None:
-            raise ValueError("FlexLoRA set_params requires rank_map and client_id")
-        target_rank = int(rank_map[int(client_id)])
-
     for key, array in zip(lora_keys, params):
         t = torch.from_numpy(np.asarray(array))
-
-        if method == "flex_lora" and (key.endswith(".A") or key.endswith(".B")):
-            param_type = "A" if key.endswith(".A") else "B"
-            t = _slice_pad_lora_params(t, target_rank=target_rank, param_type=param_type)
-
         lora_params[key] = t
 
     # Update model with partial parameters only

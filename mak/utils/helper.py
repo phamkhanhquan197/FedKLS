@@ -36,7 +36,7 @@ from mak.strategies.ffa_lora_strategy import FFALoRAStrategy
 from mak.strategies.pfedmoap_strategy import PFedMoAPStrategy
 from mak.utils.dataset_info import dataset_info
 from mak.utils.general import set_params, test, weighted_average
-from mak.utils.flex_lora_utils import load_server_eval_params_flex_lora
+
 from mak.models.svd_model import SVDAdapter, ConvAdapter
 import math
 from collections import Counter
@@ -736,6 +736,8 @@ def get_evaluate_fn(
                 model.clear_nonlocal()
         else:
             if strategy == "FlexLoRA" or method == "flex_lora":
+                # Lazy import to avoid circular dependency
+                from mak.utils.flex_lora_utils import load_server_eval_params_flex_lora
                 load_server_eval_params_flex_lora(
                     model=model,
                     parameters=parameters,
