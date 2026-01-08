@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import copy
 import numpy as np
@@ -52,7 +52,7 @@ def _slice_pad_lora_factor(t: torch.Tensor, local_rank: int, is_A: bool) -> torc
         return t
 
     if is_A:
-        out, r = t.shape
+        _, r = t.shape
         if r > local_rank:
             return t[:, :local_rank]
         if r < local_rank:
@@ -60,7 +60,7 @@ def _slice_pad_lora_factor(t: torch.Tensor, local_rank: int, is_A: bool) -> torc
             return torch.nn.functional.pad(t, (0, pad_cols, 0, 0), mode="constant", value=0.0)
         return t
 
-    r, inn = t.shape
+    r, _ = t.shape
     if r > local_rank:
         return t[:local_rank, :]
     if r < local_rank:
@@ -76,36 +76,63 @@ def ensure_local_rank_adapters(
 ) -> torch.nn.Module:
     """Ensure the given model is adapted with LoRA/SVD adapters of rank==local_rank.
 
-    IMPORTANT (FlexLoRA): We must validate *all* LoRA factors, not just the first
-    one found in the state_dict. In distributed simulation, a model object can be
-    reused/mutated across phases; a partial match would lead to size-mismatch
-    during parameter loading.
-    """
-    # Lazy import to avoid circular dependency
-    from mak.utils.helper import apply_svd_to_model
+    Clean & safe approach for FlexLoRA:
+    - If the model already has adapter factors (.A/.B), we DO NOT attempt to re-run
+      apply_svd_to_model(), because that function only adapts torch.nn.Linear layers
+      and will return 0 layers once the model has been wrapped by SVDAdapter.
+    - Instead, we deterministically slice/pad all existing .A/.B tensors to the
+      requested local_rank and load them back.
+    - Only if the model has no adapters at all do we fall back to apply_svd_to_model.
 
+    This avoids size-mismatch during round>1 partial updates and keeps other
+    baselines untouched.
+    """
     desired = int(local_rank)
 
-    # Check whether ALL adapters already match the desired rank
-    try:
-        a_ranks = []
-        b_ranks = []
-        for k, v in model.state_dict().items():
-            if not isinstance(v, torch.Tensor) or v.dim() != 2:
-                continue
-            if k.endswith(".A"):
-                a_ranks.append(int(v.shape[1]))
-            elif k.endswith(".B"):
-                b_ranks.append(int(v.shape[0]))
+    sd = model.state_dict()
+    a_keys = [k for k in sd.keys() if k.endswith(".A")]
+    b_keys = [k for k in sd.keys() if k.endswith(".B")]
 
-        # If there are no adapters, we must apply them
-        if a_ranks or b_ranks:
-            all_ok = all(r == desired for r in a_ranks) and all(r == desired for r in b_ranks)
+    # Case 1) Model already has adapters -> normalize rank by slicing/padding in-place
+    if a_keys or b_keys:
+        # Fast path: already all OK
+        try:
+            all_ok = True
+            for k in a_keys:
+                v = sd[k]
+                if isinstance(v, torch.Tensor) and v.dim() == 2 and int(v.shape[1]) != desired:
+                    all_ok = False
+                    break
+            if all_ok:
+                for k in b_keys:
+                    v = sd[k]
+                    if isinstance(v, torch.Tensor) and v.dim() == 2 and int(v.shape[0]) != desired:
+                        all_ok = False
+                        break
             if all_ok:
                 return model
-    except Exception:
-        # Fallthrough to re-apply adapters
-        pass
+        except Exception:
+            # If inspection fails, fall through to safe conversion
+            pass
+
+        # Convert all A/B to desired rank
+        update = {}
+        for k in a_keys:
+            v = sd[k]
+            if isinstance(v, torch.Tensor):
+                update[k] = _slice_pad_lora_params(v, target_rank=desired, param_type="A")
+        for k in b_keys:
+            v = sd[k]
+            if isinstance(v, torch.Tensor):
+                update[k] = _slice_pad_lora_params(v, target_rank=desired, param_type="B")
+
+        sd.update(update)
+        model.load_state_dict(sd, strict=False)
+        return model
+
+    # Case 2) No adapters exist yet -> apply adapter injection
+    # Lazy import to avoid circular dependency
+    from mak.utils.helper import apply_svd_to_model
 
     cfg = copy.deepcopy(base_config)
     cfg.setdefault("peft", {})["rank"] = desired
@@ -157,6 +184,7 @@ def load_server_eval_params_flex_lora(
     """Load parameters for SERVER-side centralized evaluation for FlexLoRA."""
     # Lazy import to avoid circular dependency
     from mak.utils.helper import get_ffa_target_keys
+
     dev = torch.device(device) if isinstance(device, str) else device
 
     model_state = model.state_dict()
