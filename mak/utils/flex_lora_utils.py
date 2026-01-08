@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import copy
 import numpy as np
 import torch
+
+from mak.utils.helper import get_ffa_target_keys
+from mak.utils.general import _slice_pad_lora_params
+from mak.utils.helper import apply_svd_to_model
 
 
 def generate_rank_map(config: dict, num_clients: int) -> Dict[int, int]:
@@ -19,7 +23,6 @@ def generate_rank_map(config: dict, num_clients: int) -> Dict[int, int]:
     seed = int(flex_cfg.get("seed", config.get("common", {}).get("seed", 42)))
 
     if not dist:
-        # Fallback: everyone uses global rank
         return {i: global_rank for i in range(int(num_clients))}
 
     rng = np.random.default_rng(seed)
@@ -59,7 +62,6 @@ def _slice_pad_lora_factor(t: torch.Tensor, local_rank: int, is_A: bool) -> torc
             return torch.nn.functional.pad(t, (0, pad_cols, 0, 0), mode="constant", value=0.0)
         return t
 
-    # B
     r, inn = t.shape
     if r > local_rank:
         return t[:local_rank, :]
@@ -67,6 +69,38 @@ def _slice_pad_lora_factor(t: torch.Tensor, local_rank: int, is_A: bool) -> torc
         pad_rows = local_rank - r
         return torch.nn.functional.pad(t, (0, 0, 0, pad_rows), mode="constant", value=0.0)
     return t
+
+
+def ensure_local_rank_adapters(
+    model: torch.nn.Module,
+    base_config: dict,
+    local_rank: int,
+) -> torch.nn.Module:
+    """Ensure the given model is adapted with LoRA/SVD adapters of rank==local_rank.
+
+    If the model already has adapters with the correct rank, returns as-is.
+    Otherwise, rebuild adapters by applying SVD adaptation using a config copy.
+
+    Notes:
+    - This is used on the CLIENT to support heterogeneous local ranks.
+    - We keep it conservative: if we cannot infer current adapter rank, we rebuild.
+    """
+    try:
+        # Find any adapter A to infer current rank
+        for k, v in model.state_dict().items():
+            if k.endswith(".A") and v.dim() == 2:
+                current_rank = int(v.shape[1])
+                if current_rank == int(local_rank):
+                    return model
+                break
+    except Exception:
+        pass
+
+    cfg = copy.deepcopy(base_config)
+    cfg.setdefault("peft", {})["rank"] = int(local_rank)
+
+    # Important: apply_svd_to_model mutates the model in-place
+    return apply_svd_to_model(model=model, config=cfg)
 
 
 def slice_and_load_params(
@@ -80,10 +114,7 @@ def slice_and_load_params(
     The server sends a full state_dict corresponding to global_rank.
     Clients with local_rank < global_rank must slice A/B factors before loading.
 
-    This function:
-    1) Builds an OrderedDict from model.state_dict() keys aligned with params.
-    2) For keys ending with .A or .B: slice/pad to local_rank.
-    3) Loads with strict=False.
+    This function assumes the model already has local-rank adapters.
     """
     model_state = model.state_dict()
     if len(params) != len(model_state):
@@ -105,3 +136,57 @@ def slice_and_load_params(
         state_dict[k] = t
 
     model.load_state_dict(state_dict, strict=False)
+
+
+def load_server_eval_params_flex_lora(
+    model: torch.nn.Module,
+    parameters: List[np.ndarray],
+    device: str | torch.device,
+    bias: bool = True,
+) -> None:
+    """Load parameters for SERVER-side centralized evaluation for FlexLoRA.
+
+    Why needed:
+    - Server receives either FULL state_dict (Round 1) or PARTIAL payload (Round > 1).
+    - Using generic set_params can mismatch key ordering and cause silent corruption.
+
+    Rules:
+    - If FULL payload: map by model.state_dict().keys() order.
+    - If PARTIAL payload: map by get_ffa_target_keys(model) order.
+    - No client slicing (server always evaluates global model).
+    """
+    dev = torch.device(device) if isinstance(device, str) else device
+
+    model_state = model.state_dict()
+
+    # FULL payload
+    if len(parameters) == len(model_state):
+        full_sd = {}
+        for k, arr in zip(model_state.keys(), parameters):
+            full_sd[k] = torch.from_numpy(np.asarray(arr)).to(device=dev)
+        model.load_state_dict(full_sd, strict=False)
+        return
+
+    # PARTIAL payload
+    target_keys = get_ffa_target_keys(model)
+    if len(parameters) != len(target_keys):
+        raise ValueError(
+            f"FlexLoRA server eval payload length mismatch: expected {len(target_keys)} got {len(parameters)}"
+        )
+
+    # Build partial update dict
+    update = {}
+    for k, arr in zip(target_keys, parameters):
+        t = torch.from_numpy(np.asarray(arr)).to(device=dev)
+
+        # Defensive: ensure A/B shapes match current global-rank model
+        if k.endswith(".A") or k.endswith(".B"):
+            if k.endswith(".A"):
+                t = _slice_pad_lora_params(t, target_rank=int(t.shape[1]), param_type="A")
+            else:
+                t = _slice_pad_lora_params(t, target_rank=int(t.shape[0]), param_type="B")
+
+        update[k] = t
+
+    model_state.update(update)
+    model.load_state_dict(model_state, strict=True)

@@ -7,7 +7,7 @@ import numpy as np
 from mak.clients.base_client import BaseClient
 from mak.utils.general import set_params
 from mak.utils.helper import get_ffa_target_keys
-from mak.utils.flex_lora_utils import slice_and_load_params
+from mak.utils.flex_lora_utils import ensure_local_rank_adapters, slice_and_load_params
 
 
 class FlexLoRAClient(BaseClient):
@@ -83,6 +83,14 @@ class FlexLoRAClient(BaseClient):
                 raise ValueError("FlexLoRA requires rank_map[client_id] for full update slicing")
 
             local_rank = int(self.rank_map[int(self.client_id)])
+
+            # Ensure the client model is adapted with local-rank adapters before loading.
+            self.model = ensure_local_rank_adapters(
+                model=self.model,
+                base_config=self.config_sim,
+                local_rank=local_rank,
+            )
+
             slice_and_load_params(
                 model=self.model,
                 params=parameters,
