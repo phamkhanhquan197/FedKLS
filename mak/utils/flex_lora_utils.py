@@ -74,22 +74,41 @@ def ensure_local_rank_adapters(
     base_config: dict,
     local_rank: int,
 ) -> torch.nn.Module:
-    """Ensure the given model is adapted with LoRA/SVD adapters of rank==local_rank."""
+    """Ensure the given model is adapted with LoRA/SVD adapters of rank==local_rank.
+
+    IMPORTANT (FlexLoRA): We must validate *all* LoRA factors, not just the first
+    one found in the state_dict. In distributed simulation, a model object can be
+    reused/mutated across phases; a partial match would lead to size-mismatch
+    during parameter loading.
+    """
     # Lazy import to avoid circular dependency
     from mak.utils.helper import apply_svd_to_model
+
+    desired = int(local_rank)
+
+    # Check whether ALL adapters already match the desired rank
     try:
-        # Find any adapter A to infer current rank
+        a_ranks = []
+        b_ranks = []
         for k, v in model.state_dict().items():
-            if k.endswith(".A") and v.dim() == 2:
-                current_rank = int(v.shape[1])
-                if current_rank == int(local_rank):
-                    return model
-                break
+            if not isinstance(v, torch.Tensor) or v.dim() != 2:
+                continue
+            if k.endswith(".A"):
+                a_ranks.append(int(v.shape[1]))
+            elif k.endswith(".B"):
+                b_ranks.append(int(v.shape[0]))
+
+        # If there are no adapters, we must apply them
+        if a_ranks or b_ranks:
+            all_ok = all(r == desired for r in a_ranks) and all(r == desired for r in b_ranks)
+            if all_ok:
+                return model
     except Exception:
+        # Fallthrough to re-apply adapters
         pass
 
     cfg = copy.deepcopy(base_config)
-    cfg.setdefault("peft", {})["rank"] = int(local_rank)
+    cfg.setdefault("peft", {})["rank"] = desired
 
     # Important: apply_svd_to_model mutates the model in-place
     return apply_svd_to_model(model=model, config=cfg)
