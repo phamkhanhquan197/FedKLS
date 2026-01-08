@@ -1,6 +1,6 @@
 # FlexLoRA Implementation Log (Phase 2)
 
-*Last updated: 2026-01-07*
+*Last updated: 2026-01-08*
 
 This document records the **technical rationale** and non-negotiable decisions made before implementing the FlexLoRA baseline in this repository.
 
@@ -158,5 +158,43 @@ For **standard trainable params** (e.g., `.bias`, `classifier.weight`, ...), we 
 ### 6.3 Code Freeze
 - Client, Strategy, Server, Utils, Config have been aligned to the same protocol and math.
 - This codebase is considered **ready for release** as the FlexLoRA Phase 2 “Golden Release”.
+
+---
+
+## 7) Smoke-test watchlist (known risks to validate)
+
+This section tracks **known risks** that are relevant to the FlexLoRA baseline integration.
+They are not necessarily bugs, but must be validated during the Google Colab smoke test.
+
+### 7.1 Rank map wiring (High)
+**Risk:** For FlexLoRA, each client needs a deterministic `rank_map[cid]` so that `set_params(..., method="flex_lora")` can slice/pad adapter factors correctly.
+
+**What to validate in smoke test:**
+- Ensure `rank_map` is passed end-to-end: `main.py` → `get_client_fn` → `FlexLoRAClient(rank_map=...)`.
+- Confirm `FlexLoRAClient.set_parameters()` receives a non-empty `rank_map` and that `rank_map[client_id]` exists.
+
+**Expected behavior:**
+- Fail-fast is acceptable if rank wiring is missing (misconfiguration).
+
+### 7.2 Payload key order consistency vs. `set_params` heuristics (Very High)
+**Risk:** FlexLoRA strategy/client use `get_ffa_target_keys(model)` to define the partial payload order.
+However, `mak/utils/general.py::set_params` currently derives the receiving key list via model-specific heuristics.
+
+If these two key lists diverge, parameters may be assigned to wrong tensors (silent corruption) or raise shape/load errors.
+
+**What to validate in smoke test:**
+- Compare (once) `get_ffa_target_keys(model)` with the internal key list used by `set_params` for the same model.
+- Validate that the number of tensors and their shapes align for partial updates (Round > 1).
+
+**Expected behavior:**
+- Under Strict Homogeneity, a mismatch indicates incorrect integration/config and should fail fast.
+
+### 7.3 Resource / OOM risks in server-side SVD merge (Medium)
+**Risk:** FlexLoRA server performs per-layer SVD of aggregated \(\Delta W\) each round.
+This can be heavy for transformer backbones and may trigger OOM or slowdowns.
+
+**What to validate in smoke test:**
+- Monitor peak memory usage on the server process during aggregation.
+- If OOM occurs, mitigate via test config (smaller model, fewer clients, smaller global rank, fewer rounds).
 
 *End of log.*

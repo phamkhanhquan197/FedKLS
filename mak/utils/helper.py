@@ -14,9 +14,7 @@ import torch
 import yaml
 from datasets import Dataset
 from datasets.utils.logging import disable_progress_bar
-from flwr.common import Scalar
 from flwr.common.logger import log
-from flwr.common.typing import Scalar
 from flwr_datasets import FederatedDataset
 from flwr_datasets.partitioner import DirichletPartitioner, IidPartitioner
 from torch.utils.data import DataLoader
@@ -648,7 +646,7 @@ def get_model(config, shape, classnames=None):
         )
         return model
     # check if model is from huggingface
-    elif model_name in ["distilbert-base-uncased", "Qwen/Qwen1.5-0.5B", "openai/clip-vit-base-patch32"""]:  # Add more as needed
+    elif model_name in ["distilbert-base-uncased", "Qwen/Qwen1.5-0.5B", "openai/clip-vit-base-patch32"]:  # Add more as needed
         from transformers import AutoModelForSequenceClassification, BitsAndBytesConfig, CLIPModel
         if model_name == "Qwen/Qwen1.5-0.5B": #Need to check again when applying the quantization -> still error
             quantization_8_bit_config = BitsAndBytesConfig(
@@ -735,8 +733,10 @@ def get_evaluate_fn(
             if hasattr(model, "clear_nonlocal"):
                 model.clear_nonlocal()
         else:
-            ## model = get_model(config=config_sim, shape=shape)
-            set_params(model, parameters, method=method, bias=bias)
+            if strategy == "FlexLoRA" or method == "flex_lora":
+                set_params(model, parameters, method=None, bias=bias)
+            else:
+                set_params(model, parameters, method=method, bias=bias)
 
         model.to(device)
 
@@ -885,12 +885,11 @@ def get_server(strategy, client_manager, out_file_path, target_acc, num_train_th
             num_test_thread=num_test_thread,
         )
 
-    # FlexLoRA (lazy import to avoid circular import)
-    # NOTE: do not import FlexLoRA* at module level.
+    # FlexLoRA (direct lazy import to avoid circular import / AttributeError)
     try:
-        from mak.strategies.flex_lora_strategy import FlexLoRAStrategy
+        from mak.strategies.flex_lora_strategy import FlexLoRAStrategy  # local import
         if isinstance(strategy, FlexLoRAStrategy):
-            from mak.servers.flex_lora_server import FlexLoRAServer
+            from mak.servers.flex_lora_server import FlexLoRAServer  # local import
             return FlexLoRAServer(
                 strategy=strategy,
                 client_manager=client_manager,
@@ -899,8 +898,7 @@ def get_server(strategy, client_manager, out_file_path, target_acc, num_train_th
                 num_train_thread=num_train_thread,
                 num_test_thread=num_test_thread,
             )
-    except Exception:
-        # FlexLoRA not available
+    except (ImportError, AttributeError):
         pass
 
     return ServerSaveData(
