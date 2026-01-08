@@ -111,6 +111,22 @@ class FlexLoRAClient(BaseClient):
         if not self.rank_map or int(self.client_id) not in self.rank_map:
             raise ValueError("FlexLoRA requires rank_map[client_id] for partial update slicing")
         local_rank = int(self.rank_map[int(self.client_id)])
+
+        # Debug: log current adapter shapes before re-ensuring
+        try:
+            sd = self.model.state_dict()
+            a_keys = sorted([k for k in sd.keys() if k.endswith(".A")])
+            b_keys = sorted([k for k in sd.keys() if k.endswith(".B")])
+            # Use Flower logger
+            from flwr.common.logger import log as fl_log
+            from logging import INFO
+            if a_keys:
+                fl_log(INFO, f"[FlexLoRA][cid={self.client_id}] before ensure: {a_keys[0]} shape={tuple(sd[a_keys[0]].shape)}")
+            if b_keys:
+                fl_log(INFO, f"[FlexLoRA][cid={self.client_id}] before ensure: {b_keys[0]} shape={tuple(sd[b_keys[0]].shape)}")
+        except Exception:
+            pass
+
         self.model = ensure_local_rank_adapters(
             model=self.model,
             base_config=self.config_sim,

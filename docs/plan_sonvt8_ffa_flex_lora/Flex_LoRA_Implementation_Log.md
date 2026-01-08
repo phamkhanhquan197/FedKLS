@@ -173,20 +173,32 @@ There are two independent issues that must be handled safely:
 This explains why payload rank 8 could be loaded into a model still expecting rank 64.
 
 ### 7.3 Safe fix adopted (FlexLoRA-specific, minimal blast radius)
-We implemented a **safe, deterministic rank conversion** in `mak/utils/flex_lora_utils.py::ensure_local_rank_adapters`:
+We adopted a **client-safe adapter reconfiguration** in `mak/utils/flex_lora_utils.py::ensure_local_rank_adapters`.
 
-- If the model already contains adapters (keys ending with `.A`/`.B`):
-  - DO NOT call `apply_svd_to_model`.
-  - Instead, slice/pad all existing `.A` and `.B` tensors directly to `local_rank` using `_slice_pad_lora_params`.
-  - Reload the updated state dict with `strict=False`.
+#### Constraint (author intent)
+- **SVD must only happen on the server.**
+- Clients must not run `torch.linalg.svd` (or any decomposition of base weights).
 
-- Only if the model contains no adapters at all:
-  - fall back to `apply_svd_to_model` (first-time injection).
+#### What went wrong with the previous approach
+Attempting to convert rank by slicing `.A/.B` tensors and calling `load_state_dict` failed because:
+- Rank is an **architecture-level** property (Parameter shapes differ).
+- You cannot load a `[*, 8]` tensor into an existing Parameter allocated as `[*, 64]`.
+- Re-running `apply_svd_to_model` on the client is not allowed (client-side SVD) and is also unreliable once the model is already wrapped by `SVDAdapter`.
 
-**Why this is safe:**
-- It is isolated to FlexLoRA utilities.
-- It avoids modifying `apply_svd_to_model`, which is shared by multiple baselines.
-- It removes dependency on module types (`torch.nn.Linear` vs `SVDAdapter`) and enforces rank invariants directly on `.A/.B` factors.
+#### Final safe approach
+When a client needs `local_rank` adapters:
+
+- If the model already has adapters but with a different rank:
+  - **Rebuild adapter modules** to match `local_rank` using **no-SVD LoRA init**:
+    - `A`: small Gaussian
+    - `B`: zeros
+  - This creates the correct-shaped trainable Parameters for the client.
+  - The server payload then overwrites these initial values.
+
+- If the model has no adapters:
+  - Inject adapters with the same **no-SVD** initialization.
+
+This approach is isolated to FlexLoRA utilities and avoids touching shared SVD injection logic used by other baselines.
 
 ---
 

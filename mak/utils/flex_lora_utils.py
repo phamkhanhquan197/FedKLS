@@ -6,6 +6,9 @@ import copy
 import numpy as np
 import torch
 
+from flwr.common.logger import log
+from logging import INFO
+
 from mak.utils.general import _slice_pad_lora_params
 
 
@@ -69,76 +72,108 @@ def _slice_pad_lora_factor(t: torch.Tensor, local_rank: int, is_A: bool) -> torc
     return t
 
 
+def _inject_lora_adapters_no_svd(
+    model: torch.nn.Module,
+    base_config: dict,
+    local_rank: int,
+) -> torch.nn.Module:
+    """Inject LoRA/SVDAdapter modules WITHOUT running SVD (client-side safe).
+
+    Policy:
+    - A: small Gaussian init
+    - B: zeros
+    - W_res: original linear weight (frozen)
+
+    This is used to create a local-rank architecture on the client side while
+    respecting the constraint: "SVD must happen on the server, not on clients".
+    """
+    from mak.models.svd_model import SVDAdapter
+
+    rank = int(local_rank)
+    alpha = float(base_config.get("peft", {}).get("alpha", rank))
+
+    # Deterministic init if seed is set
+    seed = base_config.get("common", {}).get("seed", None)
+    if seed is not None:
+        torch.manual_seed(int(seed))
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(int(seed))
+
+    # Replace Linear layers similarly to apply_svd_to_model.extract_linear_layers
+    def should_skip(name: str) -> bool:
+        return name in ["pre_classifier", "classifier", "model.norm", "score"]
+
+    replaced = 0
+    for name, module in list(model.named_modules()):
+        if not isinstance(module, torch.nn.Linear):
+            continue
+        if should_skip(name):
+            continue
+
+        d_out, d_in = module.weight.data.shape
+        device = module.weight.data.device
+        dtype = module.weight.data.dtype
+
+        A = (torch.randn(d_out, rank, device=device, dtype=dtype) * 0.01)
+        B = torch.zeros(rank, d_in, device=device, dtype=dtype)
+
+        W_res = module.weight.data.clone().detach()
+        original_bias = module.bias.data.clone().detach() if module.bias is not None else None
+
+        new_layer = SVDAdapter(W_res=W_res, A=A, B=B, alpha=alpha, rank=rank, original_bias=original_bias)
+
+        # Replace module in parent
+        parent_name, child_name = name.rsplit(".", 1)
+        parent = model.get_submodule(parent_name)
+        setattr(parent, child_name, new_layer)
+        replaced += 1
+
+    log(INFO, f"[FlexLoRA] Injected {replaced} LoRA adapters without SVD (rank={rank}).")
+    return model
+
+
 def ensure_local_rank_adapters(
     model: torch.nn.Module,
     base_config: dict,
     local_rank: int,
 ) -> torch.nn.Module:
-    """Ensure the given model is adapted with LoRA/SVD adapters of rank==local_rank.
+    """Ensure the given model has FlexLoRA adapters with rank==local_rank.
 
-    Clean & safe approach for FlexLoRA:
-    - If the model already has adapter factors (.A/.B), we DO NOT attempt to re-run
-      apply_svd_to_model(), because that function only adapts torch.nn.Linear layers
-      and will return 0 layers once the model has been wrapped by SVDAdapter.
-    - Instead, we deterministically slice/pad all existing .A/.B tensors to the
-      requested local_rank and load them back.
-    - Only if the model has no adapters at all do we fall back to apply_svd_to_model.
+    IMPORTANT:
+    - Changing rank is an architecture change (Parameter shapes differ).
+    - We must NOT run SVD on the client.
 
-    This avoids size-mismatch during round>1 partial updates and keeps other
-    baselines untouched.
+    Strategy:
+    1) If model already has adapters with the desired rank -> OK.
+    2) Otherwise, REBUILD adapter modules (no-SVD init) to match desired rank.
+       The server will later send the correct A/B values which overwrite init.
     """
     desired = int(local_rank)
 
     sd = model.state_dict()
-    a_keys = [k for k in sd.keys() if k.endswith(".A")]
-    b_keys = [k for k in sd.keys() if k.endswith(".B")]
+    a_keys = [k for k in sd.keys() if k.endswith(".A") and isinstance(sd[k], torch.Tensor) and sd[k].dim() == 2]
+    b_keys = [k for k in sd.keys() if k.endswith(".B") and isinstance(sd[k], torch.Tensor) and sd[k].dim() == 2]
 
-    # Case 1) Model already has adapters -> normalize rank by slicing/padding in-place
     if a_keys or b_keys:
-        # Fast path: already all OK
+        # Check if all ranks match
         try:
-            all_ok = True
-            for k in a_keys:
-                v = sd[k]
-                if isinstance(v, torch.Tensor) and v.dim() == 2 and int(v.shape[1]) != desired:
-                    all_ok = False
-                    break
-            if all_ok:
-                for k in b_keys:
-                    v = sd[k]
-                    if isinstance(v, torch.Tensor) and v.dim() == 2 and int(v.shape[0]) != desired:
-                        all_ok = False
-                        break
-            if all_ok:
+            a_bad = [k for k in a_keys if int(sd[k].shape[1]) != desired]
+            b_bad = [k for k in b_keys if int(sd[k].shape[0]) != desired]
+            if not a_bad and not b_bad:
                 return model
-        except Exception:
-            # If inspection fails, fall through to safe conversion
-            pass
+            log(
+                INFO,
+                f"[FlexLoRA] Adapter rank mismatch detected. desired={desired} "
+                f"A_bad={len(a_bad)}/{len(a_keys)} B_bad={len(b_bad)}/{len(b_keys)} -> rebuilding adapters (no SVD).",
+            )
+        except Exception as e:
+            log(INFO, f"[FlexLoRA] Adapter inspection failed ({e}); rebuilding adapters (no SVD).")
 
-        # Convert all A/B to desired rank
-        update = {}
-        for k in a_keys:
-            v = sd[k]
-            if isinstance(v, torch.Tensor):
-                update[k] = _slice_pad_lora_params(v, target_rank=desired, param_type="A")
-        for k in b_keys:
-            v = sd[k]
-            if isinstance(v, torch.Tensor):
-                update[k] = _slice_pad_lora_params(v, target_rank=desired, param_type="B")
+    else:
+        log(INFO, f"[FlexLoRA] No adapters found; injecting adapters (no SVD) rank={desired}.")
 
-        sd.update(update)
-        model.load_state_dict(sd, strict=False)
-        return model
-
-    # Case 2) No adapters exist yet -> apply adapter injection
-    # Lazy import to avoid circular dependency
-    from mak.utils.helper import apply_svd_to_model
-
-    cfg = copy.deepcopy(base_config)
-    cfg.setdefault("peft", {})["rank"] = desired
-
-    # Important: apply_svd_to_model mutates the model in-place
-    return apply_svd_to_model(model=model, config=cfg)
+    # Rebuild adapters with correct rank without SVD
+    return _inject_lora_adapters_no_svd(model=model, base_config=base_config, local_rank=desired)
 
 
 def slice_and_load_params(

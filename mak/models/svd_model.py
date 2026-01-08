@@ -11,7 +11,9 @@ class SVDAdapter(nn.Module):
         self.rank = rank
         self.scaling = alpha/rank
         self.bias = None if original_bias is None else nn.Parameter(original_bias.clone().detach())
-        self.W_res = W_res.cuda()
+        # Keep W_res on the same device as the adapter parameters.
+        # NOTE: Do not force .cuda() here; this breaks CPU-only / Ray multi-actor setups.
+        self.W_res = W_res
         self.W_res.requires_grad = False #Freeze the residual matrix
 
     def forward(self, x):
@@ -52,7 +54,9 @@ class ConvAdapter(nn.Module):
     """Adapter for Conv2d layers using LoRA, without bias."""
     def __init__(self, original_conv, W_res, A, B, alpha, rank):
         super().__init__()
-        self.W_res = W_res.cuda()
+        # Keep W_res on the same device as the adapter parameters.
+        # NOTE: Do not force .cuda() here; this breaks CPU-only / Ray multi-actor setups.
+        self.W_res = W_res
         self.W_res.requires_grad = False  # Freeze the residual matrix
         self.A = nn.Parameter(A.clone().detach())  # Trainable
         self.B = nn.Parameter(B.clone().detach())  # Trainable
