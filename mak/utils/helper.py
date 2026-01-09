@@ -893,6 +893,15 @@ def get_server(strategy, client_manager, out_file_path, target_acc, num_train_th
             num_train_thread=num_train_thread,
             num_test_thread=num_test_thread,
         )
+    elif isinstance(strategy, PFedMoAPStrategy):
+        return PFedMoAPServer(
+            strategy=strategy,
+            client_manager=client_manager,
+            out_file_path=out_file_path,
+            target_acc=target_acc,
+            num_train_thread=num_train_thread,
+            num_test_thread=num_test_thread,
+        )
     else:
         return ServerSaveData(
             strategy=strategy,

@@ -28,7 +28,7 @@ server:
   num_clients : 10 # total number of clients participating in training
   fraction_evaluate : 1 # fraction of clients to be selected for evaluation
   min_evaluate_clients : 10 # minimum number of clients to be selected for evaluation
-  strategy : FedAvg  #[FedAWA, FedKLSVD, FedAvg, FFALoRA, PFedMoAP, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova]
+  strategy : FedAvg  #[FedAWA, FedKLSVD, FedAvg, FFALoRA, PFedMoAP, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova, FedSVD]
 
 client:
   loss: FocalLoss # [CrossEntropyLoss, FocalLoss]
@@ -49,6 +49,13 @@ peft:
   alpha: 32 #Equal to the rank
   method: lora # ['pissa', 'milora', 'middle', 'fedkls', 'lora', 'ffa_lora', 'pfedmoap']
   bias: True #To send the bias layer(after A/B) to server for aggregation or not
+
+# FedSVD (fed-svd-like) config
+fedsvd_config:
+  mode: "fedavg"       # "fedavg" (aggregate A+B) | "ffa" (aggregate B only)
+  send_deltas: False   # True => clients send deltas; server applies deltas to round-start params
+  agg_flora: False     # (placeholder) requires delta semantics
+  agg_fedex: False     # (placeholder) requires delta semantics
 
 # NEW: Dynamic Data Updates Configuration
 dynamic_data:
