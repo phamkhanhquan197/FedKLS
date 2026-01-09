@@ -13,11 +13,7 @@ from mak.utils.general import _slice_pad_lora_params
 
 
 def generate_rank_map(config: dict, num_clients: int) -> Dict[int, int]:
-    """Generate a deterministic FlexLoRA rank map for all clients.
-
-    The sampling follows config['flex_lora_config']['rank_distribution'].
-    Ensures at least one client uses global_rank.
-    """
+    """Generate deterministic client_id -> rank mapping."""
     flex_cfg = config.get("flex_lora_config", {})
     dist = flex_cfg.get("rank_distribution", [])
     global_rank = int(flex_cfg.get("global_rank", config.get("peft", {}).get("rank", 32)))
@@ -86,6 +82,10 @@ def _inject_lora_adapters_no_svd(
 
     This is used to create a local-rank architecture on the client side while
     respecting the constraint: "SVD must happen on the server, not on clients".
+
+    NOTE: This injection path only works if the model still contains nn.Linear.
+    If the model was already adapted (nn.Linear -> SVDAdapter), use the
+    SVDAdapter rebuild path (_rebuild_svd_adapters_no_svd).
     """
     from mak.models.svd_model import SVDAdapter
 
@@ -132,22 +132,76 @@ def _inject_lora_adapters_no_svd(
     return model
 
 
+def _rebuild_svd_adapters_no_svd(
+    model: torch.nn.Module,
+    base_config: dict,
+    local_rank: int,
+) -> tuple[torch.nn.Module, int]:
+    """Rebuild SVDAdapter modules to `local_rank` without SVD (client-safe)."""
+    from mak.models.svd_model import SVDAdapter
+
+    rank = int(local_rank)
+    alpha = float(base_config.get("peft", {}).get("alpha", rank))
+
+    # Deterministic init if seed is set
+    seed = base_config.get("common", {}).get("seed", None)
+    if seed is not None:
+        torch.manual_seed(int(seed))
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(int(seed))
+
+    rebuilt = 0
+
+    for name, module in list(model.named_modules()):
+        if not isinstance(module, SVDAdapter):
+            continue
+
+        # W_res is a buffer tensor with shape [d_out, d_in]
+        W_res = module.W_res
+        d_out, d_in = int(W_res.shape[0]), int(W_res.shape[1])
+
+        device = W_res.device
+        dtype = W_res.dtype
+
+        A = (torch.randn(d_out, rank, device=device, dtype=dtype) * 0.01)
+        B = torch.zeros(rank, d_in, device=device, dtype=dtype)
+
+        # Preserve bias values if present
+        if getattr(module, "bias", None) is not None:
+            original_bias = module.bias.detach().clone()
+        else:
+            original_bias = None
+
+        new_layer = SVDAdapter(
+            W_res=W_res.detach().clone(),
+            A=A,
+            B=B,
+            alpha=alpha,
+            rank=rank,
+            original_bias=original_bias,
+        )
+
+        # Replace module in parent
+        if "." in name:
+            parent_name, child_name = name.rsplit(".", 1)
+            parent = model.get_submodule(parent_name)
+        else:
+            # Top-level module edge-case
+            parent = model
+            child_name = name
+
+        setattr(parent, child_name, new_layer)
+        rebuilt += 1
+
+    return model, rebuilt
+
+
 def ensure_local_rank_adapters(
     model: torch.nn.Module,
     base_config: dict,
     local_rank: int,
 ) -> torch.nn.Module:
-    """Ensure the given model has FlexLoRA adapters with rank==local_rank.
-
-    IMPORTANT:
-    - Changing rank is an architecture change (Parameter shapes differ).
-    - We must NOT run SVD on the client.
-
-    Strategy:
-    1) If model already has adapters with the desired rank -> OK.
-    2) Otherwise, REBUILD adapter modules (no-SVD init) to match desired rank.
-       The server will later send the correct A/B values which overwrite init.
-    """
+    """Ensure model adapter architecture matches `local_rank` (no client SVD)."""
     desired = int(local_rank)
 
     sd = model.state_dict()
@@ -169,10 +223,23 @@ def ensure_local_rank_adapters(
         except Exception as e:
             log(INFO, f"[FlexLoRA] Adapter inspection failed ({e}); rebuilding adapters (no SVD).")
 
-    else:
-        log(INFO, f"[FlexLoRA] No adapters found; injecting adapters (no SVD) rank={desired}.")
+        # First try rebuilding SVDAdapter modules (the common case when server has
+        # already adapted the model).
+        model, rebuilt = _rebuild_svd_adapters_no_svd(
+            model=model,
+            base_config=base_config,
+            local_rank=desired,
+        )
+        log(INFO, f"[FlexLoRA] Rebuilt {rebuilt} SVDAdapter modules without SVD (rank={desired}).")
+        if rebuilt > 0:
+            return model
 
-    # Rebuild adapters with correct rank without SVD
+        # Fallback: if no SVDAdapter modules were found/rebuilt, try injecting from Linear.
+        log(INFO, f"[FlexLoRA] No SVDAdapter modules found to rebuild; falling back to Linear injection (no SVD).")
+        return _inject_lora_adapters_no_svd(model=model, base_config=base_config, local_rank=desired)
+
+    # No adapters found at all
+    log(INFO, f"[FlexLoRA] No adapters found; injecting adapters (no SVD) rank={desired}.")
     return _inject_lora_adapters_no_svd(model=model, base_config=base_config, local_rank=desired)
 
 

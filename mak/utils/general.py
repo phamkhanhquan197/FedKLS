@@ -104,7 +104,7 @@ def _slice_pad_lora_params(t: torch.Tensor, target_rank: int, param_type: str) -
 
 
 def set_params(
-    model: torch.nn.ModuleList,
+    model: torch.nn.Module,
     params: List[fl.common.NDArrays],
     device: str = "cuda",
     method: str = None,
@@ -118,8 +118,6 @@ def set_params(
     if params is None:
         return  # Skip if parameters is None
 
-    # print(f"len(params): {len(params)}") #108 -> For round > 1 -> this shows # of layers sent by server
-    # print(f"len(model_state.items()): {len(model_state.items())}") #140 all the times -> this shows # of layers in local model
     if len(model_state.items()) == len(params): #Full model update (Round = 1)
         params_dict = zip(model_state.keys(), params)
         state_dict = OrderedDict({k: v.clone().detach().to(device) if isinstance(v, torch.Tensor) else torch.tensor(v, device=device)
@@ -129,9 +127,7 @@ def set_params(
             [p.__setattr__("requires_grad", False) for name, p in model.named_parameters() if name.endswith(".A")]
         return
 
-    # FlexLoRA partial update (Round > 1): must be mapped by deterministic target keys
-    # and rank-adapted for local clients. This branch is isolated and does not affect
-    # other baselines.
+    # FlexLoRA partial update (Round > 1)
     elif method == "flex_lora":
         # Lazy import to avoid circular dependency (helper imports general)
         from mak.utils.helper import get_ffa_target_keys

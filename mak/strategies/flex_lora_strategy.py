@@ -10,25 +10,13 @@ from flwr.common import FitRes, Parameters, Scalar, ndarrays_to_parameters, para
 from flwr.common.logger import log
 from flwr.server.client_proxy import ClientProxy
 from flwr.server.strategy import FedAvg
-from flwr.server.strategy.aggregate import aggregate
-
-
-
 class FlexLoRAStrategy(FedAvg):
-    """FlexLoRA Strategy.
+    """FlexLoRA FedAvg strategy.
 
-    Key constraints:
-    - Strict inheritance: subclass FedAvg.
-    - Math fidelity: client updates -> pad -> aggregate -> SVD -> (A,B) reprojection.
+    Round 1: send full model.
+    Round >1: aggregate partial payload defined by `get_ffa_target_keys(model)`.
 
-    Note: This implementation follows the Phase-2 plan and uses a simplified,
-    model-agnostic approach: it assumes client payload is an ordered list of
-    tensors containing only LoRA factors (A/B) in deterministic sorted-key order.
-
-    For the first engineering iteration, we SVD-merge each corresponding A/B pair
-    independently per tensor pair (A_i, B_i) by reconstructing DeltaW.
-
-    The server returns aggregated parameters as a flat list in the same order.
+    LoRA aggregation is done in ΔW-space: ΔW_i = A_i @ B_i, then SVD(ΔW_agg) on server.
     """
 
     def __init__(self, *, config: dict, model, rank_map: dict[int, int], global_rank: int, **kwargs):
@@ -38,34 +26,11 @@ class FlexLoRAStrategy(FedAvg):
         self.rank_map = rank_map
         self.global_rank = int(global_rank)
 
-        # Cache ordered keys for deterministic A/B mapping from server model
-        self._ab_keys = [k for k in self.model.state_dict().keys() if k.endswith(".A") or k.endswith(".B")]
-        self._ab_keys = sorted(self._ab_keys)
 
     def initialize_parameters(self, client_manager) -> Optional[Parameters]:
         # Send FULL state_dict on round 1 (consistent with project baseline behavior)
         full = [val.detach().cpu().numpy() for val in self.model.state_dict().values()]
         return ndarrays_to_parameters(full)
-
-    def _pad_to_global(self, t: torch.Tensor, key: str) -> torch.Tensor:
-        """Pad A/B tensor to global rank.
-
-        A: [out, r] -> pad columns to [out, R]
-        B: [r, in]  -> pad rows to [R, in]
-        """
-        if key.endswith(".A"):
-            out, r = t.shape
-            if r >= self.global_rank:
-                return t[:, : self.global_rank]
-            pad_cols = self.global_rank - r
-            return torch.nn.functional.pad(t, (0, pad_cols, 0, 0), mode="constant", value=0.0)
-        if key.endswith(".B"):
-            r, inn = t.shape
-            if r >= self.global_rank:
-                return t[: self.global_rank, :]
-            pad_rows = self.global_rank - r
-            return torch.nn.functional.pad(t, (0, 0, 0, pad_rows), mode="constant", value=0.0)
-        return t
 
     def aggregate_fit(
         self,
