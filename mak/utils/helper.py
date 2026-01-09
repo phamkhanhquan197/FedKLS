@@ -5,7 +5,7 @@ import os
 import random
 from datetime import date, datetime
 from logging import INFO
-from typing import Dict
+from typing import Dict, Optional
 
 import flwr as fl
 import numpy as np
@@ -43,6 +43,21 @@ import torch.nn.init as init
 from datasets import load_dataset
 
 
+def _resolve_ray_tmp_dir(config_sim: dict) -> Optional[str]:
+    common_cfg = (config_sim or {}).get("common", {})
+    candidate = (
+        common_cfg.get("ray_tmp_dir")
+        or os.environ.get("FEDKLS_RAY_TMPDIR")
+        or os.environ.get("RAY_TMPDIR")
+        or os.environ.get("TMPDIR")
+    )
+    if not candidate:
+        return None
+    ray_tmp_dir = os.path.abspath(os.path.expanduser(str(candidate)))
+    os.makedirs(ray_tmp_dir, exist_ok=True)
+    return ray_tmp_dir
+
+
 def get_device_and_resources(config_sim):
     # Check if GPU is available
     device = torch.device(
@@ -71,6 +86,31 @@ def get_device_and_resources(config_sim):
         "num_cpus": config_sim["client"]["num_cpus"],
         "num_gpus": config_sim["client"]["num_gpus"] if device.type == "cuda" else 0.0,
     }
+
+    # Ray writes session + spill data under /tmp by default. Allow redirecting this
+    # to a larger disk to avoid GCS/raylet crashes when /tmp is full.
+    if not config_sim["common"].get("multi_node", False):
+        ray_tmp_dir = _resolve_ray_tmp_dir(config_sim)
+        if ray_tmp_dir:
+            ray_init_args["_temp_dir"] = ray_tmp_dir
+            # Only set spilling config if the installed Ray supports it.
+            # Some Ray versions reject unknown kwargs (RuntimeError: Unknown keyword argument(s)).
+            try:
+                import inspect
+                import ray
+
+                if "object_spilling_config" in inspect.signature(ray.init).parameters:
+                    spill_dir = os.path.join(ray_tmp_dir, "spill")
+                    os.makedirs(spill_dir, exist_ok=True)
+                    ray_init_args.setdefault(
+                        "object_spilling_config",
+                        json.dumps(
+                            {"type": "filesystem", "params": {"directory_path": spill_dir}}
+                        ),
+                    )
+            except Exception:
+                pass
+
     if config_sim["common"]["multi_node"]:
         ray_init_args = {}
         ray_init_args["address"] = "auto"

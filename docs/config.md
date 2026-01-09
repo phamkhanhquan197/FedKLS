@@ -14,6 +14,7 @@ The `common` section contains the common configurations used in this framework.
 - `model` : This field specifies the model architecture used in the training process. Currently Implemented models are [ `Net`, `CifarNet`, `SimpleCNN`, `KerasExpCNN`, `MNISTCNN`, `SimpleDNN`, `FMCNNModel`,`FedAVGCNN`,`Resnet18`, `Resnet34`,`ResNet18Pretrained`, `ResNet34Pretrained`,`ResNet18Small`, `ResNet20Small`,`MobileNetV2`,`EfficientNetB0`,`LSTMModel`]. Detailed explination can be found [here](./models.md)
 - `optimizer` : This field specifies the optimizer used in the training process. It could be either `sgd` or `adam`.
 - `seed` : This field fixes the seed for reproducibility
+- `ray_tmp_dir` : (Optional) Directory for Ray session/spill files (defaults to `/tmp`). Set this if `/tmp` is near-full and Ray crashes; can also be provided via env vars `FEDKLS_RAY_TMPDIR` or `RAY_TMPDIR`.
 
 ### Server Section
 The `server` section contains the configurations for the server that coordinates the Federated Learning process.

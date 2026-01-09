@@ -7,6 +7,8 @@ common:
   # dataset: legacy-datasets/banking77
   dirichlet_alpha : 0.05 #dirichlet concentration parameter (only used if data_type is dirchlet-niid)
   target_acc : 0.99
+  # Optional: redirect Ray session/spill files off /tmp (useful when /tmp is nearly full)
+  ray_tmp_dir: /home/ai/tmp
   # model : Qwen/Qwen1.5-0.5B # one among [distilbert-base-uncased, bert-base-uncased, meta-llama/Llama-2-7b-hf, Qwen/Qwen1.5-0.5B, Net, CifarNet, SimpleCNN, KerasExpCNN, MNISTCNN, SimpleDNN, FMCNNModel,FedAVGCNN,Resnet18, Resnet34,ResNet18Pretrained, ResNet34Pretrained,ResNet18Small, ResNet20Small,MobileNetV2,EfficientNetB0,LSTMModel]
   # model: distilbert-base-uncased
   model: Clip
@@ -26,7 +28,7 @@ server:
   num_clients : 10 # total number of clients participating in training
   fraction_evaluate : 1 # fraction of clients to be selected for evaluation
   min_evaluate_clients : 10 # minimum number of clients to be selected for evaluation
-  strategy : PFedMoAP  #[FedAWA, FedKLSVD, FedAvg, FFALoRA, PFedMoAP, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova]
+  strategy : FedKLSVD  #[FedAWA, FedKLSVD, FedAvg, FFALoRA, PFedMoAP, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova]
 
 client:
   loss: FocalLoss # [CrossEntropyLoss, FocalLoss]
