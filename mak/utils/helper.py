@@ -20,21 +20,27 @@ from flwr.common.typing import Scalar
 from flwr_datasets import FederatedDataset
 from flwr_datasets.partitioner import DirichletPartitioner, IidPartitioner
 from torch.utils.data import DataLoader
+from sklearn.model_selection import train_test_split
 
 import mak
 from mak.servers.custom_server import ServerSaveData
 from mak.servers.fedklsvd_server import FedKLSVDServer
+from mak.servers.ffa_lora_server import FFALoRAServer
 from mak.servers.fednova_server import FedNovaServer
 from mak.servers.scaffold_server import ScaffoldServer
+from mak.servers.pfedmoap_server import PFedMoAPServer
 from mak.strategies.fednova_strategy import FedNovaStrategy
 from mak.strategies.scaffold_strategy import ScaffoldStrategy
 from mak.strategies.fedklsvd_strategy import FedKLSVDStrategy
+from mak.strategies.ffa_lora_strategy import FFALoRAStrategy
+from mak.strategies.pfedmoap_strategy import PFedMoAPStrategy
 from mak.utils.dataset_info import dataset_info
 from mak.utils.general import set_params, test, weighted_average
 from mak.models.svd_model import SVDAdapter, ConvAdapter
 import math
 from collections import Counter
 import torch.nn.init as init
+from datasets import load_dataset
 
 
 def get_device_and_resources(config_sim):
@@ -174,7 +180,6 @@ def get_partitioner(config_sim):
     # return train data
     return {"train": partitioner}
 
-
 def get_dataset(config_sim):
     partitioner = get_partitioner(config_sim=config_sim)
     dataset_name = config_sim["common"]["dataset"]
@@ -185,7 +190,72 @@ def get_dataset(config_sim):
         # get test column name
         test_set = dataset_info[dataset_name]["test_set"]
         centralized_testset = fds.load_split(test_set)
-        return fds, centralized_testset
+
+        # get class names for pFedMoAP
+        out_col = dataset_info[dataset_name]["output_column"]
+        feat = centralized_testset.features.get(out_col, None)
+        if feat is not None and hasattr(feat, "names") and feat.names:
+            classnames = list(feat.names)
+        else:
+            num_classes = dataset_info[dataset_name]["num_classes"]
+            classnames = [f"class{i}" for i in range(num_classes)]
+
+        return fds, centralized_testset, classnames
+    
+
+
+# def get_dataset(config_sim):
+#     # partitioner = get_partitioner(config_sim=config_sim)
+#     dataset_name = config_sim["common"]["dataset"]
+#     if dataset_name not in dataset_info.keys():
+#         raise Exception(f"Dataset name should be among : {list(dataset_info.keys())}")
+
+#     # --- Step 1: Load the dataset from Hugging Face ---
+#     raw_dataset = load_dataset(dataset_name)
+
+#     # --- Step 2: Ensure train/test splits exist ---
+#     if "test" in raw_dataset.keys():
+#         log(INFO, f"Found test split in {dataset_name}.")
+#         train_data = raw_dataset["train"]
+#         test_data = raw_dataset["test"]
+#     else: 
+#         log(INFO, f"[INFO] '{dataset_name}' has no test split. Creating 80/20 train-test split...")
+#         full_data = raw_dataset["train"]
+#         label_col = dataset_info[dataset_name]["output_column"]
+
+#         train_indices, test_indices = train_test_split(
+#             range(len(full_data)),
+#             test_size=0.2,
+#             random_state=config_sim["common"]["seed"],
+#             stratify=full_data[label_col],
+#         )
+
+#         train_data = full_data.select(train_indices)
+#         test_data = full_data.select(test_indices)
+
+#     # --- Step 3: Partition the training data ---
+#     partitioner = get_partitioner(config_sim=config_sim)
+
+#     # --- Step 4: Build FederatedDataset only with the training subset ---
+#     fds = FederatedDataset(dataset=train_data, partitioners=partitioner)
+
+
+#     # else:
+#     #     fds = FederatedDataset(dataset=dataset_name, partitioners=partitioner)
+#     #     # get test column name
+#     #     test_set = dataset_info[dataset_name]["test_set"]
+#     #     # if test_set is None:
+#     #     #     log(INFO, f"[INFO] '{dataset_name}' has no test split. Creating 80/20 train-test split...")
+#     #     #     dataset = load_dataset(dataset_name)
+#     #     #     # If dataset is a dict with only 'train'
+#     #     #     if isinstance(dataset, dict) and "train" in dataset:
+#     #     #         dataset = dataset["train"]
+#     #     #     dataset = dataset.train_test_split(test_size=0.2, seed=config_sim["common"]["seed"])
+#     #     #     train_set = dataset["train"]
+#     #     #     test_set = dataset["test"]
+#     #     #     return {"train": train_set, "name": dataset_name}, test_set
+#     #     centralized_testset = fds.load_split(test_set)
+#     return fds, test_data
 
 def extract_linear_layers(model):
     """Return a dict of {layer_name: layer_module} for all linear layers in the model.
@@ -238,7 +308,6 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
         weight_matrix = layer.weight.data
         original_bias = layer.bias.data if layer.bias is not None else None
 
-
         if method == 'lora':
             # Original LoRA: Random initialization without SVD
             if isinstance(layer, torch.nn.Conv2d):
@@ -252,6 +321,87 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
                 B = torch.zeros(rank, d_in, device=weight_matrix.device)  # Zero init
                 W_res = weight_matrix
             log(INFO, f"Layer {name}: Applied LoRA with rank {rank}.")
+
+        elif method == 'ffa_lora':
+            # FFA-LoRA: Initialize A (configurable), B = 0, freeze A forever (external control)
+            ffa_cfg = config.get("ffa_lora_config", {})
+            seed = config["common"]["seed"]
+            init_method = ffa_cfg.get("init_method", "kaiming")
+
+            if seed is not None:
+                torch.manual_seed(seed)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(seed)
+
+            if init_method not in {"kaiming", "gaussian", "orthogonal", "svd"}:
+                raise ValueError(
+                    f"Unknown init_method: {init_method}. Options: kaiming | gaussian | orthogonal | svd"
+                )
+            # --------------------------------------------------
+            # Conv2d
+            # --------------------------------------------------
+            if isinstance(layer, torch.nn.Conv2d):
+                c_out, c_in, k1, k2 = weight_matrix.shape
+                d_in = c_in * k1 * k2
+                W_flat = weight_matrix.view(c_out, -1)
+
+                # A init
+                if init_method =="svd":
+                    U, S, Vt = torch.linalg.svd(W_flat, full_matrices=False)
+                    max_possible_rank = S.size(0)
+                    if rank > max_possible_rank:
+                        log(INFO, f"Warning: Requested rank {rank} for layer {name} > max possible rank {max_possible_rank}.")
+                        rank = max_possible_rank
+                    U_select = U[:, :rank]
+                    S_select = S[:rank]
+                    Vt_select = Vt[:rank, :]
+                    
+                    A = U_select @ torch.diag(torch.sqrt(S_select))  # Shape: [c_out, rank]
+                    B = torch.diag(torch.sqrt(S_select)) @ Vt_select  # Shape: [rank, d_in]
+                    W_res = weight_matrix - (U_select @ torch.diag(S_select) @ Vt_select).view(c_out, c_in, k1, k2)
+                else:
+                    A = torch.empty(c_out, rank, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    if init_method == "kaiming":
+                        init.kaiming_normal_(A, mode="fan_out", nonlinearity="relu")
+                    elif init_method == "gaussian":
+                        init.normal_(A, mean=0.0, std=0.01)
+                    elif init_method == "orthogonal":
+                        init.orthogonal_(A)
+                    B = torch.zeros(rank, d_in, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    W_res = weight_matrix
+            # --------------------------------------------------
+            # Linear
+            # --------------------------------------------------
+            else:
+                d_out, d_in = weight_matrix.shape
+
+                # A init
+                if init_method =="svd":
+                    U, S, Vt = torch.linalg.svd(weight_matrix, full_matrices=False)
+                    max_possible_rank = S.size(0)
+                    if rank > max_possible_rank:
+                        log(INFO, f"Warning: Requested rank {rank} for layer {name} > max possible rank {max_possible_rank}.")
+                        rank = max_possible_rank
+                    U_select = U[:, :rank]
+                    S_select = S[:rank]
+                    Vt_select = Vt[:rank, :]
+                    
+                    A = U_select @ torch.diag(torch.sqrt(S_select))  # Shape: [d_out, rank]
+                    B = torch.diag(torch.sqrt(S_select)) @ Vt_select  # Shape: [rank, d_in]
+                    W_res = weight_matrix - (U_select @ torch.diag(S_select) @ Vt_select)
+                else:
+                    A = torch.empty(d_out, rank, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    if init_method == "kaiming":
+                        init.kaiming_normal_(A, mode="fan_out", nonlinearity="relu")
+                    elif init_method == "gaussian":
+                        init.normal_(A, mean=0.0, std=0.01)
+                    elif init_method == "orthogonal":
+                        init.orthogonal_(A)
+                    B = torch.zeros(rank, d_in, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    W_res = weight_matrix
+
+            log(INFO, f"Layer {name}: Applied FFA-LoRA with rank {rank} (A init={init_method}, B=zero, A frozen).")
+
         else:
             if isinstance(layer, torch.nn.Conv2d): #Conv2d layer SVD
                 # weight_matrix = weight_matrix.view(weight_matrix.size(0), -1)  # Flatten Conv2d weights
@@ -265,7 +415,6 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
                     log(INFO, f"Warning: Requested rank {rank} for layer {name} > max possible rank {max_possible_rank}.")
                     rank = max_possible_rank
                 
-
                 # Select components based on method
                 if method == 'pissa':
                     # Principal component as adapter (PiSSA)
@@ -298,7 +447,7 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
                 else:
                     raise ValueError(f"Unknown method: {method}")
             
-                # Construct A and B for this (i,j) position
+                # Construct A and B matrices for Conv2d layer 
                 W_res = weight_matrix - (U_select @ torch.diag(S_select) @ Vt_select).view(c_out, c_in, k1, k2)
                 A = U_select @ torch.diag(torch.sqrt(S_select))  # Shape: [c_out, rank]
                 B = torch.diag(torch.sqrt(S_select)) @ Vt_select  # Shape: [rank, c_in * k1 * k2]
@@ -361,6 +510,13 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
         else:
             new_layer = SVDAdapter(W_res=W_res, A=A, B=B, alpha=alpha, rank=rank, original_bias=original_bias)
         
+        # Freeze A for FFA-LoRA (external control)
+        if method == "ffa_lora":
+            try:
+                new_layer.A.requires_grad = False
+            except Exception as e:
+                log(INFO, f"Warning: Could not freeze A for layer {name}: {e}")
+
         # Split layer name and replace the original layer
         parent_name, child_name = name.rsplit(".", 1)
         parent = model.get_submodule(parent_name)
@@ -404,7 +560,6 @@ def compute_KL_divergence(client_distributions: dict, num_classes: int) -> dict:
 
     return kl_normalized  
 
-
 def compute_client_distributions(config, dataset, num_clients: int) -> dict:
     """
     Compute the label distribution for each client in the federated dataset.
@@ -420,25 +575,51 @@ def compute_client_distributions(config, dataset, num_clients: int) -> dict:
     
     log(INFO, "=>>>>> CLASS DISTRIBUTIONS OF ALL CLIENTS <<<<<<=")
     for cid in range(num_clients):
-        client_data = dataset.load_partition(cid)
+        if config["common"]["dataset"] == "pranavmr/MM-IMDb":
+            client_data = dataset[cid]["train"]
+        else:
+            client_data = dataset.load_partition(cid)
         dataset_name = config["common"]["dataset"]
         output_column = dataset_info[dataset_name]["output_column"]
         labels = [item[output_column] for item in client_data]
         client_distributions[cid] = dict(sorted(Counter(labels).items()))
         log(INFO, f"Client {cid} ({len(client_distributions[cid])} classes, {len(client_data)} samples) : {client_distributions[cid]}")
+    log(INFO, f"Total samples from all clients: {sum([sum(dist.values()) for dist in client_distributions.values()])}")
     log(INFO, "*" * 150)
     
     return client_distributions
 
-def get_model(config, shape):
+def get_model(config, shape, classnames=None):
     model_name = config["common"]["model"]
     # get num_classes
     dataset_name = config["common"]["dataset"]
     num_classes = dataset_info[dataset_name]["num_classes"]
 
+    TEXT_ONLY_DATASETS = {"SetFit/20_newsgroups", "legacy-datasets/banking77", "fancyzhx/dbpedia_14"}
+    # PFedMoAP CLIP guard
+    if model_name == "clip":
+        if dataset_name in TEXT_ONLY_DATASETS:
+            raise ValueError(f"PFedMoAP CLIP requires image dataset, got text dataset: {dataset_name}")
+
+        pf = config["pfedmoap_config"]
+        if classnames is None:
+            classnames = [f"class{i}" for i in range(num_classes)]
+        model = getattr(__import__("mak.models", fromlist=[model_name]), model_name)(
+            num_classes=num_classes,
+            input_shape=shape,
+            backbone_name=pf.get("backbone_name", "ViT-B/32"),
+            classnames=classnames,
+            prompt_len=pf["prompt_len"],
+            num_experts=pf.get("num_experts", 4),
+            dgating=pf["dgating"],
+            gating_heads=pf.get("heads", pf.get("gating_heads", 4)),
+            lambda_local=pf.get("lambda_local", 1.0),
+            freeze_text=True,
+        )
+        return model
     # check if model is from huggingface
-    if model_name in ["distilbert-base-uncased", "Qwen/Qwen1.5-0.5B"]:  # Add more as needed
-        from transformers import AutoModelForSequenceClassification, BitsAndBytesConfig
+    elif model_name in ["distilbert-base-uncased", "Qwen/Qwen1.5-0.5B", "openai/clip-vit-base-patch32"""]:  # Add more as needed
+        from transformers import AutoModelForSequenceClassification, BitsAndBytesConfig, CLIPModel
         if model_name == "Qwen/Qwen1.5-0.5B": #Need to check again when applying the quantization -> still error
             quantization_8_bit_config = BitsAndBytesConfig(
                 load_in_8bit=True,
@@ -459,6 +640,27 @@ def get_model(config, shape):
             # Set pad_token_id to eos_token_id
             if base_model.config.pad_token_id is None:
                 base_model.config.pad_token_id = base_model.config.eos_token_id
+        elif model_name == "openai/clip-vit-base-patch32": #For multimodal dataset MM-IMDB
+            clip_model = CLIPModel.from_pretrained(model_name)
+            class CustomCLIP(torch.nn.Module):
+                def __init__(self):
+                    super().__init__()
+                    self.vision_model = clip_model.vision_model
+                    self.text_model = clip_model.text_model
+                    self.visual_projection = clip_model.visual_projection
+                    self.text_projection = clip_model.text_projection
+                    embed_dim = clip_model.config.projection_dim #512
+                    self.classifier = torch.nn.Linear(embed_dim*2, num_classes) # Concatenate vision + text embeds
+                def forward(self, pixel_values, input_ids, attention_mask):
+                    vision_outputs = self.vision_model(pixel_values=pixel_values)
+                    text_outputs = self.text_model(input_ids=input_ids, attention_mask=attention_mask)
+                    vision_embeds = self.visual_projection(vision_outputs.pooler_output)
+                    text_embeds = self.text_projection(text_outputs.pooler_output)
+                    # Concatenate vision and text embeddings
+                    combined = torch.cat([vision_embeds, text_embeds], dim=1)
+                    logits = self.classifier(combined)
+                    return logits
+            base_model = CustomCLIP()
         else:
             base_model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=num_classes, device_map="auto")
 
@@ -487,8 +689,24 @@ def get_evaluate_fn(
     def evaluate(
         server_round: int, parameters: fl.common.NDArrays, config: Dict[str, Scalar]
     ):  
-        ## model = get_model(config=config_sim, shape=shape)
-        set_params(model, parameters)
+        
+        strategy = config_sim.get("server", {}).get("strategy", "")
+        method = config_sim.get("peft", {}).get("method", "")
+        bias = config_sim.get("peft", {}).get("bias", "")
+
+        if strategy == "PFedMoAP" or method == "pfedmoap":
+            if len(parameters) != 1:
+                raise ValueError(f"PFedMoAP centralized eval expects 1 prompt, got {len(parameters)}")
+
+            prompt = torch.from_numpy(np.asarray(parameters[0])).to(device=device)
+            # Use model API directly
+            if hasattr(model, "set_prompt"):
+                model.set_prompt(prompt)
+            if hasattr(model, "clear_nonlocal"):
+                model.clear_nonlocal()
+        else:
+            ## model = get_model(config=config_sim, shape=shape)
+            set_params(model, parameters, method=method, bias=bias)
 
         model.to(device)
 
@@ -561,7 +779,6 @@ def save_simulation_history(hist: fl.server.history.History, path):
             c_rnd = f1[0]
             f1_score_centralized_dict[c_rnd] = f1[1]
 
-
     if len(metrics_distributed_fit) != 0:
         pass  # TODO  check its implemetation later
 
@@ -618,6 +835,24 @@ def get_server(strategy, client_manager, out_file_path, target_acc, num_train_th
             client_manager=client_manager,
             out_file_path=out_file_path,
             target_acc=target_acc,
+        )
+    elif isinstance(strategy, FFALoRAStrategy):
+        return FFALoRAServer(
+            strategy=strategy,
+            client_manager=client_manager,
+            out_file_path=out_file_path,
+            target_acc=target_acc,
+            num_train_thread=num_train_thread,
+            num_test_thread=num_test_thread,
+        )
+    elif isinstance(strategy, PFedMoAPStrategy):
+        return PFedMoAPServer(
+            strategy=strategy,
+            client_manager=client_manager,
+            out_file_path=out_file_path,
+            target_acc=target_acc,
+            num_train_thread=num_train_thread,
+            num_test_thread=num_test_thread,
         )
     else:
         return ServerSaveData(
@@ -683,10 +918,31 @@ def get_strategy(
             "test_data": test_data,
             "apply_transforms_test": apply_transforms_test,
         },
+        "FFALoRA": {
+            "config": config,
+        },
+        "PFedMoAP": {
+            "config": config,
+        },
         "PowD": {
             "candidate_client_set": config["powd_config"]["candidate_client_set"],
         },
     } 
+
+    if STRATEGY == "PFedMoAP":
+        prompt_len = config["pfedmoap_config"]["prompt_len"]
+        
+        prompt_dim = int(model.prompt_learner.ctx.shape[1])
+        config["pfedmoap_config"]["prompt_dim"] = prompt_dim 
+
+        # init global prompt
+        prompt0 = (0.02 * np.random.randn(prompt_len, prompt_dim)).astype(np.float32)
+        init_params = fl.common.ndarrays_to_parameters([prompt0])
+    else:
+        init_params = fl.common.ndarrays_to_parameters(
+            [val.cpu().numpy() for _, val in model.state_dict().items()]
+        )
+
     return getattr(__import__("mak.strategies", fromlist=[STRATEGY]), STRATEGY)(
         fraction_fit=FRACTION_FIT,
         fraction_evaluate=FRACTION_EVAL,
@@ -705,8 +961,7 @@ def get_strategy(
         evaluate_metrics_aggregation_fn=weighted_average,
         on_fit_config_fn=get_fit_config_fn(config_sim=config),
         on_evaluate_config_fn=get_evaluate_config_fn(config_sim=config),
-        initial_parameters=fl.common.ndarrays_to_parameters(
-            [val.cpu().numpy() for _, val in model.state_dict().items()]),
+        initial_parameters=init_params,
         **kwargs.get(STRATEGY, {}),
     )
 
@@ -735,12 +990,11 @@ def get_config(file_path):
 def get_fit_config_fn(config_sim):
     def fit_config(server_round: int):
         """Return training configuration dict for each round.
-
         passes the current round number to the client
         """
         config = {
             "round": server_round,
-            "current_round": server_round,  # NEW: Add current_round for dynamic data updates
+            "current_round": server_round, #Add current_round for dynamic data updates
             "batch_size": config_sim["client"]["batch_size"],
             "epochs": config_sim["client"]["epochs"],
             "lr": config_sim["client"]["lr"],
@@ -753,7 +1007,6 @@ def get_fit_config_fn(config_sim):
         return config
 
     return fit_config
-
 
 def get_evaluate_config_fn(config_sim):
     def evaluate_config(server_round: int):
@@ -768,7 +1021,6 @@ def get_evaluate_config_fn(config_sim):
         return config
     
     return evaluate_config
-
 
 def get_mode_and_shape(partition):
     data_set_keys = list(partition.features.keys())
@@ -840,7 +1092,6 @@ def get_optimizer(model, client_config):
             momentum=client_config["sgd_momentum"],
         )
 
-
 # for fedlaw
 def get_size_weights(federated_dataset, num_clients):
     sample_size = []
@@ -848,3 +1099,4 @@ def get_size_weights(federated_dataset, num_clients):
         sample_size.append(len(federated_dataset.load_partition(i)))
     size_weights = [i / sum(sample_size) for i in sample_size]
     return size_weights
+

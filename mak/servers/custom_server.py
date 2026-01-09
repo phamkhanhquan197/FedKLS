@@ -189,7 +189,7 @@ class ServerSaveData:
             except (KeyError, TypeError, AttributeError):
                 global_accuracy = None
                 global_f1 = None
-            # log(INFO, f"Accuracy: {acc}")
+
             if self.out_file_path is not None:
                 field_names = ["round", "global_accuracy", "global_f1_score", "global_loss", "local_accuracy", "local_f1", "local_loss", "processing_time", "upload_gb", "download_gb"]
                 row_dict = {
@@ -208,7 +208,6 @@ class ServerSaveData:
                     dictwriter_object = csv.DictWriter(f, fieldnames=field_names)
                     dictwriter_object.writerow(row_dict)
                     f.close()
-            # Safely check target accuracy - handle None case
             if global_accuracy is not None and global_accuracy >= float(self.target_acc):
                 log(
                     INFO,
@@ -234,8 +233,7 @@ class ServerSaveData:
         self,
         server_round: int,
         timeout: Optional[float],
-        curr_round_start_time: float,
-    ) -> Optional[Tuple[Optional[float], Dict[str, Scalar], EvaluateResultsAndFailures]]:
+        curr_round_start_time: float,) -> Optional[Tuple[Optional[float], Dict[str, Scalar], EvaluateResultsAndFailures]]:
         """Validate current global model on a number of clients."""
         # Get clients and their respective instructions from strategy
         client_instructions = self.strategy.configure_evaluate(
@@ -337,21 +335,6 @@ class ServerSaveData:
             timeout=timeout,
             num_threads=self.num_train_thread,
         )
-        
-        # DEBUG: Remove after debugging
-        log(INFO, f"Round {server_round}: fit_clients() called with {len(client_instructions)} clients")
-        log(INFO, f"Round {server_round}: Received {len(results)} results, {len(failures)} failures")
-        assert len(results) > 0, f"No results received in round {server_round}"
-        if len(failures) > 0:
-            log(WARNING, f"Round {server_round}: {len(failures)} failures detected!")
-        
-        # DEBUG: Remove after debugging - Check parameters received from clients
-        for client_proxy, fit_res in results:
-            assert fit_res.parameters is not None, f"Round {server_round}: Client {client_proxy.cid} returned None parameters!"
-            assert fit_res.parameters.tensors, f"Round {server_round}: Client {client_proxy.cid} returned empty parameters.tensors!"
-            param_size = sum(len(p) for p in fit_res.parameters.tensors) / 1e6  # MB
-            log(INFO, f"Round {server_round}: Client {client_proxy.cid} returned {len(fit_res.parameters.tensors)} parameters, size: {param_size:.2f} MB")
-            assert param_size > 0, f"Round {server_round}: Client {client_proxy.cid} returned zero-size parameters!"
 
         # # ------------------- START: Print client weight shapes -------------------
         # log(INFO, "--- Client Weight Shapes Received (Round %s) ---", server_round)
@@ -405,25 +388,11 @@ class ServerSaveData:
                 client_id, train_samples, num_class, class_dist) 
 
         # Standard aggregation for non-LoRA models
-        # DEBUG: Remove after debugging - Check parameters before aggregation
-        old_param_hash = hash(tuple(p for p in self.parameters.tensors)) if self.parameters.tensors else None
-        
         parameters_aggregated, metrics_aggregated = self.strategy.aggregate_fit(
             server_round, results, failures
         )
-        
-        # DEBUG: Remove after debugging - Check if parameters changed after aggregation
-        if parameters_aggregated is not None and parameters_aggregated.tensors:
-            new_param_hash = hash(tuple(p for p in parameters_aggregated.tensors))
-            if old_param_hash == new_param_hash:
-                log(WARNING, f"Round {server_round}: Server parameters did NOT change after aggregation!")
-                raise ValueError(f"Server parameters unchanged in round {server_round}")
-            else:
-                log(INFO, f"Round {server_round}: Server parameters updated successfully ✓")
-        else:
-            log(WARNING, f"Round {server_round}: parameters_aggregated is None or empty!")
-        
-        ##Check how many tensor the model performs aggregating
+
+        # Check how many tensor the model performs aggregating
         # aggregated_ndarrays = parameters_to_ndarrays(parameters_aggregated)
         # log(INFO, f"Aggregated parameters ({len(aggregated_ndarrays)} tensors):")
         # for i, arr in enumerate(aggregated_ndarrays):

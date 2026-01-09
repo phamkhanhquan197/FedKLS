@@ -6,6 +6,9 @@ from mak.clients.fedprox_client import FedProxClient
 from mak.clients.scaffold_client import ScaffoldClient
 from mak.clients.fedklsvd_client import FedKLSVDClient
 from mak.clients.fedawa_client import FedAWAClient
+from mak.clients.ffa_lora_client import FFALoRAClient
+from mak.clients.pfedmoap_client import PFedMoAPClient
+
 from logging import INFO
 from flwr.common.logger import log
 
@@ -17,9 +20,10 @@ def get_client_fn(
     apply_transforms,
     save_dir,
     kl_norm_dict: dict = None, #Precomputed KL divergence values from server, if available
-    data_scheduler=None,  # NEW: DynamicDataScheduler for round-aware allocation
+    data_scheduler = None, # NEW: DynamicDataScheduler for round-aware allocation
+    bias = None,
 ):
-    strategy = config_sim["server"]["strategy"].lower()
+    strategy = config_sim["server"]["strategy"]
     client_class = get_client_class(strategy)
     num_clients = config_sim["server"]["num_clients"]
     method = config_sim["peft"]["method"]
@@ -52,8 +56,8 @@ def get_client_fn(
         if data_scheduler is not None:
             trainset, valset = data_scheduler.get_client_round_datasets(
                 client_id=int(cid),
-                round_num=1,  # Initial round
-                apply_transforms=apply_transforms
+                round_num=1, #Initial round
+                apply_transforms=apply_transforms,
             )
         else:
             # Fallback to old approach
@@ -73,10 +77,11 @@ def get_client_fn(
             config_sim=config_sim, 
             device=device,
             save_dir=save_dir,
-            kl_norm=kl_norm,
-            dataset=dataset,                 # NEW: Pass dataset reference
-            apply_transforms=apply_transforms, # NEW: Pass transform function
-            data_scheduler=data_scheduler,   # NEW: Pass scheduler
+            kl_norm=kl_norm,  
+            dataset=dataset,
+            apply_transforms=apply_transforms,
+            data_scheduler=data_scheduler, # NEW: DynamicDataScheduler for round-aware allocation
+            bias=bias,
         )
         return client.to_client()
     
@@ -85,15 +90,19 @@ def get_client_fn(
 
 
 def get_client_class(strategy: str):
-    if strategy == "fedprox":
+    if strategy == "FedProx":
         return FedProxClient
-    elif strategy == "scaffold":
+    elif strategy == "Scaffold":
         return ScaffoldClient
-    elif strategy == "fednova":
+    elif strategy == "FedNova":
         return FedNovaClient
-    elif strategy == "fedklsvd":
+    elif strategy == "FedKLSVD":
         return FedKLSVDClient
-    elif strategy == "fedawa":
+    elif strategy == "FedAWA":
         return FedAWAClient
+    elif strategy == "FFALoRA":
+        return FFALoRAClient
+    elif strategy == "PFedMoAP":
+        return PFedMoAPClient
     else:
         return FedAvgClient

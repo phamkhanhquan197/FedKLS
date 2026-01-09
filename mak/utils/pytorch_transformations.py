@@ -187,3 +187,29 @@ class TransformationPipeline:
             )
         else:
             return self.apply_transforms_default, self.apply_transforms_test
+
+class CLIPTransformationPipeline:
+    def __init__(self, dataset_name, img_size=224):
+        self.dataset_name = dataset_name
+        self.feature_key = dataset_info[self.dataset_name]["feature_key"]
+        self.img_size = img_size
+
+    def apply_transform(self, batch):
+        # CLIP standard normalization
+        pytorch_transforms = Compose(
+            [
+                Lambda(lambda img: img.convert("RGB") if img.mode != "RGB" else img),
+                Resize(self.img_size, interpolation=3),
+                CenterCrop(self.img_size),
+                ToTensor(),
+                Normalize(
+                    mean=(0.48145466, 0.4578275, 0.40821073),
+                    std=(0.26862954, 0.26130258, 0.27577711),
+                ),
+            ]
+        )
+        batch[self.feature_key] = [pytorch_transforms(img) for img in batch[self.feature_key]]
+        return batch
+
+    def get_transformations(self):
+        return self.apply_transform, self.apply_transform
