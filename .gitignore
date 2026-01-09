@@ -169,3 +169,6 @@ dataset/
 *.sh
 ./config.yaml
 config.yaml
+
+# Ignore .vscode
+.vscode/

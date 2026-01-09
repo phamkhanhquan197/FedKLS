@@ -675,7 +675,6 @@ def get_model(config, shape, classnames=None):
                 model_name,
                 num_labels=num_classes,
                 # quantization_config=quantization_8_bit_config,
-                device_map="auto",
             )
             # Set pad_token_id to eos_token_id
             if base_model.config.pad_token_id is None:
@@ -702,7 +701,7 @@ def get_model(config, shape, classnames=None):
                     return logits
             base_model = CustomCLIP()
         else:
-            base_model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=num_classes, device_map="auto")
+            base_model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=num_classes)
 
         return base_model
 
