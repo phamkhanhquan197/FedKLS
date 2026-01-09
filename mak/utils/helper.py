@@ -977,6 +977,22 @@ def get_strategy(
         },
     } 
 
+    # FedSVD configuration (matches config.yaml:fedsvd_config)
+    # NOTE: The strategy can aggregate subsets (LoRA A/B) only if it can map
+    # incoming ndarrays to parameter names. For standard PyTorch models we can
+    # derive names from `model.state_dict()`. For other protocols, the strategy
+    # falls back to aggregating all arrays.
+    if STRATEGY == "FedSVD":
+        fedsvd_cfg = config.get("fedsvd_config", {}) or {}
+        kwargs["FedSVD"] = {
+            "mode": fedsvd_cfg.get("mode", "fedavg"),
+            "send_deltas": bool(fedsvd_cfg.get("send_deltas", False)),
+            "agg_flora": bool(fedsvd_cfg.get("agg_flora", False)),
+            "agg_fedex": bool(fedsvd_cfg.get("agg_fedex", False)),
+            # Provide parameter names so the strategy can select LoRA A/B.
+            "param_name_fn": (lambda: list(model.state_dict().keys())),
+        }
+
     if STRATEGY == "PFedMoAP":
         prompt_len = config["pfedmoap_config"]["prompt_len"]
         

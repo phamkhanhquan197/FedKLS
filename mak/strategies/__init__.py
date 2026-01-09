@@ -10,6 +10,7 @@ from mak.strategies.ffa_lora_strategy import FFALoRAStrategy as FFALoRA
 from mak.strategies.pfedmoap_strategy import PFedMoAPStrategy as PFedMoAP
 
 # FedSVD: FedAvg-like strategy for SVD/adapter-based finetuning
+# Expose as `FedSVD` so config can use: server.strategy: FedSVD
 from mak.strategies.fedsvd_strategy import FedSVDStrategy as FedSVD
 
 # FedPOE: placeholder (TF/Keras upstream implementation under 3rd-party/Fed-POE)

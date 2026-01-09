@@ -123,23 +123,40 @@ class FedSVDStrategy(FedAvg):
     ) -> List[np.ndarray]:
         """Aggregate ndarrays with selection mask based on parameter names."""
 
+        # Clients in this repo often send *partial* parameter lists when PEFT is enabled.
+        # That means `len(weights[i])` can differ across clients and also differ from
+        # `len(names)` (which comes from the full `model.state_dict()` on the server).
+        #
+        # To avoid misalignment and IndexError, we only aggregate indices that are
+        # present for *all* clients. For the rest we emit:
+        # - zeros (delta_mode) so base weights stay unchanged
+        # - first-available tensor (param_mode) as a best-effort fallback
+        #
+        # The robust solution is to also send parameter *names* from clients; but until
+        # then, this keeps the simulation running and preserves semantics when clients
+        # return identical partial vectors.
+        min_len = min(len(w) for w in weights) if weights else 0
+
         # Fall back to plain FedAvg if we don't have parameter names.
         # (Without names we can't reliably select LoRA A/B subsets.)
         if names is None:
             total = float(sum(num_examples))
             ratios = [n / total for n in num_examples]
-            avg = [
-                sum(ratios[i] * w[i_layer] for i, w in enumerate(weights))
-                for i_layer in range(len(weights[0]))
-            ]
+            if min_len == 0:
+                return []
+            avg = [sum(ratios[i] * weights[i][j] for i in range(len(weights))) for j in range(min_len)]
             if delta_mode and self._round_start is not None and len(self._round_start) == len(avg):
                 # If we can't select by name, treat all layers as deltas.
                 return avg
             return avg
 
+        # If we have names but some clients returned fewer tensors than `names`,
+        # clamp the aggregation to the intersection prefix to avoid index errors.
+        names_eff = names[:min_len]
+
         adapter_prefixes = {
             nm.rsplit(".", 1)[0]
-            for nm in names
+            for nm in names_eff
             if nm.endswith(".A") or nm.endswith(".B")
         }
 
@@ -157,7 +174,7 @@ class FedSVDStrategy(FedAvg):
             # ffa
             return _is_lora_b(nm)
 
-        sel = [should_aggregate(nm) for nm in names]
+        sel = [should_aggregate(nm) for nm in names_eff]
 
         total = float(sum(num_examples))
         ratios = [n / total for n in num_examples]
