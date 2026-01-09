@@ -403,9 +403,43 @@ class DynamicDataScheduler:
                     trainset = partition.select(train_indices_final)
                     valset = partition.select(val_indices_final)
                 else:
-                    # No new data: use all available data for training, empty validation
-                    trainset = partition.select(train_indices)
-                    valset = partition.select([])
+                    # No new data: keep validation set from previous rounds
+                    # Get accumulated validation indices from all previous rounds (round 1 to round_num-1)
+                    # Start with round 1 validation
+                    round1_train_indices = self.get_client_round_indices(client_id, 1)
+                    round1_split_seed = self.seed + client_id * 1000 + 1
+                    round1_np_rng = np.random.RandomState(round1_split_seed)
+                    round1_shuffled = round1_train_indices.copy()
+                    round1_np_rng.shuffle(round1_shuffled)
+                    round1_val_size = max(1, int(len(round1_train_indices) * self.val_ratio))
+                    round1_val_indices = sorted(round1_shuffled[:round1_val_size])
+                    
+                    # Accumulate validation from all previous rounds
+                    all_val_indices = set(round1_val_indices)
+                    for prev_round in range(2, round_num):
+                        prev_prev_train = self.get_client_round_indices(client_id, prev_round - 1)
+                        prev_curr_train = self.get_client_round_indices(client_id, prev_round)
+                        prev_prev_set = set(prev_prev_train)
+                        prev_curr_set = set(prev_curr_train)
+                        prev_new = sorted(list(prev_curr_set - prev_prev_set))
+                        
+                        if len(prev_new) > 0:
+                            prev_split_seed = self.seed + client_id * 1000 + prev_round
+                            prev_np_rng = np.random.RandomState(prev_split_seed)
+                            prev_shuffled = prev_new.copy()
+                            prev_np_rng.shuffle(prev_shuffled)
+                            prev_val_size = max(1, int(len(prev_new) * self.val_ratio))
+                            prev_val_indices = sorted(prev_shuffled[:prev_val_size])
+                            all_val_indices.update(prev_val_indices)
+                    
+                    # Training set: all train_indices EXCEPT validation indices
+                    train_indices_final = sorted(list(train_indices_set - all_val_indices))
+                    
+                    # Validation set: accumulated from all previous rounds (round 1 to round_num-1, no new data this round)
+                    val_indices_final = sorted(list(all_val_indices))
+                    
+                    trainset = partition.select(train_indices_final)
+                    valset = partition.select(val_indices_final)
         
         if apply_transforms:
             trainset = trainset.with_transform(apply_transforms)
