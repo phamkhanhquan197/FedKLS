@@ -14,17 +14,17 @@ common:
   seed : 123  #123 456 789
   multi_node : False
   save_log : True
-  num_train_thread: 5 #Save the most memory when setting to 1
-  num_test_thread: 5
+  num_train_thread: 1 #Save the most memory when setting to 1
+  num_test_thread: 1
 
 server:
   num_rounds : 50
   address : 127.0.0.1
   fraction_fit : 1 # fraction of clients to be selected for training
-  min_fit_clients : 3 # minimum number of clients to be selected for training
-  num_clients : 3 # total number of clients participating in training
+  min_fit_clients : 10 # minimum number of clients to be selected for training
+  num_clients : 10 # total number of clients participating in training
   fraction_evaluate : 1 # fraction of clients to be selected for evaluation
-  min_evaluate_clients : 3 # minimum number of clients to be selected for evaluation
+  min_evaluate_clients : 10 # minimum number of clients to be selected for evaluation
   strategy : FedSALoRA  #[FedAWA, FedKLSVD, FedAvg, FFALoRA, PFedMoAP, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova]
 
 client:
@@ -34,11 +34,11 @@ client:
   test_batch_size : 32
   lr: 0.01 #  [0.00002, 0.0001,0.001, 0.005, 0.01, 0.1, 0.2] 0.005->distilbert-base-uncased, 0.001->bert-base-uncased, 0.0001->Qwen/Qwen1.5-0.5B
   save_train_res : True
-  total_cpus : 70 # no. of CPU cores that are assigned for all simulation
+  total_cpus : 4 # no. of CPU cores that are assigned for all simulation
   total_gpus : 1 # no. of GPU's assigned for whole simulation
   gpu : True  # True or Faslse, Use GPU for training or not.
   num_cpus : 4  # no. of CPU cores that are assigned for each actor
-  num_gpus : 0.05 #  no. of GPU that are assigned for each actor (it can be fraction value as well)
+  num_gpus : 1 #  no. of GPU that are assigned for each actor (it can be fraction value as well)
 
 peft:
   enabled: True #False = FFT, do not set method = fedkls when running FFT, pfedmoap do not run with peft=True
