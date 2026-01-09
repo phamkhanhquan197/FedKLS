@@ -5,7 +5,7 @@ common:
   dataset : SetFit/20_newsgroups # data_set = data set used one among ['kkim0451/UPMC-Food101', 'pranavmr/MM-IMDb','SetFit/20_newsgroups', 'legacy-datasets/banking77', 'fancyzhx/dbpedia_14', 'cifar10', 'cifar100', 'mnist', 'fashion_mnist', 'sasha/dog-food', 'zh-plus/tiny-imagenet', 'Mike0307/MNIST-M', 'flwrlabs/usps']
   # dataset: SetFit/20_newsgroups
   # dataset: legacy-datasets/banking77
-  dirichlet_alpha : 0.05 #dirichlet concentration parameter (only used if data_type is dirchlet-niid)
+  dirichlet_alpha : 0.5 #dirichlet concentration parameter (only used if data_type is dirchlet-niid)
   target_acc : 0.99
   # model : Qwen/Qwen1.5-0.5B # one among [distilbert-base-uncased, bert-base-uncased, meta-llama/Llama-2-7b-hf, Qwen/Qwen1.5-0.5B, Net, CifarNet, SimpleCNN, KerasExpCNN, MNISTCNN, SimpleDNN, FMCNNModel,FedAVGCNN,Resnet18, Resnet34,ResNet18Pretrained, ResNet34Pretrained,ResNet18Small, ResNet20Small,MobileNetV2,EfficientNetB0,LSTMModel]
   model: distilbert-base-uncased
@@ -29,10 +29,10 @@ server:
 
 client:
   loss: FocalLoss # [CrossEntropyLoss, FocalLoss]
-  epochs : 1
+  epochs : 10
   batch_size : 32
   test_batch_size : 32
-  lr: 0.01 #  [0.00002, 0.0001,0.001, 0.005, 0.01, 0.1, 0.2] 0.005->distilbert-base-uncased, 0.001->bert-base-uncased, 0.0001->Qwen/Qwen1.5-0.5B
+  lr: 0.005 #  [0.00002, 0.0001,0.001, 0.005, 0.01, 0.1, 0.2] 0.005->distilbert-base-uncased, 0.001->bert-base-uncased, 0.0001->Qwen/Qwen1.5-0.5B
   save_train_res : True
   total_cpus : 4 # no. of CPU cores that are assigned for all simulation
   total_gpus : 1 # no. of GPU's assigned for whole simulation
@@ -42,8 +42,8 @@ client:
 
 peft:
   enabled: True #False = FFT, do not set method = fedkls when running FFT, pfedmoap do not run with peft=True
-  rank: 32
-  alpha: 32 #Equal to the rank
+  rank: 8
+  alpha: 16 #Equal to the rank, but, FedSA-LoRA requires double
   method: fedsa_lora # ['pissa', 'milora', 'middle', 'fedkls', 'lora', 'ffa_lora']
   bias: True #To send the bias layer(after A/B) to server for aggregation or not
 
