@@ -81,7 +81,7 @@ def _slice_pad_lora_params(t: torch.Tensor, target_rank: int, param_type: str) -
     if param_type == "A":
         if t.dim() != 2:
             return t
-        out, r = t.shape
+        _, r = t.shape
         if r > target_rank:
             return t[:, :target_rank]
         if r < target_rank:
@@ -92,7 +92,7 @@ def _slice_pad_lora_params(t: torch.Tensor, target_rank: int, param_type: str) -
     if param_type == "B":
         if t.dim() != 2:
             return t
-        r, inn = t.shape
+        r, _ = t.shape
         if r > target_rank:
             return t[:target_rank, :]
         if r < target_rank:

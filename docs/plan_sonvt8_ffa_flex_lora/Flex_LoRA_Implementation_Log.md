@@ -1,6 +1,6 @@
 # FlexLoRA Implementation Log (Phase 2)
 
-*Last updated: 2026-01-08*
+*Last updated: 2026-01-09*
 
 This document records the **technical rationale**, integration decisions, and **risk-managed fixes** made while implementing the FlexLoRA baseline in this repository.
 
@@ -183,7 +183,6 @@ We adopted a **client-safe adapter reconfiguration** in `mak/utils/flex_lora_uti
 Attempting to convert rank by slicing `.A/.B` tensors and calling `load_state_dict` failed because:
 - Rank is an **architecture-level** property (Parameter shapes differ).
 - You cannot load a `[*, 8]` tensor into an existing Parameter allocated as `[*, 64]`.
-- Re-running `apply_svd_to_model` on the client is not allowed (client-side SVD) and is also unreliable once the model is already wrapped by `SVDAdapter`.
 
 #### Final safe approach
 When a client needs `local_rank` adapters:
@@ -202,9 +201,97 @@ This approach is isolated to FlexLoRA utilities and avoids touching shared SVD i
 
 ---
 
-## 8) Operational notes for reproducibility
+## 8) Critical bug & safe fix (Device mismatch: CPU vs CUDA)
 
-- When testing on Colab + Ray, always restart runtime after pulling code to avoid module caching.
-- Always keep `rank_map` logged to confirm expected heterogeneous rank assignment.
+### 8.1 Symptom
+During server-side centralized evaluation at round 0 (`strategy.evaluate(0, ...)`), the simulation crashed with:
+
+- `RuntimeError: Expected all tensors to be on the same device, but found at least two devices, cuda:0 and cpu!`
+
+The traceback pointed to `mak/models/svd_model.py`:
+
+- `effective_weight = self.W_res + self.scaling * (self.A @ self.B)`
+
+### 8.2 Root cause
+`W_res` is the frozen residual weight used inside `SVDAdapter/ConvAdapter`.
+
+- `A` and `B` are `nn.Parameter` and therefore move with `model.to(device)`.
+- `W_res` was stored as a plain tensor attribute, so it could remain on CPU while `A/B` were on GPU.
+
+### 8.3 Safe fix
+We register `W_res` as a **buffer**:
+
+- `self.register_buffer("W_res", W_res.clone().detach())`
+
+This ensures `W_res` moves together with the model when calling `model.to(device)`.
+
+---
+
+## 9) Current implementation state (repo-specific, as of 2026-01-09)
+
+This section captures the **actual runtime wiring** in this repository, so that future debugging and handoff is easier.
+
+### 9.1 Entry point and orchestration (`main.py`)
+- `main.py` parses CLI + YAML, overrides key knobs (seed/strategy/dataset/dirichlet_alpha/peft.method/peft.enabled/lr).
+- Dataset is created by `get_dataset()` using `flwr_datasets.FederatedDataset` and a partitioner (`DirichletPartitioner` or `IidPartitioner`).
+- A base model is created by `get_model()`.
+- If PEFT is enabled and `peft.method == "flex_lora"`:
+  - The server model is adapted by calling `apply_svd_to_model()` **once on the server**.
+  - For FlexLoRA, the server-side rank is overridden to `flex_lora_config.global_rank` (via `setup_server_config`).
+  - `client_fn_with_models` deep-copies the (global-rank) adapted model per client to avoid shared mutation.
+- Rank heterogeneity is simulated by generating a deterministic `rank_map` (stored at `config_sim["flex_lora_config"]["client_rank_map"]`).
+
+### 9.2 Strategy + Server wiring (`helper.get_strategy`, `helper.get_server`)
+- `get_strategy()` instantiates `FlexLoRAStrategy(config, model, rank_map, global_rank, ...)` when `server.strategy == "FlexLoRA"`.
+- `get_server()` uses lazy imports to wrap it into `FlexLoRAServer` (which currently subclasses `ServerSaveData` without extra behavior).
+
+### 9.3 Parameter protocol (Round 1 vs Round > 1)
+**Round 1 (initialization)**
+- `FlexLoRAStrategy.initialize_parameters()` sends FULL `state_dict` values list (global-rank model).
+- `FlexLoRAClient.set_parameters()` detects FULL payload and:
+  1) Ensures local-rank adapter architecture exists via `ensure_local_rank_adapters` (**no SVD on clients**)
+  2) Loads the full payload with slicing A/B down to local rank via `slice_and_load_params`
+
+**Round > 1 (training loop)**
+- Uplink: `FlexLoRAClient.get_parameters()` sends a PARTIAL ordered list aligned with `get_ffa_target_keys(model)`.
+- Server aggregation: `FlexLoRAStrategy.aggregate_fit()`
+  - Standard params (bias/head) are aggregated with classic FedAvg weighted average.
+  - LoRA layers are aggregated by reconstructing \(\Delta W_i = A_i B_i\), averaging in matrix space, then SVD + energy-preserving re-projection.
+- Downlink: server returns PARTIAL ordered list aligned with the same `get_ffa_target_keys(server_model)`.
+- Client applies partial downlink via `general.set_params(method="flex_lora", rank_map, client_id)` which slices/pads A/B to the client local rank.
+
+### 9.4 Single source of truth: `get_ffa_target_keys(model)`
+- The system relies on deterministic keys from `helper.get_ffa_target_keys()` to avoid payload order corruption.
+- Selected keys include: `.A`, `.B`, `.bias`, and head weights matching keywords.
+
+---
+
+## 10) Open risks / suspected severe bugs (to validate in smoketest logs)
+
+> IMPORTANT: These are not confirmed failures in the current run; they are **high-probability failure modes** derived from code inspection.
+
+### 10.1 Suspect: local-rank rebuild may not work if the model has no `nn.Linear` modules
+- Current `ensure_local_rank_adapters()` rebuild path injects adapters by scanning for `torch.nn.Linear` modules (`_inject_lora_adapters_no_svd`).
+- In this repo, `apply_svd_to_model()` replaces `nn.Linear` with `SVDAdapter`. After that, the model may no longer contain `nn.Linear` modules.
+- If a client needs to rebuild adapters (global rank -> local rank) but the model contains only `SVDAdapter` modules, the current rebuild function may replace **0 layers**.
+- Outcome: client keeps global-rank parameter shapes, then loading local-rank tensors can trigger the classic mismatch:
+  - `RuntimeError: size mismatch ... copying param shape [*, 8] into [*, 64]`
+
+**What to confirm in logs:** whether `ensure_local_rank_adapters` logs show injected/replaced layer count > 0, and whether rank mismatch persists after ensure.
+
+### 10.2 Suspect: payload key-count mismatch between server and some clients
+- Server enforces strict payload length == `len(get_ffa_target_keys(server_model))`.
+- If a client model ends up with a different set of communicated keys (e.g., missing a head layer weight key, adapter keys absent due to failed injection), the server will throw a hard error.
+
+**What to confirm in logs:** `ValueError: payload length mismatch` in `FlexLoRAStrategy.aggregate_fit`.
+
+### 10.3 Suspect: HuggingFace model + `device_map="auto"` + deepcopy
+- `get_model()` uses `device_map="auto"` for some HF models.
+- `main.py` later deep-copies models per client (`copy.deepcopy(client_model)`).
+- Deepcopy of sharded / device-mapped HF modules can be fragile and can crash or silently move tensors unexpectedly.
+
+**What to confirm in logs:** errors during deepcopy or during first forward pass related to missing weights / meta tensors / device placement.
+
+---
 
 *End of log.*
