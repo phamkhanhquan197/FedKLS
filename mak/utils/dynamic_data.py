@@ -318,28 +318,94 @@ class DynamicDataScheduler:
             # Load partition from repartitioned dataset
             repartitioned_fds = self._repartitioned_datasets[milestone]
             partition = repartitioned_fds.load_partition(partition_id=client_id)
+            
+            # In reset mode, use standard train/val split
+            trainset_full = partition
+            split_seed = self.seed + client_id * 1000 + round_num
+            splits = trainset_full.train_test_split(
+                test_size=self.val_ratio,
+                seed=split_seed
+            )
+            trainset = splits["train"]
+            valset = splits["test"]
         else:
             # For incremental mode, use original partition
             partition = self._client_partitions[client_id]
-        
-        # Select subset based on indices (for incremental) or use all (for reset)
-        if self.mode == "reset":
-            # In reset mode, train_indices contains all indices (100% allocation)
-            trainset_full = partition
-        else:
-            # In incremental mode, select subset
-            trainset_full = partition.select(train_indices)
-        
-        # Split into train and validation
-        # Use deterministic split based on seed + client_id + round
-        split_seed = self.seed + client_id * 1000 + round_num
-        splits = trainset_full.train_test_split(
-            test_size=self.val_ratio,
-            seed=split_seed
-        )
-        
-        trainset = splits["train"]
-        valset = splits["test"]
+            
+            # Only use new data for validation to prevent data leakage
+            if round_num == 1:
+                # Round 1: Standard train/val split
+                trainset_full = partition.select(train_indices)
+                split_seed = self.seed + client_id * 1000 + round_num
+                splits = trainset_full.train_test_split(
+                    test_size=self.val_ratio,
+                    seed=split_seed
+                )
+                trainset = splits["train"]
+                valset = splits["test"]
+            else:
+                # Round N > 1: Only use new data for validation
+                prev_train_indices = self.get_client_round_indices(client_id, round_num - 1)
+                
+                # Calculate new indices (data not seen in previous rounds)
+                train_indices_set = set(train_indices)
+                prev_train_indices_set = set(prev_train_indices)
+                new_indices = sorted(list(train_indices_set - prev_train_indices_set))
+                
+                if len(new_indices) > 0:
+                    # Split new indices into train_new and val_new deterministically
+                    split_seed = self.seed + client_id * 1000 + round_num
+                    np_rng = np.random.RandomState(split_seed)
+                    shuffled_new_indices = new_indices.copy()
+                    np_rng.shuffle(shuffled_new_indices)
+                    
+                    val_size = max(1, int(len(new_indices) * self.val_ratio))
+                    val_indices_new = sorted(shuffled_new_indices[:val_size])
+                    train_indices_new = sorted(shuffled_new_indices[val_size:])
+                    
+                    # Accumulate validation indices from all previous rounds (round 1 to round_num-1)
+                    # Start with round 1 validation
+                    round1_train_indices = self.get_client_round_indices(client_id, 1)
+                    round1_split_seed = self.seed + client_id * 1000 + 1
+                    round1_np_rng = np.random.RandomState(round1_split_seed)
+                    round1_shuffled = round1_train_indices.copy()
+                    round1_np_rng.shuffle(round1_shuffled)
+                    round1_val_size = max(1, int(len(round1_train_indices) * self.val_ratio))
+                    round1_val_indices = sorted(round1_shuffled[:round1_val_size])
+                    
+                    # Accumulate validation from all previous rounds
+                    all_val_indices = set(round1_val_indices)
+                    for prev_round in range(2, round_num):
+                        prev_prev_train = self.get_client_round_indices(client_id, prev_round - 1)
+                        prev_curr_train = self.get_client_round_indices(client_id, prev_round)
+                        prev_prev_set = set(prev_prev_train)
+                        prev_curr_set = set(prev_curr_train)
+                        prev_new = sorted(list(prev_curr_set - prev_prev_set))
+                        
+                        if len(prev_new) > 0:
+                            prev_split_seed = self.seed + client_id * 1000 + prev_round
+                            prev_np_rng = np.random.RandomState(prev_split_seed)
+                            prev_shuffled = prev_new.copy()
+                            prev_np_rng.shuffle(prev_shuffled)
+                            prev_val_size = max(1, int(len(prev_new) * self.val_ratio))
+                            prev_val_indices = sorted(prev_shuffled[:prev_val_size])
+                            all_val_indices.update(prev_val_indices)
+                    
+                    # Add new validation indices for current round
+                    all_val_indices.update(val_indices_new)
+                    
+                    # Training set: all train_indices EXCEPT validation indices
+                    train_indices_final = sorted(list(train_indices_set - all_val_indices))
+                    
+                    # Validation set: accumulated from all rounds (round 1 to round_num)
+                    val_indices_final = sorted(list(all_val_indices))
+                    
+                    trainset = partition.select(train_indices_final)
+                    valset = partition.select(val_indices_final)
+                else:
+                    # No new data: use all available data for training, empty validation
+                    trainset = partition.select(train_indices)
+                    valset = partition.select([])
         
         if apply_transforms:
             trainset = trainset.with_transform(apply_transforms)
