@@ -18,7 +18,7 @@ common:
   num_test_thread: 1
 
 server:
-  num_rounds : 50
+  num_rounds : 5
   address : 127.0.0.1
   fraction_fit : 1 # fraction of clients to be selected for training
   min_fit_clients : 3 # minimum number of clients to be selected for training
