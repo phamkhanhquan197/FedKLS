@@ -111,7 +111,7 @@ def set_params(
             else:
                 lora_keys = [k for k in model_state.keys() if k.endswith(".A")]
 
-        elif any(k.startswith("bert.") for k in model_state.keys()):
+        elif any(k.startswith(("bert.", "roberta.")) for k in model_state.keys()):
             if bias:
                 lora_keys = [
                     k for k in model_state.keys()
@@ -164,7 +164,7 @@ def set_params(
             else:
                 lora_keys = [k for k in model_state.keys() if k.endswith(".B") or k.endswith(".A")]
 
-        elif any(key.startswith("bert.") for key in model_state.keys()):
+        elif any(key.startswith(("bert.", "roberta.")) for key in model_state.keys()):
             if bias:
                 lora_keys = [k for k in model_state.keys() if ("self" in k or "dense" in k)]
             else:
@@ -189,7 +189,7 @@ def set_params(
             else:
                 lora_keys = [k for k in model_state.keys() if k.endswith(".B")]
 
-        elif any(k.startswith("bert.") for k in model_state.keys()):
+        elif any(k.startswith(("bert.", "roberta.")) for k in model_state.keys()):
             if bias:
                 lora_keys = [
                     k for k in model_state.keys()

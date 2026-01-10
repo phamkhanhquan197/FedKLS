@@ -257,20 +257,6 @@ def get_dataset(config_sim):
 #     #     centralized_testset = fds.load_split(test_set)
 #     return fds, test_data
 
-def extract_linear_layers(model):
-    """Return a dict of {layer_name: layer_module} for all linear layers in the model.
-    Optionally skips layers specified in layers_to_skip.
-    """
-    linear_layers = {}
-
-    for name, module in model.named_modules():
-        # Check if the module is a Linear layer
-        if isinstance(module, torch.nn.Linear):
-            if name in ["pre_classifier","classifier", "model.norm", "score"]: # Check if any part of the layer_to_skip is in the current layer's name
-                continue
-            linear_layers[name] = module
-
-    return linear_layers
 
 def extract_linear_layers(model, config=None):
     """Return a dict of {layer_name: layer_module} for all linear layers in the model.
@@ -280,6 +266,8 @@ def extract_linear_layers(model, config=None):
     # Read model name from config if provided
     model_name = None
     method = None
+    selective_attention_qv_only = False
+
     if config is not None:
         model_name = config.get("common", {}).get("model", None)
         method = config.get("peft", {}).get("method", None)
@@ -767,7 +755,13 @@ def get_model(config, shape, classnames=None):
         )
         return model
     # check if model is from huggingface
-    elif model_name in ["distilbert-base-uncased", "Qwen/Qwen1.5-0.5B", "openai/clip-vit-base-patch32"""]:  # Add more as needed
+    elif model_name in [
+        "distilbert-base-uncased",
+        "roberta-base",
+        "roberta-large",
+        "Qwen/Qwen1.5-0.5B",
+        "openai/clip-vit-base-patch32",
+    ]: # Add more as needed
         from transformers import AutoModelForSequenceClassification, BitsAndBytesConfig, CLIPModel
         if model_name == "Qwen/Qwen1.5-0.5B": #Need to check again when applying the quantization -> still error
             quantization_8_bit_config = BitsAndBytesConfig(
