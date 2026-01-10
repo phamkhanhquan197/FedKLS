@@ -24,7 +24,7 @@ def test(net, testloader, device: str, feature_key: str) -> Tuple[float, float, 
     # Set the network to evaluation mode
     net.eval()
 
-    if feature_key == "text" or feature_key == "content":
+    if feature_key in ("text", "content", "sentence"):
         #for text datasets, we need to use a different loss function
         with torch.no_grad():
             for batch in testloader:
