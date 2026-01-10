@@ -37,7 +37,7 @@ class FedSALoRAClient(BaseClient):
             else:
                 params_to_send = {name: tensor for name, tensor in model_state.items() if name.endswith(".A")}
 
-        elif any(key.startswith("bert.") for key in model_state.keys()):
+        elif any(key.startswith(("bert.", "roberta.")) for key in model_state.keys()):
             if self.bias:
                 params_to_send = {
                     name: tensor for name, tensor in model_state.items()
