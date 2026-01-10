@@ -31,7 +31,7 @@ class FlexLoRAClient(BaseClient):
         apply_transforms=None,
         data_scheduler=None,
         bias=None,
-        rank_map: dict | None = None,
+        rank_policy_map: dict | None = None,
     ):
         super().__init__(
             client_id=client_id,
@@ -46,7 +46,7 @@ class FlexLoRAClient(BaseClient):
             data_scheduler=data_scheduler,
             bias=bias,
         )
-        self.rank_map = rank_map or {}
+        self.rank_policy_map = rank_policy_map or {}
 
     def __repr__(self) -> str:
         return " FlexLoRA client"
@@ -75,22 +75,22 @@ class FlexLoRAClient(BaseClient):
 
         # Round 1: FULL model update (global payload)
         if len(parameters) == len(model_state):
-            if not self.rank_map or int(self.client_id) not in self.rank_map:
-                raise ValueError("FlexLoRA requires rank_map[client_id] for full update slicing")
+            if not self.rank_policy_map or int(self.client_id) not in self.rank_policy_map:
+                raise ValueError("FlexLoRA requires rank_policy_map[client_id] for full update slicing")
 
-            local_rank = int(self.rank_map[int(self.client_id)])
+            rank_policy = self.rank_policy_map[int(self.client_id)]
 
-            # Ensure the client model is adapted with local-rank adapters before loading.
+            # Ensure the client model is adapted with per-layer rank-policy adapters before loading.
             self.model = ensure_local_rank_adapters(
                 model=self.model,
                 base_config=self.config_sim,
-                local_rank=local_rank,
+                rank_policy=rank_policy,
             )
 
             slice_and_load_params(
                 model=self.model,
                 params=parameters,
-                local_rank=local_rank,
+                rank_policy=rank_policy,
                 device=str(self.device),
             )
             self.model.to(self.device)
@@ -104,14 +104,14 @@ class FlexLoRAClient(BaseClient):
 
         # Defensive: ensure local-rank adapters are still present (the model may be
         # reconstructed/reused by the simulation runtime across phases).
-        if not self.rank_map or int(self.client_id) not in self.rank_map:
-            raise ValueError("FlexLoRA requires rank_map[client_id] for partial update slicing")
-        local_rank = int(self.rank_map[int(self.client_id)])
+        if not self.rank_policy_map or int(self.client_id) not in self.rank_policy_map:
+            raise ValueError("FlexLoRA requires rank_policy_map[client_id] for partial update slicing")
+        rank_policy = self.rank_policy_map[int(self.client_id)]
 
         self.model = ensure_local_rank_adapters(
             model=self.model,
             base_config=self.config_sim,
-            local_rank=local_rank,
+            rank_policy=rank_policy,
         )
 
         set_params(
@@ -120,7 +120,7 @@ class FlexLoRAClient(BaseClient):
             method="flex_lora",
             bias=self.config_sim.get("peft", {}).get("bias", True),
             client_id=self.client_id,
-            rank_map=self.rank_map,
+            rank_policy_map=self.rank_policy_map,
             device=str(self.device),
         )
 

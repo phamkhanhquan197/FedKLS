@@ -23,7 +23,7 @@ def get_client_fn(
     kl_norm_dict: dict = None, #Precomputed KL divergence values from server, if available
     data_scheduler = None, # NEW: DynamicDataScheduler for round-aware allocation
     bias = None,
-    rank_map: dict | None = None, # Client ID -> rank mapping for FlexLoRA
+    rank_policy_map: dict | None = None, # Client ID -> per-layer rank policy mapping for FlexLoRA
 ):
     strategy = config_sim["server"]["strategy"]
     client_class = get_client_class(strategy)
@@ -84,7 +84,7 @@ def get_client_fn(
             apply_transforms=apply_transforms,
             data_scheduler=data_scheduler, # NEW: DynamicDataScheduler for round-aware allocation
             bias=bias,
-            rank_map=rank_map,
+            rank_policy_map=rank_policy_map,
         )
         return client.to_client()
     

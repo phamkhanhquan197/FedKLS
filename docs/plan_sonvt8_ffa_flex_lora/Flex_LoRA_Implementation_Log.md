@@ -124,7 +124,98 @@ Rank map generation: `mak/utils/flex_lora_utils.py::generate_rank_map`.
 
 ---
 
-## 6) Smoke test harness notes
+## 6) Prioritized issues & mitigations (baseline + paper alignment)
+
+This section ranks the most important remaining issues ("issues" instead of "bugs") from highest to lowest priority.
+
+### P0) Missing client-type support (paper fidelity blocker)
+
+**Why important**:
+- Paper FlexLoRA models resource heterogeneity via **4 client types** (Table 1) and multiple **type distributions** (Figure 3).
+- Current baseline only supports **one rank per client** (uniform rank across all adapted layers), which cannot represent **Type 3** (different ranks for attention vs FFN layers).
+
+**Current behavior (baseline)**:
+- `flex_lora_config.rank_distribution` generates `rank_map[cid] -> local_rank`.
+- `ensure_local_rank_adapters` and `set_params(method="flex_lora")` apply that single `local_rank` to all `.A/.B` factors.
+
+**Impact**:
+- The implementation cannot reproduce key experiments/claims of the paper regarding heterogeneous resource distributions.
+- Any evaluation of FlexLoRA under heterogeneous client types is currently incomplete.
+
+**Proposed direction (short)**:
+- Replace `rank_map` with a richer **client configuration map**:
+  - `client_type_map[cid] -> type_id`
+  - `type_id -> rank_policy`, e.g.
+    - Type1: `r=8` all tunable layers
+    - Type2: `r=30` all tunable layers
+    - Type3: `r_attn=30`, `r_ffn=200` (MAM-style)
+    - Type4: `r=200` all tunable layers
+- Add layer-group detection for models (at least DistilBERT/BERT-style):
+  - attention layers: names containing `attention` or `self_attn`
+  - FFN layers: names containing `ffn`, `mlp`, `lin1/lin2`
+- Extend slicing/loading to be **per-layer rank** (not single rank).
+
+**Minimal smoke tests to add**:
+- 2 clients, 2 rounds, assign Type3 to at least one client, verify:
+  - no `size mismatch` on Round 1 full payload
+  - communication size differs by type (Type3 larger than Type1)
+  - aggregation runs without crash
+
+### P1) Repeated local-rank rebuild can silently reset adapter state
+
+**Why important**:
+- Smoke logs show frequent `Adapter rank mismatch ... -> rebuilding adapters (no SVD)` events for low-rank clients.
+- Current rebuild path re-initializes `A` (random) and `B` (zeros), which can erase learned adapter state and degrade convergence without a crash.
+
+**Symptom (smoke logs)**:
+- `Adapter rank mismatch detected. desired=8 ... -> rebuilding adapters (no SVD).`
+- `Rebuilt 36 SVDAdapter modules without SVD (rank=8).`
+
+**Proposed mitigation (short)**:
+- Make rank adaptation **idempotent and preserving**:
+  - When changing rank, project existing `(A,B)` by truncate/pad rather than re-init.
+  - Ensure `ensure_local_rank_adapters` runs only once per client lifecycle where possible.
+
+### P2) Payload protocol relies on list length (fragile with heterogeneous client types)
+
+**Why important**:
+- The code infers "full vs partial" by `len(payload)`.
+- With future client-type extensions (different communicated keys), this can break aggregation or cause hard-to-debug mismatches.
+
+**Proposed mitigation (short)**:
+- Carry explicit metadata in config (e.g., `payload_kind: full|partial`) or include a stable header.
+- Validate keys against a shared contract per client type.
+
+### P3) Server-side SVD scalability and OOM risk (large models)
+
+**Why important**:
+- `torch.linalg.svd` per-layer on `ΔW_agg` can be expensive for large hidden sizes or many layers.
+
+**Proposed mitigation (short)**:
+- Consider truncated/randomized SVD or CPU fallback.
+- Add guardrails/logging for per-layer SVD time and memory.
+
+### P4) Conv/vision models may need special handling
+
+**Why important**:
+- Current FlexLoRA aggregation assumes 2D factors merged by `A@B`.
+- For Conv adapters, ensure factorization/reshape contracts are consistent end-to-end.
+
+**Proposed mitigation (short)**:
+- Add explicit tests for a CNN backbone (e.g., ResNet) if FlexLoRA is expected to support it.
+
+### P5) Warning: Flower reports "Both server and strategy were provided, ignoring strategy"
+
+**Why important**:
+- This is a compatibility/maintenance risk across Flower versions.
+- Even if the current run works, behavior could change.
+
+**Proposed mitigation (short)**:
+- Ensure the simulation is configured in one canonical way (either pass `server=` or rely on strategy-managed server).
+
+---
+
+## 7) Smoke test harness notes
 
 In `smoke_test_FlexLoRA.ipynb`, the failure detector should grep for generic mismatch messages.
 
@@ -134,7 +225,7 @@ Recommended check:
 
 ---
 
-## 7) File map (baseline implementation)
+## 8) File map (baseline implementation)
 
 - Entry: `main.py`
   - generates `rank_map` when `strategy == FlexLoRA`

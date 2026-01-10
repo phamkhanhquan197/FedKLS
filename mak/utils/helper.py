@@ -981,7 +981,6 @@ def get_strategy(
         "FlexLoRA": {
             "config": config,
             "model": model,
-            "rank_map": config.get("flex_lora_config", {}).get("client_rank_map", {}),
             "global_rank": config.get("flex_lora_config", {}).get(
                 "global_rank", config.get("peft", {}).get("rank", 32)
             ),

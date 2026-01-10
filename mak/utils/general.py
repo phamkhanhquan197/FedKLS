@@ -109,7 +109,7 @@ def set_params(
     device: str = "cuda",
     method: str = None,
     bias: str = True,
-    rank_map: dict | None = None,
+    rank_policy_map: dict | None = None,
     client_id: int | None = None,
 ):
 
@@ -131,6 +131,7 @@ def set_params(
     elif method == "flex_lora":
         # Lazy import to avoid circular dependency (helper imports general)
         from mak.utils.helper import get_ffa_target_keys
+        from mak.utils.flex_lora_utils import get_rank_for_base
 
         target_keys = get_ffa_target_keys(model)
         if len(params) != len(target_keys):
@@ -138,10 +139,13 @@ def set_params(
                 f"FlexLoRA set_params expects {len(target_keys)} params (target keys), got {len(params)}"
             )
 
-        if rank_map is None or client_id is None:
-            raise ValueError("FlexLoRA set_params requires rank_map and client_id")
-        # target_rank here is the client's local adapter rank
-        target_rank = int(rank_map[int(client_id)])
+        if rank_policy_map is None or client_id is None:
+            raise ValueError("FlexLoRA set_params requires rank_policy_map and client_id")
+
+        cid = int(client_id)
+        if cid not in rank_policy_map:
+            raise ValueError(f"FlexLoRA missing rank policy for client_id={cid}")
+        rank_policy = rank_policy_map[cid]
 
         # Ensure tensors are created on the requested device
         dev = torch.device(device) if isinstance(device, str) else device
@@ -150,17 +154,19 @@ def set_params(
         for key, array in zip(target_keys, params):
             t = torch.from_numpy(np.asarray(array)).to(device=dev)
 
-            # Slice/pad LoRA factors from global_rank payload to local_rank model
+            # Slice/pad LoRA factors per-layer according to rank policy
             if key.endswith(".A"):
+                base = key[:-2]
+                target_rank = int(get_rank_for_base(rank_policy, base))
                 t = _slice_pad_lora_params(t, target_rank=target_rank, param_type="A")
             elif key.endswith(".B"):
+                base = key[:-2]
+                target_rank = int(get_rank_for_base(rank_policy, base))
                 t = _slice_pad_lora_params(t, target_rank=target_rank, param_type="B")
 
             update[key] = t
 
         model_state.update(update)
-        # Allow missing/unexpected keys caused by adapter injection differences,
-        # but shapes of updated keys must match (we enforce via slice/pad above).
         model.load_state_dict(model_state, strict=False)
         return
 

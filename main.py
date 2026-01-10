@@ -22,7 +22,7 @@ from mak.clients import get_client_fn
 from mak.utils.dataset_info import dataset_info
 from mak.utils.helper import get_config, set_seed, parse_args, apply_svd_to_model
 from mak.utils.helper import compute_client_distributions, compute_KL_divergence
-from mak.utils.flex_lora_utils import generate_rank_map, setup_server_config
+from mak.utils.flex_lora_utils import build_client_rank_policy_map, build_client_type_map, setup_server_config
 import copy
 import gc
 import torch
@@ -119,12 +119,23 @@ def main():
     lora_enabled = config_sim["peft"]["enabled"]
     peft_method = config_sim["peft"]["method"]
 
-    # FlexLoRA: generate rank map once and store in config
+    # FlexLoRA: build client type map + per-layer rank policy map (paper Table 1)
     if config_sim.get("server", {}).get("strategy") == "FlexLoRA":
         num_clients = int(config_sim["server"]["num_clients"])
-        rank_map = generate_rank_map(config_sim, num_clients=num_clients)
-        config_sim.setdefault("flex_lora_config", {})["client_rank_map"] = rank_map
-        log(INFO, f"FlexLoRA rank_map generated: {rank_map}")
+
+        # Enforce global_rank = max rank (paper: 200)
+        config_sim.setdefault("flex_lora_config", {}).setdefault("global_rank", 200)
+        global_rank = int(config_sim["flex_lora_config"]["global_rank"])
+
+        client_type_map = build_client_type_map(config_sim, num_clients=num_clients)
+        rank_policy_map = build_client_rank_policy_map(config_sim, client_type_map=client_type_map)
+
+        config_sim["flex_lora_config"]["client_type_map"] = client_type_map
+        config_sim["flex_lora_config"]["client_rank_policy_map"] = rank_policy_map
+
+        log(INFO, f"FlexLoRA global_rank: {global_rank}")
+        log(INFO, f"FlexLoRA client_type_map: {client_type_map}")
+        log(INFO, f"FlexLoRA client_rank_policy_map: {rank_policy_map}")
 
     if lora_enabled:
         if peft_method == "fedkls":
@@ -254,7 +265,7 @@ def main():
             # model object across clients can lead to rank drift and size-mismatch.
             model = copy.deepcopy(client_model)
 
-        rank_map = config_sim.get("flex_lora_config", {}).get("client_rank_map", None)
+        rank_policy_map = config_sim.get("flex_lora_config", {}).get("client_rank_policy_map", None)
 
         return get_client_fn(
             config_sim=config_sim,
@@ -265,7 +276,7 @@ def main():
             save_dir=saved_models_path,
             kl_norm_dict=kl_normalized_per_client if peft_method == "fedkls" else None,
             data_scheduler=data_scheduler,
-            rank_map=rank_map,
+            rank_policy_map=rank_policy_map,
         )(cid)
 
     hist = fl.simulation.start_simulation(

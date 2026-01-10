@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Callable, Dict, List, Optional
 
 import copy
 import numpy as np
@@ -12,8 +12,138 @@ from logging import INFO
 from mak.utils.general import _slice_pad_lora_params
 
 
+RankPolicy = Dict[str, int]
+ClientRankPolicyMap = Dict[int, RankPolicy]
+ClientTypeMap = Dict[int, int]
+
+
+def resolve_layer_group(base: str) -> str:
+    """Heuristic layer-group resolver for per-layer rank policies.
+
+    Groups (paper Type 3 support):
+    - attn: attention/self-attn layers
+    - ffn:  feed-forward / MLP layers
+    - all:  fallback
+    """
+    b = base.lower()
+    if "attention" in b or "self_attn" in b:
+        return "attn"
+    if "ffn" in b or "mlp" in b or ".lin1" in b or ".lin2" in b or "lin1" in b or "lin2" in b:
+        return "ffn"
+    return "all"
+
+
+def get_global_rank(config: dict) -> int:
+    flex_cfg = config.get("flex_lora_config", {})
+    return int(flex_cfg.get("global_rank", config.get("peft", {}).get("rank", 32)))
+
+
+def build_client_type_map(config: dict, num_clients: int) -> ClientTypeMap:
+    """Build deterministic client_id -> type_id map (Type 1..4).
+
+    Supports:
+    - flex_lora_config.client_type_map: explicit override mapping
+    - flex_lora_config.client_type_distribution: list of {type, ratio}
+
+    Notes:
+    - This repo uses small smoke tests; determinism matters more than perfect sampling.
+    - If no distribution is provided, defaults to Uniform over 4 types.
+    """
+    flex_cfg = config.get("flex_lora_config", {})
+    seed = int(flex_cfg.get("seed", config.get("common", {}).get("seed", 42)))
+
+    # Explicit override for smoke tests
+    override = flex_cfg.get("client_type_map", None)
+    if isinstance(override, dict) and override:
+        out: ClientTypeMap = {}
+        for k, v in override.items():
+            out[int(k)] = int(v)
+        # Fill missing cids with Type 1
+        for cid in range(int(num_clients)):
+            out.setdefault(int(cid), 1)
+        return out
+
+    dist = flex_cfg.get("client_type_distribution", None)
+    if not dist:
+        dist = [
+            {"type": 1, "ratio": 0.25},
+            {"type": 2, "ratio": 0.25},
+            {"type": 3, "ratio": 0.25},
+            {"type": 4, "ratio": 0.25},
+        ]
+
+    rng = np.random.default_rng(seed)
+    types = [int(item["type"]) for item in dist]
+    probs = np.asarray([float(item.get("ratio", 0.0)) for item in dist], dtype=np.float64)
+    probs = probs / probs.sum() if probs.sum() > 0 else np.ones_like(probs) / len(probs)
+
+    sampled = rng.choice(np.asarray(types), size=int(num_clients), replace=True, p=probs)
+
+    # Ensure at least one client is Type 4 (max rank) for sanity when debugging.
+    # (Doesn't affect paper logic for large-N runs.)
+    sampled[0] = 4
+
+    return {i: int(sampled[i]) for i in range(int(num_clients))}
+
+
+def build_client_rank_policy_map(config: dict, client_type_map: ClientTypeMap) -> ClientRankPolicyMap:
+    """Build client_id -> rank policy map aligned with paper Table 1.
+
+    global_rank is assumed to be max rank (e.g., 200).
+    local ranks must satisfy local <= global.
+    """
+    flex_cfg = config.get("flex_lora_config", {})
+    global_rank = int(flex_cfg.get("global_rank", 200))
+
+    # Defaults per paper Table 1
+    type1_r = int(flex_cfg.get("type1_rank", 8))
+    type2_r = int(flex_cfg.get("type2_rank", 30))
+    type3_attn_r = int(flex_cfg.get("type3_attn_rank", 30))
+    type3_ffn_r = int(flex_cfg.get("type3_ffn_rank", 200))
+    type4_r = int(flex_cfg.get("type4_rank", 200))
+
+    def _check(r: int, cid: int) -> int:
+        if r > global_rank:
+            raise ValueError(
+                f"FlexLoRA: local rank must be <= global_rank. cid={cid} rank={r} global_rank={global_rank}"
+            )
+        return int(r)
+
+    out: ClientRankPolicyMap = {}
+    for cid, t in client_type_map.items():
+        tid = int(t)
+        if tid == 1:
+            out[int(cid)] = {"all": _check(type1_r, cid)}
+        elif tid == 2:
+            out[int(cid)] = {"all": _check(type2_r, cid)}
+        elif tid == 3:
+            out[int(cid)] = {
+                "attn": _check(type3_attn_r, cid),
+                "ffn": _check(type3_ffn_r, cid),
+            }
+        elif tid == 4:
+            out[int(cid)] = {"all": _check(type4_r, cid)}
+        else:
+            raise ValueError(f"FlexLoRA: unknown client type: {tid} (cid={cid})")
+
+    return out
+
+
+def get_rank_for_base(rank_policy: RankPolicy, base: str) -> int:
+    group = resolve_layer_group(base)
+    if group in rank_policy:
+        return int(rank_policy[group])
+    if "all" in rank_policy:
+        return int(rank_policy["all"])
+    # fallback: choose max provided
+    return int(max(rank_policy.values()))
+
+
 def generate_rank_map(config: dict, num_clients: int) -> Dict[int, int]:
-    """Generate deterministic client_id -> rank mapping."""
+    """Backward-compatible: generate single-rank map.
+
+    Kept for older configs; new implementation uses client types and rank policies.
+    """
     flex_cfg = config.get("flex_lora_config", {})
     dist = flex_cfg.get("rank_distribution", [])
     global_rank = int(flex_cfg.get("global_rank", config.get("peft", {}).get("rank", 32)))
@@ -196,66 +326,151 @@ def _rebuild_svd_adapters_no_svd(
     return model, rebuilt
 
 
+def _rebuild_svd_adapters_no_svd_policy(
+    model: torch.nn.Module,
+    base_config: dict,
+    rank_policy: RankPolicy,
+    rank_for_base: Optional[Callable[[RankPolicy, str], int]] = None,
+) -> tuple[torch.nn.Module, int]:
+    """Rebuild SVDAdapter modules per-layer using a rank policy (client-safe, no SVD)."""
+    from mak.models.svd_model import SVDAdapter
+
+    rank_for_base = rank_for_base or get_rank_for_base
+
+    alpha_default = base_config.get("peft", {}).get("alpha", None)
+
+    # Deterministic init if seed is set
+    seed = base_config.get("common", {}).get("seed", None)
+    if seed is not None:
+        torch.manual_seed(int(seed))
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(int(seed))
+
+    rebuilt = 0
+
+    for name, module in list(model.named_modules()):
+        if not isinstance(module, SVDAdapter):
+            continue
+
+        # Determine desired rank for this adapter based on its base name
+        # e.g. "distilbert.transformer.layer.0.attention.q_lin"
+        base = name
+        desired = int(rank_for_base(rank_policy, base))
+
+        W_res = module.W_res
+        d_out, d_in = int(W_res.shape[0]), int(W_res.shape[1])
+
+        device = W_res.device
+        dtype = W_res.dtype
+
+        A = (torch.randn(d_out, desired, device=device, dtype=dtype) * 0.01)
+        B = torch.zeros(desired, d_in, device=device, dtype=dtype)
+
+        # Preserve bias values if present
+        if getattr(module, "bias", None) is not None:
+            original_bias = module.bias.detach().clone()
+        else:
+            original_bias = None
+
+        alpha = float(alpha_default) if alpha_default is not None else float(desired)
+
+        new_layer = SVDAdapter(
+            W_res=W_res.detach().clone(),
+            A=A,
+            B=B,
+            alpha=alpha,
+            rank=desired,
+            original_bias=original_bias,
+        )
+
+        # Replace module in parent
+        if "." in name:
+            parent_name, child_name = name.rsplit(".", 1)
+            parent = model.get_submodule(parent_name)
+        else:
+            parent = model
+            child_name = name
+
+        setattr(parent, child_name, new_layer)
+        rebuilt += 1
+
+    return model, rebuilt
+
+
 def ensure_local_rank_adapters(
     model: torch.nn.Module,
     base_config: dict,
-    local_rank: int,
+    rank_policy: RankPolicy,
+    rank_for_base: Optional[Callable[[RankPolicy, str], int]] = None,
 ) -> torch.nn.Module:
-    """Ensure model adapter architecture matches `local_rank` (no client SVD)."""
-    desired = int(local_rank)
+    """Ensure model adapter architecture matches the given rank policy (no client SVD)."""
+    rank_for_base = rank_for_base or get_rank_for_base
 
     sd = model.state_dict()
     a_keys = [k for k in sd.keys() if k.endswith(".A") and isinstance(sd[k], torch.Tensor) and sd[k].dim() == 2]
     b_keys = [k for k in sd.keys() if k.endswith(".B") and isinstance(sd[k], torch.Tensor) and sd[k].dim() == 2]
 
     if a_keys or b_keys:
-        # Check if all ranks match
+        # Check if all ranks match desired policy
         try:
-            a_bad = [k for k in a_keys if int(sd[k].shape[1]) != desired]
-            b_bad = [k for k in b_keys if int(sd[k].shape[0]) != desired]
-            if not a_bad and not b_bad:
+            a_bad = 0
+            b_bad = 0
+            for k in a_keys:
+                base = k[:-2]
+                desired = int(rank_for_base(rank_policy, base))
+                if int(sd[k].shape[1]) != desired:
+                    a_bad += 1
+            for k in b_keys:
+                base = k[:-2]
+                desired = int(rank_for_base(rank_policy, base))
+                if int(sd[k].shape[0]) != desired:
+                    b_bad += 1
+
+            if a_bad == 0 and b_bad == 0:
                 return model
+
             log(
                 INFO,
-                f"[FlexLoRA] Adapter rank mismatch detected. desired={desired} "
-                f"A_bad={len(a_bad)}/{len(a_keys)} B_bad={len(b_bad)}/{len(b_keys)} -> rebuilding adapters (no SVD).",
+                f"[FlexLoRA] Adapter rank-policy mismatch detected. A_bad={a_bad}/{len(a_keys)} "
+                f"B_bad={b_bad}/{len(b_keys)} -> rebuilding adapters (no SVD).",
             )
         except Exception as e:
             log(INFO, f"[FlexLoRA] Adapter inspection failed ({e}); rebuilding adapters (no SVD).")
 
-        # First try rebuilding SVDAdapter modules (the common case when server has
-        # already adapted the model).
-        model, rebuilt = _rebuild_svd_adapters_no_svd(
+        # First try rebuilding SVDAdapter modules
+        model, rebuilt = _rebuild_svd_adapters_no_svd_policy(
             model=model,
             base_config=base_config,
-            local_rank=desired,
+            rank_policy=rank_policy,
+            rank_for_base=rank_for_base,
         )
-        log(INFO, f"[FlexLoRA] Rebuilt {rebuilt} SVDAdapter modules without SVD (rank={desired}).")
+        log(INFO, f"[FlexLoRA] Rebuilt {rebuilt} SVDAdapter modules without SVD (rank_policy).")
         if rebuilt > 0:
             return model
 
-        # Fallback: if no SVDAdapter modules were found/rebuilt, try injecting from Linear.
-        log(INFO, f"[FlexLoRA] No SVDAdapter modules found to rebuild; falling back to Linear injection (no SVD).")
-        return _inject_lora_adapters_no_svd(model=model, base_config=base_config, local_rank=desired)
+        # Fallback: inject from Linear is not supported for per-layer rank policy in this baseline
+        raise ValueError("[FlexLoRA] No SVDAdapter modules found to rebuild under rank policy")
 
     # No adapters found at all
-    log(INFO, f"[FlexLoRA] No adapters found; injecting adapters (no SVD) rank={desired}.")
-    return _inject_lora_adapters_no_svd(model=model, base_config=base_config, local_rank=desired)
+    raise ValueError("[FlexLoRA] No adapters found; expected server-adapted model with SVDAdapters")
 
 
 def slice_and_load_params(
     model: torch.nn.Module,
     params: List[np.ndarray],
-    local_rank: int,
+    rank_policy: RankPolicy,
     device: str | torch.device,
+    rank_for_base: Optional[Callable[[RankPolicy, str], int]] = None,
 ) -> None:
-    """Load FULL downlink parameters into a local-rank FlexLoRA model.
+    """Load FULL downlink parameters into a per-layer-policy FlexLoRA model.
 
     The server sends a full state_dict corresponding to global_rank.
-    Clients with local_rank < global_rank must slice A/B factors before loading.
+    Clients slice/pad A/B factors per adapter base name using `rank_policy`.
 
-    This function assumes the model already has local-rank adapters.
+    This function assumes the model already has policy-shaped adapters.
     """
+    rank_for_base = rank_for_base or get_rank_for_base
+
     model_state = model.state_dict()
     if len(params) != len(model_state):
         raise ValueError(
@@ -269,9 +484,13 @@ def slice_and_load_params(
         t = torch.from_numpy(np.asarray(arr)).to(device=dev)
 
         if k.endswith(".A"):
-            t = _slice_pad_lora_factor(t, local_rank=int(local_rank), is_A=True)
+            base = k[:-2]
+            desired = int(rank_for_base(rank_policy, base))
+            t = _slice_pad_lora_factor(t, local_rank=desired, is_A=True)
         elif k.endswith(".B"):
-            t = _slice_pad_lora_factor(t, local_rank=int(local_rank), is_A=False)
+            base = k[:-2]
+            desired = int(rank_for_base(rank_policy, base))
+            t = _slice_pad_lora_factor(t, local_rank=desired, is_A=False)
 
         state_dict[k] = t
 

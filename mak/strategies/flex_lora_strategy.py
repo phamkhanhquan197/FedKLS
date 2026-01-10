@@ -19,11 +19,10 @@ class FlexLoRAStrategy(FedAvg):
     LoRA aggregation is done in ΔW-space: ΔW_i = A_i @ B_i, then SVD(ΔW_agg) on server.
     """
 
-    def __init__(self, *, config: dict, model, rank_map: dict[int, int], global_rank: int, **kwargs):
+    def __init__(self, *, config: dict, model, global_rank: int, **kwargs):
         super().__init__(**kwargs)
         self.cfg = config
         self.model = model
-        self.rank_map = rank_map
         self.global_rank = int(global_rank)
 
 
