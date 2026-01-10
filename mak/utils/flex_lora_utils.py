@@ -79,9 +79,6 @@ def build_client_type_map(config: dict, num_clients: int) -> ClientTypeMap:
 
     sampled = rng.choice(np.asarray(types), size=int(num_clients), replace=True, p=probs)
 
-    # Ensure at least one client is Type 4 (max rank) for sanity when debugging.
-    # (Doesn't affect paper logic for large-N runs.)
-    sampled[0] = 4
 
     return {i: int(sampled[i]) for i in range(int(num_clients))}
 
