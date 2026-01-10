@@ -153,7 +153,7 @@ class BaseClient(fl.client.NumPyClient):
         """Count the class distribution in the dataset."""
         class_counts = {}
         for batch_data in dataset:
-            if self.feature_key == "text" or self.feature_key == "content":  
+            if self.feature_key in ("text", "content", "sentence"):
                 labels = batch_data["labels"].to(self.device)
             else:
                 labels = batch_data[self.output_column].to(self.device)
@@ -284,7 +284,7 @@ class BaseClient(fl.client.NumPyClient):
 
         for _ in range(epochs):
             for batch in trainloader:
-                if self.feature_key == "text" or self.feature_key == "content":
+                if self.feature_key in ("text", "content", "sentence"):
                     # Text-specific forward pass
                     input_ids = batch["input_ids"].to(device)
                     attention_mask = batch["attention_mask"].to(device)
