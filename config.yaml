@@ -2,13 +2,13 @@
 
 common:
   data_type : dirichlet_niid # data_type = data distribution one among ['iid','dirichlet_niid']
-  dataset : SetFit/20_newsgroups # data_set = data set used one among ['kkim0451/UPMC-Food101', 'pranavmr/MM-IMDb','SetFit/20_newsgroups', 'legacy-datasets/banking77', 'fancyzhx/dbpedia_14', 'cifar10', 'cifar100', 'mnist', 'fashion_mnist', 'sasha/dog-food', 'zh-plus/tiny-imagenet', 'Mike0307/MNIST-M', 'flwrlabs/usps']
+  dataset : glue/sst2 # data_set = data set used one among ['kkim0451/UPMC-Food101', 'pranavmr/MM-IMDb','SetFit/20_newsgroups', 'legacy-datasets/banking77', 'fancyzhx/dbpedia_14', 'cifar10', 'cifar100', 'mnist', 'fashion_mnist', 'sasha/dog-food', 'zh-plus/tiny-imagenet', 'Mike0307/MNIST-M', 'flwrlabs/usps']
   # dataset: SetFit/20_newsgroups
   # dataset: legacy-datasets/banking77
   dirichlet_alpha : 0.5 #dirichlet concentration parameter (only used if data_type is dirchlet-niid)
   target_acc : 0.99
   # model : Qwen/Qwen1.5-0.5B # one among [distilbert-base-uncased, bert-base-uncased, meta-llama/Llama-2-7b-hf, Qwen/Qwen1.5-0.5B, Net, CifarNet, SimpleCNN, KerasExpCNN, MNISTCNN, SimpleDNN, FMCNNModel,FedAVGCNN,Resnet18, Resnet34,ResNet18Pretrained, ResNet34Pretrained,ResNet18Small, ResNet20Small,MobileNetV2,EfficientNetB0,LSTMModel]
-  model: distilbert-base-uncased
+  model: distilbert-base-uncased # roberta-large
   optimizer : sgd # one among [sgd,adam]
   sgd_momentum : 0.9
   seed : 123  #123 456 789
@@ -21,18 +21,18 @@ server:
   num_rounds : 50
   address : 127.0.0.1
   fraction_fit : 1 # fraction of clients to be selected for training
-  min_fit_clients : 10 # minimum number of clients to be selected for training
-  num_clients : 10 # total number of clients participating in training
+  min_fit_clients : 3 # minimum number of clients to be selected for training
+  num_clients : 3 # total number of clients participating in training
   fraction_evaluate : 1 # fraction of clients to be selected for evaluation
-  min_evaluate_clients : 10 # minimum number of clients to be selected for evaluation
+  min_evaluate_clients : 3 # minimum number of clients to be selected for evaluation
   strategy : FedSALoRA  #[FedAWA, FedKLSVD, FedAvg, FFALoRA, PFedMoAP, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova]
 
 client:
   loss: FocalLoss # [CrossEntropyLoss, FocalLoss]
-  epochs : 10
+  epochs : 1
   batch_size : 32
   test_batch_size : 32
-  lr: 0.005 #  [0.00002, 0.0001,0.001, 0.005, 0.01, 0.1, 0.2] 0.005->distilbert-base-uncased, 0.001->bert-base-uncased, 0.0001->Qwen/Qwen1.5-0.5B
+  lr: 1e-3 #  [0.00002, 0.0001,0.001, 0.005, 0.01, 0.1, 0.2] 0.005->distilbert-base-uncased, 0.001->bert-base-uncased, 0.0001->Qwen/Qwen1.5-0.5B
   save_train_res : True
   total_cpus : 4 # no. of CPU cores that are assigned for all simulation
   total_gpus : 1 # no. of GPU's assigned for whole simulation
@@ -42,8 +42,8 @@ client:
 
 peft:
   enabled: True #False = FFT, do not set method = fedkls when running FFT, pfedmoap do not run with peft=True
-  rank: 32
-  alpha: 64 #Equal to the rank, but, FedSA-LoRA requires double
+  rank: 8
+  alpha: 16 #Equal to the rank, but, FedSA-LoRA requires double
   method: fedsa_lora # ['pissa', 'milora', 'middle', 'fedkls', 'lora', 'ffa_lora']
   bias: True #To send the bias layer(after A/B) to server for aggregation or not
   selective_attention_qv_only: True #Select only qv layers in attention for Low Rank
