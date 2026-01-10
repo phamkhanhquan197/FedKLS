@@ -8,9 +8,9 @@ common:
   dirichlet_alpha : 0.05 #dirichlet concentration parameter (only used if data_type is dirchlet-niid)
   target_acc : 0.99
   # Optional: redirect Ray session/spill files off /tmp (useful when /tmp is nearly full)
-  ray_tmp_dir: /tmp # /home/ai/tmp
-  # model : Qwen/Qwen1.5-0.5B # one among [distilbert-base-uncased, bert-base-uncased, meta-llama/Llama-2-7b-hf, Qwen/Qwen1.5-0.5B, Net, CifarNet, SimpleCNN, KerasExpCNN, MNISTCNN, SimpleDNN, FMCNNModel,FedAVGCNN,Resnet18, Resnet34,ResNet18Pretrained, ResNet34Pretrained,ResNet18Small, ResNet20Small,MobileNetV2,EfficientNetB0,LSTMModel]
-  model: distilbert-base-uncased
+  ray_tmp_dir: /home/ai/tmp # /home/ai/tmp, /tmp
+  model : Qwen/Qwen1.5-0.5B # one among [distilbert-base-uncased, bert-base-uncased, meta-llama/Llama-2-7b-hf, Qwen/Qwen1.5-0.5B, Net, CifarNet, SimpleCNN, KerasExpCNN, MNISTCNN, SimpleDNN, FMCNNModel,FedAVGCNN,Resnet18, Resnet34,ResNet18Pretrained, ResNet34Pretrained,ResNet18Small, ResNet20Small,MobileNetV2,EfficientNetB0,LSTMModel]
+  # model: distilbert-base-uncased
   # model: Clip
   optimizer : sgd # one among [sgd,adam]
   sgd_momentum : 0.9
@@ -35,17 +35,17 @@ server:
 client:
   loss: FocalLoss # [CrossEntropyLoss, FocalLoss]
   epochs : 1
-  batch_size : 8
-  test_batch_size : 8
+  batch_size : 16
+  test_batch_size : 16
   lr: 0.005 #  [0.00002, 0.0001,0.001, 0.005, 0.01, 0.1, 0.2] 0.005->distilbert-base-uncased, 0.001->bert-base-uncased, 0.0001->Qwen/Qwen1.5-0.5B
   save_train_res : True
   # Too many total_cpus lets Ray schedule many actors concurrently and can OOM host RAM.
   # Keep this near your physical core count.
-  total_cpus : 12
+  total_cpus : 40
   total_gpus : 1 # no. of GPU's assigned for whole simulation
   gpu : True  # True or Faslse, Use GPU for training or not.
   # Request more resources per actor => fewer concurrent actors => less RAM/GPU contention.
-  num_cpus : 8
+  num_cpus : 16
   # With 1 GPU total, setting 1.0 forces a single GPU actor at a time.
   num_gpus : 1.0
 
@@ -62,6 +62,13 @@ fedsvd_config:
   send_deltas: False   # True => clients send deltas; server applies deltas to round-start params
   agg_flora: False     # (placeholder) requires delta semantics
   agg_fedex: False     # (placeholder) requires delta semantics
+  dp:
+    enabled: False        # True => enable DP-SGD (Opacus) during client training
+    eps: 8.0              # target epsilon (used to compute noise_multiplier if noise_multiplier is null)
+    delta: 1.0e-5         # target delta
+    max_grad_norm: 2.0    # per-sample grad clipping norm
+    noise_multiplier: null  # override if set; otherwise computed from (eps, delta, sample_rate, epochs)
+    secure_rng: False     # True => use secure RNG (slower)
 
 # NEW: Dynamic Data Updates Configuration
 dynamic_data:
