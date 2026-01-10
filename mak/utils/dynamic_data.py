@@ -303,24 +303,25 @@ class DynamicDataScheduler:
             partition: Original partition dataset
             original_indices: Original indices that were split
             val_dataset: Validation dataset from train_test_split
-            split_seed: Seed used for the split
+            split_seed: Seed used for the split (not used, kept for compatibility)
             
         Returns:
             List of validation indices from original_indices
         """
-        # Use the same seed to reconstruct the split
+        # This ensures consistency with train_test_split() which may round differently
+        
+        # Get actual validation size from val_dataset
+        actual_val_size = len(val_dataset)
+        
+        # Use the same seed to reconstruct the shuffle order
+        # This matches train_test_split() behavior
         np_rng = np.random.RandomState(split_seed)
         shuffled_indices = original_indices.copy()
         np_rng.shuffle(shuffled_indices)
         
-        # Calculate validation size (matching train_test_split logic)
-        val_size = int(len(original_indices) * self.val_ratio)
-        # Ensure at least 1 validation sample if we have data
-        if val_size == 0 and len(original_indices) > 0:
-            val_size = 1
-        
-        # Get validation indices (first val_size after shuffle)
-        val_indices = sorted(shuffled_indices[:val_size])
+        # Get validation indices (first actual_val_size after shuffle)
+        # This matches what train_test_split() actually created
+        val_indices = sorted(shuffled_indices[:actual_val_size])
         
         return val_indices
     
