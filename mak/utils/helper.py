@@ -989,8 +989,10 @@ def get_strategy(
             "send_deltas": bool(fedsvd_cfg.get("send_deltas", False)),
             "agg_flora": bool(fedsvd_cfg.get("agg_flora", False)),
             "agg_fedex": bool(fedsvd_cfg.get("agg_fedex", False)),
+            "recalculate_svd_period": int(fedsvd_cfg.get("recalculate_svd_period", 0) or 0),
+            "svd_warmup_steps": int(fedsvd_cfg.get("svd_warmup_steps", 0) or 0),
             # Provide parameter names so the strategy can select LoRA A/B.
-            "param_name_fn": (lambda: list(model.state_dict().keys())),
+            "param_name_fn": (lambda: list(model.state_dict().keys())) if model is not None else None,
         }
 
     if STRATEGY == "PFedMoAP":

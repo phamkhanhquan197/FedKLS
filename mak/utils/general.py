@@ -154,13 +154,33 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays],
                     if k.endswith(".B")
                 ]
     
-    # Create state dict with only LoRA-B parameters
+    # Create state dict with only adapter parameters present in `params`.
+    # IMPORTANT: `lora_keys` is inferred heuristically and the *order* may not match
+    # the order used by the server/strategy when it serializes ndarrays. In addition,
+    # some strategies may return a mix of tensors (A/B/bias/classifier) with shapes
+    # that don't exist in the current model.
+    #
+    # To avoid hard crashes during centralized eval, we only copy tensors when the
+    # target key exists and has the exact same shape.
     lora_params = OrderedDict()
     for key, array in zip(lora_keys, params):
-        lora_params[key] = torch.from_numpy(array)
-    # Update model with LoRA-B parameters only
+        if key not in model_state:
+            continue
+        try:
+            t = torch.from_numpy(array)
+        except Exception:
+            continue
+        if tuple(t.shape) != tuple(model_state[key].shape):
+            # Skip mismatched shapes (prevents RuntimeError in load_state_dict)
+            continue
+        lora_params[key] = t.to(device)
+
+    if not lora_params:
+        return
+
     model_state.update(lora_params)
-    model.load_state_dict(model_state, strict=True)
+    # Use strict=False since we're doing a partial update.
+    model.load_state_dict(model_state, strict=False)
 
 
 

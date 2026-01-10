@@ -61,6 +61,8 @@ class FedSVDStrategy(FedAvg):
         agg_flora: bool = False,
         agg_fedex: bool = False,
         send_deltas: bool = False,
+        recalculate_svd_period: int = 0,
+        svd_warmup_steps: int = 0,
         include_classifier: bool = True,
         param_name_fn: Optional[Callable[[], List[str]]] = None,
         **kwargs,
@@ -70,6 +72,8 @@ class FedSVDStrategy(FedAvg):
         self.agg_flora = agg_flora
         self.agg_fedex = agg_fedex
         self.send_deltas = send_deltas
+        self.recalculate_svd_period = int(recalculate_svd_period or 0)
+        self.svd_warmup_steps = int(svd_warmup_steps or 0)
         self.include_classifier = include_classifier
         self.param_name_fn = param_name_fn
 
@@ -80,6 +84,86 @@ class FedSVDStrategy(FedAvg):
 
         if self.agg_flora and self.agg_fedex:
             raise ValueError("FedSVDStrategy: only one of agg_flora/agg_fedex can be true")
+
+    def _reinit_svd(self, server_round: int, aggregated: List[np.ndarray], names: Optional[List[str]]) -> List[np.ndarray]:
+        """Optionally rerun SVD to reinitialize LoRA A/B (upstream fed-svd behavior).
+
+        Upstream logic (3rd-party/fed-svd): after aggregating and updating the global model,
+        the server periodically calls `reinit_lora(model)`:
+          - compute prod = B @ A
+          - SVD(prod) = V S U^T
+          - set A <- U^T[:r]
+          - set B <- V[:,:r] diag(S[:r])
+
+        In this Flower port we usually don't hold the actual torch model on the server
+        Strategy, so we apply the same transformation directly on the aggregated
+        parameter list using name-based pairing.
+        """
+
+        if self.recalculate_svd_period <= 0:
+            return aggregated
+        if server_round <= self.svd_warmup_steps:
+            return aggregated
+        if (server_round % self.recalculate_svd_period) != 0:
+            return aggregated
+        if not names:
+            # Can't identify LoRA A/B tensors without names.
+            return aggregated
+
+        # Aggregated list may be a prefix of `names` (PEFT partial params). Clamp for safety.
+        eff_len = min(len(aggregated), len(names))
+        names_eff = names[:eff_len]
+        out = list(aggregated[:eff_len])
+
+        # Build quick index of A/B tensors by their "base" prefix.
+        idx_a: Dict[str, int] = {}
+        idx_b: Dict[str, int] = {}
+        for i, nm in enumerate(names_eff):
+            if "lora_A" in nm or nm.endswith(".A") or "lora_embedding_A" in nm:
+                idx_a[nm.rsplit(".", 1)[0]] = i
+            elif "lora_B" in nm or nm.endswith(".B") or "lora_embedding_B" in nm:
+                idx_b[nm.rsplit(".", 1)[0]] = i
+
+        # Reinit each pair that exists.
+        for base, ia in idx_a.items():
+            ib = idx_b.get(base)
+            if ib is None:
+                continue
+
+            A = out[ia]
+            B = out[ib]
+
+            # Only handle 2D matrices (LoRA weights). Skip embeddings/odd shapes safely.
+            if not (isinstance(A, np.ndarray) and isinstance(B, np.ndarray)):
+                continue
+            if A.ndim != 2 or B.ndim != 2:
+                continue
+            if B.shape[1] != A.shape[0]:
+                # Expected shapes: A (r, in), B (out, r)
+                continue
+
+            prod = B @ A  # (out, in)
+            try:
+                U, S, Vt = np.linalg.svd(prod, full_matrices=False)
+            except Exception:
+                continue
+
+            r = A.shape[0]
+            # U: (out, k), S: (k,), Vt: (k, in)
+            Ur = U[:, :r]
+            Sr = S[:r]
+            Vtr = Vt[:r, :]
+
+            A_new = Vtr
+            B_new = Ur @ (np.diag(Sr).astype(B.dtype, copy=False))
+
+            out[ia] = A_new.astype(A.dtype, copy=False)
+            out[ib] = B_new.astype(B.dtype, copy=False)
+
+        # Keep any tail (when aggregated is longer than names, which shouldn't happen)
+        if len(aggregated) > eff_len:
+            out.extend(aggregated[eff_len:])
+        return out
 
     def configure_fit(self, server_round, parameters, client_manager):
         # Capture round-start global params (needed if clients send deltas)
@@ -109,7 +193,10 @@ class FedSVDStrategy(FedAvg):
 
         if self.send_deltas and self._round_start is not None and len(self._round_start) == len(aggregated):
             updated = [base + delta for base, delta in zip(self._round_start, aggregated)]
+            updated = self._reinit_svd(server_round, updated, names)
             return ndarrays_to_parameters(updated), {}
+
+        aggregated = self._reinit_svd(server_round, aggregated, names)
 
         return ndarrays_to_parameters(aggregated), {}
 
