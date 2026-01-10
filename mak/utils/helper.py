@@ -272,6 +272,71 @@ def extract_linear_layers(model):
 
     return linear_layers
 
+def extract_linear_layers(model, config=None):
+    """Return a dict of {layer_name: layer_module} for all linear layers in the model.
+    """
+    linear_layers = {}
+
+    # Read model name from config if provided
+    model_name = None
+    method = None
+    if config is not None:
+        model_name = config.get("common", {}).get("model", None)
+        method = config.get("peft", {}).get("method", None)
+
+        # Allow config to override the param if you want
+        if "peft" in config and "selective_attention_qv_only" in config["peft"]:
+            selective_attention_qv_only = bool(config["peft"]["selective_attention_qv_only"])
+
+    for name, module in model.named_modules():
+        if not isinstance(module, torch.nn.Linear):
+            continue
+
+        # Keep your existing skips
+        if name in ["pre_classifier", "classifier", "model.norm", "score"]:
+            continue
+
+        # Selective apply for LoRA-family only
+        if selective_attention_qv_only and method in {"lora", "ffa_lora", "fedsa_lora"}:
+            n = name.lower()
+
+            # Default: cover common HF naming
+            # BERT/RoBERTa: attention.self.query / attention.self.value
+            # LLaMA/Qwen: self_attn.q_proj / self_attn.v_proj
+            # Some libs: q_proj / v_proj without extra tokens
+            is_q = ("query" in n) or ("q_proj" in n) or n.endswith(".q")
+            is_v = ("value" in n) or ("v_proj" in n) or n.endswith(".v")
+
+            is_attn = ("attention" in n) or ("attn" in n) or ("self_attn" in n)
+
+            # If model_name is known, you can be stricter or looser per family
+            if model_name is not None:
+                mn = str(model_name).lower()
+
+                # Transformer NLP models: keep only attention q/v
+                if ("bert" in mn) or ("roberta" in mn) or ("distilbert" in mn):
+                    if not (("attention" in n) and (is_q or is_v)):
+                        continue
+
+                # LLaMA/Qwen style
+                elif ("llama" in mn) or ("qwen" in mn):
+                    if not ((("self_attn" in n) or ("attn" in n)) and (is_q or is_v)):
+                        continue
+
+                # Vision backbones (ViT, Swin, etc.) naming varies, so fallback to general rule
+                else:
+                    if not (is_attn and (is_q or is_v)):
+                        continue
+            else:
+                # No model_name: generic rule
+                if not (is_attn and (is_q or is_v)):
+                    continue
+
+        linear_layers[name] = module
+
+    return linear_layers
+
+
 def extract_conv2_layers(model):
     conv2_layers = {}
     for name, module in model.named_modules():
@@ -297,7 +362,7 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
         layers_to_svd = extract_conv2_layers(model) 
         log(INFO, f"Found {len(layers_to_svd)} conv2 layers to adapt with SVD.")
     else:
-        layers_to_svd = extract_linear_layers(model) 
+        layers_to_svd = extract_linear_layers(model=model, config=config) 
         log(INFO, f"Found {len(layers_to_svd)} linear layers to adapt with SVD.")
 
     rank = config["peft"]["rank"]
