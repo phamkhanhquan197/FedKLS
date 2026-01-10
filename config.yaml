@@ -8,7 +8,7 @@ common:
   dirichlet_alpha : 0.5 #dirichlet concentration parameter (only used if data_type is dirchlet-niid)
   target_acc : 0.99
   # model : Qwen/Qwen1.5-0.5B # one among [distilbert-base-uncased, bert-base-uncased, meta-llama/Llama-2-7b-hf, Qwen/Qwen1.5-0.5B, Net, CifarNet, SimpleCNN, KerasExpCNN, MNISTCNN, SimpleDNN, FMCNNModel,FedAVGCNN,Resnet18, Resnet34,ResNet18Pretrained, ResNet34Pretrained,ResNet18Small, ResNet20Small,MobileNetV2,EfficientNetB0,LSTMModel]
-  model: distilbert-base-uncased # roberta-large
+  model: roberta-large
   optimizer : sgd # one among [sgd,adam]
   sgd_momentum : 0.9
   seed : 123  #123 456 789
