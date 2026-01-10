@@ -86,7 +86,7 @@ dataset_info = {  # Image datasets
         "max_sequence_length": 128, #For transformer models
     },
     
-    "glue/sst2": {
+    "stanfordnlp/sst2": {
         "num_classes": 2,
         "feature_key": "sentence",
         "output_column": "label",
