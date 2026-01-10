@@ -42,8 +42,8 @@ client:
 
 peft:
   enabled: True #False = FFT, do not set method = fedkls when running FFT, pfedmoap do not run with peft=True
-  rank: 8
-  alpha: 16 #Equal to the rank, but, FedSA-LoRA requires double
+  rank: 32
+  alpha: 64 #Equal to the rank, but, FedSA-LoRA requires double
   method: fedsa_lora # ['pissa', 'milora', 'middle', 'fedkls', 'lora', 'ffa_lora']
   bias: True #To send the bias layer(after A/B) to server for aggregation or not
   selective_attention_qv_only: True #Select only qv layers in attention for Low Rank
