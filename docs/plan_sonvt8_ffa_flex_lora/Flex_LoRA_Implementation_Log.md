@@ -1,8 +1,8 @@
 # FlexLoRA Implementation Log (Baseline)
 
-*Last updated: 2026-01-09*
+*Last updated: 2026-01-10*
 
-This document records the **final baseline design**, key engineering decisions, and the **bugs/fixes** applied to make FlexLoRA stable in this repository.
+This document records the **final baseline design**, key engineering decisions, and the **issues/fixes** applied to make FlexLoRA stable in this repository.
 
 > Contract: **SVD must run on server-side only.** Clients must never perform SVD/decomposition.
 
@@ -34,10 +34,10 @@ Keys are returned as `sorted(set(keys))` for determinism.
 ### 2.2 Round 1 (initialization)
 - Server (strategy): sends **FULL** `state_dict` as a flat list in `state_dict().values()` order.
   - Implemented by `mak/strategies/flex_lora_strategy.py::initialize_parameters`.
-- Client: receives FULL payload and must adapt global-rank parameters to its **local rank**.
+- Client: receives FULL payload and must adapt global-rank parameters to its **local rank policy**.
   - Implemented by `mak/clients/flex_lora_client.py::set_parameters`:
-    1) `ensure_local_rank_adapters(model, local_rank)` (architecture-level rank adaptation, no SVD)
-    2) `slice_and_load_params(full_payload, local_rank)` (slice/pad A/B before loading)
+    1) `ensure_local_rank_adapters(model, rank_policy)` (architecture-level rank-policy adaptation, no client SVD)
+    2) `slice_and_load_params(full_payload, rank_policy)` (slice/pad A/B per adapter base)
 
 ### 2.3 Round > 1 (train loop)
 - Client uplink: sends **PARTIAL** list aligned with `get_ffa_target_keys(model)`.
@@ -45,7 +45,7 @@ Keys are returned as `sorted(set(keys))` for determinism.
 - Server downlink: returns **PARTIAL** list aligned with the same `get_ffa_target_keys(server_model)`.
 - Client applies partial update via `mak/utils/general.py::set_params(method="flex_lora")`:
   - maps by `get_ffa_target_keys(model)`
-  - slices/pads `.A/.B` to `rank_map[client_id]`
+  - slices/pads `.A/.B` per-adapter using `rank_policy` (Type 3 supported)
 
 ---
 
@@ -70,111 +70,82 @@ Implementation: `mak/strategies/flex_lora_strategy.py::aggregate_fit`.
 
 ---
 
-## 4) Rank heterogeneity (mocking)
+## 4) Resource heterogeneity (paper-aligned client types)
 
-We simulate heterogeneous client ranks deterministically via `config.yaml`:
+The paper models client resource heterogeneity via **4 LoRA configuration types** (Table 1) and multiple distributions (Figure 3).
 
-- `flex_lora_config.global_rank`: server/global rank
-- `flex_lora_config.rank_distribution`: list of `{rank, ratio}`
-- `flex_lora_config.seed`
+In this baseline:
+- `flex_lora_config.global_rank` is treated as **max/global rank** (paper Type 4, usually 200)
+- Each client is assigned a **client type** and derives a **rank policy**
 
-Rank map generation: `mak/utils/flex_lora_utils.py::generate_rank_map`.
+Type definitions (paper Table 1):
+- Type 1: `r = 8` on all layers
+- Type 2: `r = 30` on all layers
+- Type 3: `r = 30` on attention layers, `r = 200` on FFN layers (MAM-style)
+- Type 4: `r = 200` on all layers
 
----
+Config knobs:
+- `flex_lora_config.client_type_map`: explicit mapping `cid -> type_id` (recommended for deterministic smoke tests)
+- `flex_lora_config.client_type_distribution`: list of `{type, ratio}` (for large-N simulations)
 
-## 5) Critical bug fixes (smoketest-driven)
-
-### 5.1 Fix: CPU vs CUDA device mismatch in adapter residual (`W_res`)
-
-**Symptom** (older run):
-- `RuntimeError: Expected all tensors to be on the same device, but found cuda:0 and cpu!`
-- at `SVDAdapter.forward`: `effective_weight = self.W_res + scaling * (A @ B)`
-
-**Root cause**:
-- `W_res` was not moving with `model.to(device)`.
-
-**Fix** (server+client safe):
-- Register `W_res` as buffer in `mak/models/svd_model.py`:
-  - `self.register_buffer("W_res", W_res.clone().detach())`
-
-### 5.2 Fix: Rank drift / `size mismatch` when local_rank < global_rank (Option A)
-
-**Symptom** (failed smoketest):
-- Client with local rank 8 crashed on Round 1 FULL payload load:
-  - `size mismatch ... copying [*, 8] into [*, 64]`
-- Log showed:
-  - `Adapter rank mismatch ... -> rebuilding adapters (no SVD).`
-  - `Injected 0 LoRA adapters without SVD (rank=8).`
-
-**Root cause**:
-- Server converts `nn.Linear -> SVDAdapter` at startup (`apply_svd_to_model`).
-- Previous client rebuild logic attempted to scan for `nn.Linear` to re-inject adapters.
-- After adaptation, there are **no `nn.Linear` modules** left; rebuild replaced 0 layers.
-
-**Fix (Option A, minimal blast radius, no client SVD)**:
-- Rebuild existing **`SVDAdapter` modules** directly to desired local rank.
-- Implemented in `mak/utils/flex_lora_utils.py`:
-  - `_rebuild_svd_adapters_no_svd(...)` (replaces SVDAdapter(rank=R) -> SVDAdapter(rank=r))
-  - `ensure_local_rank_adapters(...)` now:
-    1) tries `_rebuild_svd_adapters_no_svd` first
-    2) falls back to `_inject_lora_adapters_no_svd` only if no SVDAdapters exist
-
-**Smoketest status**:
-- PASS (2 rounds completed; `FL finished in ...` marker present).
+Implementation:
+- `mak/utils/flex_lora_utils.py::build_client_type_map`
+- `mak/utils/flex_lora_utils.py::build_client_rank_policy_map`
 
 ---
 
-## 6) Prioritized issues & mitigations (baseline + paper alignment)
+## 5) Prioritized issues & mitigations (baseline + paper alignment)
 
 This section ranks the most important remaining issues ("issues" instead of "bugs") from highest to lowest priority.
 
-### P0) Missing client-type support (paper fidelity blocker)
+### P0) Client-type support (paper fidelity)
 
-**Why important**:
-- Paper FlexLoRA models resource heterogeneity via **4 client types** (Table 1) and multiple **type distributions** (Figure 3).
-- Current baseline only supports **one rank per client** (uniform rank across all adapted layers), which cannot represent **Type 3** (different ranks for attention vs FFN layers).
+**Status**: **PASS (smoke test)**
 
-**Current behavior (baseline)**:
-- `flex_lora_config.rank_distribution` generates `rank_map[cid] -> local_rank`.
-- `ensure_local_rank_adapters` and `set_params(method="flex_lora")` apply that single `local_rank` to all `.A/.B` factors.
+**What was missing**:
+- Older baseline only supported a single `rank` per client, uniformly applied to all adapters.
+- This could not represent paper **Type 3** (different ranks for attention vs FFN layers).
 
-**Impact**:
-- The implementation cannot reproduce key experiments/claims of the paper regarding heterogeneous resource distributions.
-- Any evaluation of FlexLoRA under heterogeneous client types is currently incomplete.
-
-**Proposed direction (short)**:
-- Replace `rank_map` with a richer **client configuration map**:
+**Key changes that enabled PASS**:
+- Introduced **client types** and derived **per-layer rank policies**:
   - `client_type_map[cid] -> type_id`
-  - `type_id -> rank_policy`, e.g.
-    - Type1: `r=8` all tunable layers
-    - Type2: `r=30` all tunable layers
-    - Type3: `r_attn=30`, `r_ffn=200` (MAM-style)
-    - Type4: `r=200` all tunable layers
-- Add layer-group detection for models (at least DistilBERT/BERT-style):
-  - attention layers: names containing `attention` or `self_attn`
-  - FFN layers: names containing `ffn`, `mlp`, `lin1/lin2`
-- Extend slicing/loading to be **per-layer rank** (not single rank).
+  - `rank_policy[cid] -> {all|attn|ffn: rank}`
+- Enforced **global_rank = max rank** (paper Type 4): `global_rank = 200`, with local ranks `<= global_rank`.
+- Refactored client-side adaptation and parameter loading to be **policy-based** (per adapter base):
+  - `ensure_local_rank_adapters(model, rank_policy)`
+  - `slice_and_load_params(full_payload, rank_policy)`
+  - `set_params(method="flex_lora")` slices/pads `.A/.B` per adapter using `rank_policy`
 
-**Minimal smoke tests to add**:
-- 2 clients, 2 rounds, assign Type3 to at least one client, verify:
-  - no `size mismatch` on Round 1 full payload
-  - communication size differs by type (Type3 larger than Type1)
-  - aggregation runs without crash
+**Smoke evidence (example run)**:
+- `FlexLoRA global_rank: 200`
+- `FlexLoRA client_type_map: {0: 3, 1: 1}`
+- `FlexLoRA client_rank_policy_map: {0: {'attn': 30, 'ffn': 200}, 1: {'all': 8}}`
+- `FL finished in ...` marker present.
 
-### P1) Repeated local-rank rebuild can silently reset adapter state
+**Notes**:
+- The smoke test is a functional correctness gate (pipeline runs end-to-end with Type 3 present).
+- Paper-scale experiments still require distribution-driven sampling (Uniform/Heavy-tail/Normal) on large client counts.
+
+### P1) Repeated adapter rebuild (rank mismatch) can silently reset adapter state
 
 **Why important**:
-- Smoke logs show frequent `Adapter rank mismatch ... -> rebuilding adapters (no SVD)` events for low-rank clients.
+- Recent smoke logs show frequent `Adapter rank-policy mismatch ... -> rebuilding adapters (no SVD)` events.
 - Current rebuild path re-initializes `A` (random) and `B` (zeros), which can erase learned adapter state and degrade convergence without a crash.
 
 **Symptom (smoke logs)**:
-- `Adapter rank mismatch detected. desired=8 ... -> rebuilding adapters (no SVD).`
-- `Rebuilt 36 SVDAdapter modules without SVD (rank=8).`
+- `Adapter rank-policy mismatch detected. A_bad=... B_bad=... -> rebuilding adapters (no SVD).`
+- `Rebuilt 36 SVDAdapter modules without SVD (rank_policy).`
+
+**Root cause (likely)**:
+- The Flower simulation runtime may reuse/serialize client actor state across fit/eval phases.
+- The local client model may temporarily hold global-rank tensors (or mixed-rank tensors) before policy enforcement, triggering repeated rebuilds.
 
 **Proposed mitigation (short)**:
 - Make rank adaptation **idempotent and preserving**:
   - When changing rank, project existing `(A,B)` by truncate/pad rather than re-init.
-  - Ensure `ensure_local_rank_adapters` runs only once per client lifecycle where possible.
+- Reduce rebuild frequency:
+  - Ensure policy-shaped adapters are created once per client lifecycle (after initial full payload), then maintained.
+  - Add lightweight validation/logging to detect why/when ranks drift between phases.
 
 ### P2) Payload protocol relies on list length (fragile with heterogeneous client types)
 
@@ -215,6 +186,40 @@ This section ranks the most important remaining issues ("issues" instead of "bug
 
 ---
 
+## 6) Critical bug fixes (smoketest-driven)
+
+### 6.1 Fix: CPU vs CUDA device mismatch in adapter residual (`W_res`)
+
+**Symptom** (older run):
+- `RuntimeError: Expected all tensors to be on the same device, but found cuda:0 and cpu!`
+- at `SVDAdapter.forward`: `effective_weight = self.W_res + scaling * (A @ B)`
+
+**Root cause**:
+- `W_res` was not moving with `model.to(device)`.
+
+**Fix** (server+client safe):
+- Register `W_res` as buffer in `mak/models/svd_model.py`:
+  - `self.register_buffer("W_res", W_res.clone().detach())`
+
+### 6.2 Fix: Round-1 `size mismatch` when local rank differs from global rank (historical)
+
+**Symptom** (older run):
+- Low-rank clients crashed on Round 1 FULL payload load:
+  - `size mismatch ... copying [*, r_small] into [*, r_global]`
+
+**Root cause**:
+- Server converts `nn.Linear -> SVDAdapter` at startup (`apply_svd_to_model`).
+- Older client logic attempted to scan for `nn.Linear` to re-inject adapters.
+- After server adaptation there are no `nn.Linear` modules left.
+
+**Fix**:
+- Rebuild existing `SVDAdapter` modules without SVD on client.
+
+**Current status**:
+- PASS for the updated policy-based pipeline (no `size mismatch` in latest smoke test).
+
+---
+
 ## 7) Smoke test harness notes
 
 In `smoke_test_FlexLoRA.ipynb`, the failure detector should grep for generic mismatch messages.
@@ -223,19 +228,23 @@ Recommended check:
 - grep for `"size mismatch"` (Torch often prints `size mismatch for <param> ...`)
 - not only `"RuntimeError: size mismatch"`.
 
+NOTE (important for bash cells):
+- When using `set -e`, optional path-based checks should not return a non-zero exit code.
+- Prefer a resilient log finder (e.g., `find /content/output -name log.txt`) and use `|| true` for optional checks.
+
 ---
 
 ## 8) File map (baseline implementation)
 
 - Entry: `main.py`
-  - generates `rank_map` when `strategy == FlexLoRA`
+  - builds `client_type_map` and `client_rank_policy_map` when `strategy == FlexLoRA`
   - applies server-side SVD adaptation using `apply_svd_to_model` with `global_rank`
   - deep-copies model per client to avoid shared mutation
 - Utilities: `mak/utils/flex_lora_utils.py`
-  - rank_map generation, server-rank config, local-rank rebuild/injection, full-payload slicing
+  - client-type assignment, per-layer rank policy, policy-based adapter rebuild and full-payload slicing
 - Client: `mak/clients/flex_lora_client.py`
-  - Round 1 full load with local-rank architecture ensure
-  - Round > 1 partial updates using deterministic keys
+  - Round 1 full load with rank-policy architecture ensure
+  - Round > 1 partial updates using deterministic keys + policy-based slice/pad
 - Server Strategy: `mak/strategies/flex_lora_strategy.py`
   - correct LoRA aggregation by ΔW-space + SVD reprojection (server-side only)
 - Server wrapper: `mak/servers/flex_lora_server.py` (thin wrapper)
