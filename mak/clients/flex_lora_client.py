@@ -65,17 +65,24 @@ class FlexLoRAClient(BaseClient):
 
         return [params_to_send[k].detach().cpu().numpy() for k in target_keys]
 
-    def set_parameters(self, parameters: List[np.ndarray]) -> None:
-        """Load parameters.
+    def fit(self, parameters, config):
+        """P2 FIX: Override fit to receive config and pass it to set_parameters."""
+        self.set_parameters(parameters, config)
+        return super().fit(parameters, config)
 
-        - Round 1: FULL state_dict downlink (global_rank). We slice A/B to local_rank.
-        - Round > 1: PARTIAL downlink aligned with get_ffa_target_keys(model).
-        """
-        model_state = self.model.state_dict()
-        target_keys = get_ffa_target_keys(self.model)
+    def set_parameters(self, parameters: List[np.ndarray], config: dict) -> None:
+        """Load parameters based on `payload_kind` from config."""
+        payload_kind = config.get("payload_kind", None)
+        if payload_kind is None:
+            # Fallback for non-FlexLoRA strategies or if metadata is missing
+            # This path is now considered legacy for FlexLoRA
+            super().set_parameters(parameters)
+            return
+
+        # --- FlexLoRA specific logic ---
 
         # Round 1: FULL model update (global payload)
-        if len(parameters) == len(model_state):
+        if payload_kind == "full":
             if not self.rank_policy_map or int(self.client_id) not in self.rank_policy_map:
                 raise ValueError("FlexLoRA requires rank_policy_map[client_id] for full update slicing")
 
@@ -98,34 +105,31 @@ class FlexLoRAClient(BaseClient):
             self._policy_initialized = True
             return
 
-        # Round > 1: partial update must match our target key list
-        if len(parameters) != len(target_keys):
-            raise ValueError(
-                f"Parameter count mismatch: expected {len(target_keys)}, got {len(parameters)}"
+        # Round > 1: PARTIAL model update
+        elif payload_kind == "partial":
+            if not self.rank_policy_map or int(self.client_id) not in self.rank_policy_map:
+                raise ValueError("FlexLoRA requires rank_policy_map[client_id] for partial update slicing")
+
+            if not self._policy_initialized:
+                # Fallback safety: enforce policy once (projection-based; should not reset after P1 Step 1).
+                rank_policy = self.rank_policy_map[int(self.client_id)]
+                self.model = ensure_local_rank_adapters(
+                    model=self.model,
+                    base_config=self.config_sim,
+                    rank_policy=rank_policy,
+                )
+                self._policy_initialized = True
+
+            set_params(
+                self.model,
+                parameters,
+                method="flex_lora",
+                bias=self.config_sim.get("peft", {}).get("bias", True),
+                client_id=self.client_id,
+                rank_policy_map=self.rank_policy_map,
+                device=str(self.device),
             )
 
-        # Round > 1: policy should already be established after Round 1.
-        if not self.rank_policy_map or int(self.client_id) not in self.rank_policy_map:
-            raise ValueError("FlexLoRA requires rank_policy_map[client_id] for partial update slicing")
-
-        if not self._policy_initialized:
-            # Fallback safety: enforce policy once (projection-based; should not reset after P1 Step 1).
-            rank_policy = self.rank_policy_map[int(self.client_id)]
-            self.model = ensure_local_rank_adapters(
-                model=self.model,
-                base_config=self.config_sim,
-                rank_policy=rank_policy,
-            )
-            self._policy_initialized = True
-
-        set_params(
-            self.model,
-            parameters,
-            method="flex_lora",
-            bias=self.config_sim.get("peft", {}).get("bias", True),
-            client_id=self.client_id,
-            rank_policy_map=self.rank_policy_map,
-            device=str(self.device),
-        )
-
-        self.model.to(self.device)
+            self.model.to(self.device)
+        else:
+            raise ValueError(f"Unknown payload_kind for FlexLoRA: {payload_kind}")

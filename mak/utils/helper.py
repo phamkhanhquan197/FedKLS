@@ -1065,6 +1065,14 @@ def get_fit_config_fn(config_sim):
             "proximal_mu": config_sim["fedprox"]["proximal_mu"],
             "loss": config_sim["client"]["loss"],
         }
+
+        # P2 FIX: Add explicit payload kind for FlexLoRA
+        if config["strategy"] == "FlexLoRA":
+            if server_round == 1:
+                config["payload_kind"] = "full"
+            else:
+                config["payload_kind"] = "partial"
+
         return config
 
     return fit_config

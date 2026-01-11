@@ -128,24 +128,22 @@ This section ranks the most important remaining issues ("issues" instead of "bug
 
 ### P1) Repeated adapter rebuild (rank mismatch) can silently reset adapter state
 
-**Why important**:
-- Recent smoke logs show frequent `Adapter rank-policy mismatch ... -> rebuilding adapters (no SVD)` events.
-- Current rebuild path re-initializes `A` (random) and `B` (zeros), which can erase learned adapter state and degrade convergence without a crash.
+**Status**: **IMPROVED (rebuild reduced)**
 
-**Symptom (smoke logs)**:
-- `Adapter rank-policy mismatch detected. A_bad=... B_bad=... -> rebuilding adapters (no SVD).`
-- `Rebuilt 36 SVDAdapter modules without SVD (rank_policy).`
+**What was the issue**:
+- Smoke logs showed frequent `Adapter rank-policy mismatch ... -> rebuilding adapters (no SVD)` events, even in rounds after initialization.
+- The original rebuild logic re-initialized adapters (`A=randn`, `B=zeros`), which could erase learned state and degrade convergence.
 
-**Root cause (likely)**:
-- The Flower simulation runtime may reuse/serialize client actor state across fit/eval phases.
-- The local client model may temporarily hold global-rank tensors (or mixed-rank tensors) before policy enforcement, triggering repeated rebuilds.
+**Key changes that improved this**:
+- **Step 1 (Preserve state)**: Rebuild logic in `_rebuild_svd_adapters_no_svd_policy` was changed to **project** existing `A` and `B` matrices (truncate/pad) instead of re-initializing. This ensures that even if a rebuild is triggered, learned weights are not lost.
+- **Step 2 (Reduce frequency)**: A `_policy_initialized` flag was added to `FlexLoRAClient`. This ensures the expensive/disruptive `ensure_local_rank_adapters` is called only once during the first full payload update. Subsequent rounds skip this check, assuming the policy-shaped model is maintained.
 
-**Proposed mitigation (short)**:
-- Make rank adaptation **idempotent and preserving**:
-  - When changing rank, project existing `(A,B)` by truncate/pad rather than re-init.
-- Reduce rebuild frequency:
-  - Ensure policy-shaped adapters are created once per client lifecycle (after initial full payload), then maintained.
-  - Add lightweight validation/logging to detect why/when ranks drift between phases.
+**Smoke evidence (latest run)**:
+- `Adapter rank-policy mismatch detected ...` log **only appears in Round 1** (fit and eval phases).
+- **Round 2 shows no rebuild logs**, confirming the `_policy_initialized` flag is working.
+
+**Remaining sub-issue**:
+- Rebuild still occurs between `fit` and `eval` in Round 1. This is a minor issue now that state is preserved, but indicates a small state drift within the client actor's lifecycle that could be further optimized.
 
 ### P2) Payload protocol relies on list length (fragile with heterogeneous client types)
 
