@@ -47,6 +47,7 @@ class FlexLoRAClient(BaseClient):
             bias=bias,
         )
         self.rank_policy_map = rank_policy_map or {}
+        self._policy_initialized = False
 
     def __repr__(self) -> str:
         return " FlexLoRA client"
@@ -94,6 +95,7 @@ class FlexLoRAClient(BaseClient):
                 device=str(self.device),
             )
             self.model.to(self.device)
+            self._policy_initialized = True
             return
 
         # Round > 1: partial update must match our target key list
@@ -102,17 +104,19 @@ class FlexLoRAClient(BaseClient):
                 f"Parameter count mismatch: expected {len(target_keys)}, got {len(parameters)}"
             )
 
-        # Defensive: ensure local-rank adapters are still present (the model may be
-        # reconstructed/reused by the simulation runtime across phases).
+        # Round > 1: policy should already be established after Round 1.
         if not self.rank_policy_map or int(self.client_id) not in self.rank_policy_map:
             raise ValueError("FlexLoRA requires rank_policy_map[client_id] for partial update slicing")
-        rank_policy = self.rank_policy_map[int(self.client_id)]
 
-        self.model = ensure_local_rank_adapters(
-            model=self.model,
-            base_config=self.config_sim,
-            rank_policy=rank_policy,
-        )
+        if not self._policy_initialized:
+            # Fallback safety: enforce policy once (projection-based; should not reset after P1 Step 1).
+            rank_policy = self.rank_policy_map[int(self.client_id)]
+            self.model = ensure_local_rank_adapters(
+                model=self.model,
+                base_config=self.config_sim,
+                rank_policy=rank_policy,
+            )
+            self._policy_initialized = True
 
         set_params(
             self.model,
