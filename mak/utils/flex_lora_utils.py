@@ -329,7 +329,11 @@ def _rebuild_svd_adapters_no_svd_policy(
     rank_policy: RankPolicy,
     rank_for_base: Optional[Callable[[RankPolicy, str], int]] = None,
 ) -> tuple[torch.nn.Module, int]:
-    """Rebuild SVDAdapter modules per-layer using a rank policy (client-safe, no SVD)."""
+    """Rebuild SVDAdapter modules per-layer using a rank policy (client-safe, no SVD).
+
+    P1 mitigation (Step 1): preserve existing adapter state by projecting A/B to the
+    desired rank (truncate or zero-pad) instead of re-initializing.
+    """
     from mak.models.svd_model import SVDAdapter
 
     rank_for_base = rank_for_base or get_rank_for_base
@@ -360,8 +364,13 @@ def _rebuild_svd_adapters_no_svd_policy(
         device = W_res.device
         dtype = W_res.dtype
 
-        A = (torch.randn(d_out, desired, device=device, dtype=dtype) * 0.01)
-        B = torch.zeros(desired, d_in, device=device, dtype=dtype)
+        # --- P1 FIX: Project existing A/B instead of re-initializing ---
+        A_old = module.A.clone().detach()
+        B_old = module.B.clone().detach()
+
+        A = _slice_pad_lora_factor(A_old, local_rank=desired, is_A=True)
+        B = _slice_pad_lora_factor(B_old, local_rank=desired, is_A=False)
+        # --- END P1 FIX ---
 
         # Preserve bias values if present
         if getattr(module, "bias", None) is not None:
