@@ -109,23 +109,23 @@ class FlexLoRAClient(BaseClient):
             if not self._policy_initialized:
                 # Fallback safety: enforce policy once (projection-based; should not reset after P1 Step 1).
                 rank_policy = self.rank_policy_map[int(self.client_id)]
-        self.model = ensure_local_rank_adapters(
-            model=self.model,
-            base_config=self.config_sim,
+                self.model = ensure_local_rank_adapters(
+                    model=self.model,
+                    base_config=self.config_sim,
                     rank_policy=rank_policy,
-        )
+                )
                 self._policy_initialized = True
 
-        set_params(
-            self.model,
-            parameters,
-            method="flex_lora",
-            bias=self.config_sim.get("peft", {}).get("bias", True),
-            client_id=self.client_id,
+            set_params(
+                self.model,
+                parameters,
+                method="flex_lora",
+                bias=self.config_sim.get("peft", {}).get("bias", True),
+                client_id=self.client_id,
                 rank_policy_map=self.rank_policy_map,
-            device=str(self.device),
-        )
+                device=str(self.device),
+            )
 
-        self.model.to(self.device)
+            self.model.to(self.device)
         else:
             raise ValueError(f"Unknown payload_kind for FlexLoRA: {payload_kind}")
