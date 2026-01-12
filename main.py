@@ -243,6 +243,7 @@ def main():
 
     server = get_server(
         strategy=strategy,
+        server=server,
         client_manager=fl.server.client_manager.SimpleClientManager(),
         out_file_path=out_file_path,
         target_acc=config_sim["common"]["target_acc"],

@@ -65,19 +65,15 @@ class FlexLoRAClient(BaseClient):
 
         return [params_to_send[k].detach().cpu().numpy() for k in target_keys]
 
-    def fit(self, parameters, config):
-        """P2 FIX: Override fit to receive config and pass it to set_parameters."""
-        self.set_parameters(parameters, config)
-        return super().fit(parameters, config)
-
-    def set_parameters(self, parameters: List[np.ndarray], config: dict) -> None:
+    def set_parameters(self, parameters: List[np.ndarray], config: dict | None = None) -> None:
         """Load parameters based on `payload_kind` from config."""
-        payload_kind = config.get("payload_kind", None)
+        # P2 FIX: Determine payload kind from config if available, otherwise fallback to length
+        payload_kind = config.get("payload_kind") if config else None
         if payload_kind is None:
-            # Fallback for non-FlexLoRA strategies or if metadata is missing
-            # This path is now considered legacy for FlexLoRA
-            super().set_parameters(parameters)
-            return
+            if len(parameters) == len(self.model.state_dict()):
+                payload_kind = "full"
+            else:
+                payload_kind = "partial"
 
         # --- FlexLoRA specific logic ---
 
@@ -113,23 +109,23 @@ class FlexLoRAClient(BaseClient):
             if not self._policy_initialized:
                 # Fallback safety: enforce policy once (projection-based; should not reset after P1 Step 1).
                 rank_policy = self.rank_policy_map[int(self.client_id)]
-                self.model = ensure_local_rank_adapters(
-                    model=self.model,
-                    base_config=self.config_sim,
+        self.model = ensure_local_rank_adapters(
+            model=self.model,
+            base_config=self.config_sim,
                     rank_policy=rank_policy,
-                )
+        )
                 self._policy_initialized = True
 
-            set_params(
-                self.model,
-                parameters,
-                method="flex_lora",
-                bias=self.config_sim.get("peft", {}).get("bias", True),
-                client_id=self.client_id,
+        set_params(
+            self.model,
+            parameters,
+            method="flex_lora",
+            bias=self.config_sim.get("peft", {}).get("bias", True),
+            client_id=self.client_id,
                 rank_policy_map=self.rank_policy_map,
-                device=str(self.device),
-            )
+            device=str(self.device),
+        )
 
-            self.model.to(self.device)
+        self.model.to(self.device)
         else:
             raise ValueError(f"Unknown payload_kind for FlexLoRA: {payload_kind}")

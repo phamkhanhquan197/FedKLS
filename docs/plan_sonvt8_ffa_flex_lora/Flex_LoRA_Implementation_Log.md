@@ -147,13 +147,20 @@ This section ranks the most important remaining issues ("issues" instead of "bug
 
 ### P2) Payload protocol relies on list length (fragile with heterogeneous client types)
 
-**Why important**:
-- The code infers "full vs partial" by `len(payload)`.
-- With future client-type extensions (different communicated keys), this can break aggregation or cause hard-to-debug mismatches.
+**Status**: **PASS (smoke test)**
 
-**Proposed mitigation (short)**:
-- Carry explicit metadata in config (e.g., `payload_kind: full|partial`) or include a stable header.
-- Validate keys against a shared contract per client type.
+**What was the issue**:
+- The client logic used `len(parameters)` to differentiate between a full model update (Round 1) and a partial update (Round > 1).
+- This is fragile and would break if different client types had different sets of trainable parameters, leading to different payload lengths.
+
+**Key changes that enabled PASS**:
+- **Explicit protocol via metadata**: The server now adds a `payload_kind: "full" | "partial"` field to the config dictionary sent to clients during `fit`.
+- **Client-side logic update**: `FlexLoRAClient` was refactored to read this `payload_kind` from the config to determine how to handle the incoming parameters, removing the dependency on `len()`.
+- **Backward compatibility**: A fallback to the `len()`-based logic was kept to ensure `BaseClient` behavior is not broken for other strategies.
+
+**Smoke evidence (latest run)**:
+- The smoke test passed successfully with the new protocol, confirming no regressions.
+- The `TypeError` crash (caused by a temporary signature mismatch during refactoring) was resolved.
 
 ### P3) Server-side SVD scalability and OOM risk (large models)
 
@@ -172,15 +179,6 @@ This section ranks the most important remaining issues ("issues" instead of "bug
 
 **Proposed mitigation (short)**:
 - Add explicit tests for a CNN backbone (e.g., ResNet) if FlexLoRA is expected to support it.
-
-### P5) Warning: Flower reports "Both server and strategy were provided, ignoring strategy"
-
-**Why important**:
-- This is a compatibility/maintenance risk across Flower versions.
-- Even if the current run works, behavior could change.
-
-**Proposed mitigation (short)**:
-- Ensure the simulation is configured in one canonical way (either pass `server=` or rely on strategy-managed server).
 
 ---
 
