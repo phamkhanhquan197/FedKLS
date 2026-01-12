@@ -284,7 +284,17 @@ class BaseClient(fl.client.NumPyClient):
 
         for _ in range(epochs):
             for batch in trainloader:
-                if self.feature_key == "text" or self.feature_key == "content":
+                # Check if multimodal (feature_key is a list with both image and text)
+                if isinstance(self.feature_key, list) and "image" in self.feature_key and "text" in self.feature_key:
+                    # Multimodal forward pass
+                    pixel_values = batch["image"].to(device)
+                    input_ids = batch["input_ids"].to(device)
+                    attention_mask = batch["attention_mask"].to(device)
+                    labels = batch[self.output_column].to(device)
+                    optim.zero_grad()
+                    logits = net(pixel_values=pixel_values, input_ids=input_ids, attention_mask=attention_mask)
+                    loss = criterion(logits, labels)
+                elif self.feature_key == "text" or self.feature_key == "content":
                     # Text-specific forward pass
                     input_ids = batch["input_ids"].to(device)
                     attention_mask = batch["attention_mask"].to(device)
@@ -314,7 +324,7 @@ class BaseClient(fl.client.NumPyClient):
 
 
     def test(self, net, testloader, device: str):
-        return test(net=net, testloader=testloader, device=device, feature_key=self.feature_key)
+        return test(net=net, testloader=testloader, device=device, feature_key=self.feature_key, dataset_name=self.dataset_name)
 
     # def save_state(self):
     #     torch.save({

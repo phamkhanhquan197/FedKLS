@@ -47,50 +47,233 @@ def main():
     model_name = config_sim['common']['model']
     shape = dataset_info[dataset_name]["input_shape"]
 
-    if model_name == "clip" or config_sim["server"]["strategy"] == "PFedMoAP":
-        # optional: derive img_size from pfedmoap_config/backbone
-        transformation_pipeline = CLIPTransformationPipeline(dataset_name=dataset_name, img_size=224)
-
     # Check if the dataset is a text dataset and use the appropriate transformation pipeline
     if dataset_name in ['SetFit/20_newsgroups', 'legacy-datasets/banking77', 'fancyzhx/dbpedia_14'] or model_name in ['distilbert-base-uncased', 'microsoft/deberta-v3-base', 'llama2-7b']:
         # For text datasets, we need to use a different transformation pipeline
         transformation_pipeline = TextTransformationPipeline(dataset_name=dataset_name, model_name=model_name)
-    elif dataset_name in ['pranavmr/MM-IMDb']:
+    elif dataset_name in ['pranavmr/MM-IMDb', 'kkim0451/UPMC-Food101']:
         # Get multimodal feature keys from dataset_info
         features = dataset_info[dataset_name]["feature_key"]
+        output_column = dataset_info[dataset_name]["output_column"]
         
-        transformation_pipeline = {}
-        if "image" in features:
-            transformation_pipeline["image"] = TransformationPipeline(dataset_name=dataset_name)
-        if "text" in features:
-            transformation_pipeline["text"] = TextTransformationPipeline(
-                dataset_name=dataset_name, 
-                model_name=model_name
-            )
+        # Use CLIPTransformationPipeline for image (CLIP model requires CLIP preprocessing)
+        # Use TextTransformationPipeline for text
+        from torchvision.transforms import Compose, Lambda, Resize, CenterCrop, ToTensor, Normalize
+        
+        # CLIP image transforms for individual examples
+        # Safe image transform that handles both PIL Images and edge cases
+        def safe_convert_rgb(img):
+            """Safely convert image to RGB, handling edge cases."""
+            if isinstance(img, list):
+                # If img is a list, take the first element (shouldn't happen but defensive)
+                img = img[0] if len(img) > 0 else img
+            if hasattr(img, 'mode'):
+                return img.convert("RGB") if img.mode != "RGB" else img
+            return img
+        
+        clip_img_transform = Compose([
+            Lambda(safe_convert_rgb),
+            Resize(224, interpolation=3),
+            CenterCrop(224),
+            ToTensor(),
+            Normalize(
+                mean=(0.48145466, 0.4578275, 0.40821073),
+                std=(0.26862954, 0.26130258, 0.27577711),
+            ),
+        ])
+        
+        # Text tokenizer
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+        max_seq_length = dataset_info[dataset_name]["max_sequence_length"]
 
         def apply_transforms(example):
-            transformed = {}
-            if "image" in features:
-                transformed["image"] = transformation_pipeline["image"].apply_train_transform(example["image"])
-            if "text" in features:
-                transformed["text"] = transformation_pipeline["text"].apply_train_transform(example["text"])
-            transformed["labels"] = example["labels"]
-            return transformed
+            # Check if this is a batch (dict of lists) or single example
+            image_val = example.get("image") if isinstance(example, dict) else None
+            text_val = example.get("text") if isinstance(example, dict) else None
+            is_batch = isinstance(image_val, list) or isinstance(text_val, list)
+            
+            if is_batch:
+                # Process batch: DataLoader may call this with batch
+                transformed = {}
+                if "image" in features:
+                    # Process each image in batch, filtering out any non-PIL Image items
+                    processed_images = []
+                    for idx, img in enumerate(example["image"]):
+                        # Skip if img is a list (shouldn't happen but defensive)
+                        if isinstance(img, list):
+                            if len(img) > 0:
+                                img = img[0]
+                            else:
+                                continue
+                        processed_images.append(clip_img_transform(img))
+                    transformed["image"] = torch.stack(processed_images)
+                if "text" in features:
+                    text_encodings = tokenizer(
+                        example["text"],
+                        padding="max_length",
+                        max_length=max_seq_length,
+                        truncation=True,
+                        return_tensors="pt",
+                    )
+                    transformed["input_ids"] = text_encodings["input_ids"]
+                    transformed["attention_mask"] = text_encodings["attention_mask"]
+                
+                # Handle labels for batch
+                labels = example[output_column]
+                is_multi_label = dataset_info[dataset_name].get("multi_label", False)
+                if is_multi_label:
+                    # Convert each label list to one-hot tensor
+                    num_classes = dataset_info[dataset_name]["num_classes"]
+                    label_to_idx = {name: idx for idx, name in enumerate(classnames)} if classnames else {}
+                    label_tensors = []
+                    for label_list in labels:
+                        label_tensor = torch.zeros(num_classes, dtype=torch.float32)
+                        if isinstance(label_list, list):
+                            for label_item in label_list:
+                                if isinstance(label_item, str) and label_item in label_to_idx:
+                                    label_tensor[label_to_idx[label_item]] = 1.0
+                                elif isinstance(label_item, int) and 0 <= label_item < num_classes:
+                                    label_tensor[label_item] = 1.0
+                        label_tensors.append(label_tensor)
+                    transformed[output_column] = torch.stack(label_tensors)
+                else:
+                    transformed[output_column] = labels
+                return transformed
+            else:
+                # Process single example
+                transformed = {}
+                if "image" in features:
+                    transformed["image"] = clip_img_transform(example["image"])
+                if "text" in features:
+                    text_encodings = tokenizer(
+                        example["text"],
+                        padding="max_length",
+                        max_length=max_seq_length,
+                        truncation=True,
+                        return_tensors="pt",
+                    )
+                    transformed["input_ids"] = text_encodings["input_ids"].squeeze(0)
+                    transformed["attention_mask"] = text_encodings["attention_mask"].squeeze(0)
+                
+                # Handle labels: convert list to tensor for multi-label datasets
+                labels = example[output_column]
+                is_multi_label = dataset_info[dataset_name].get("multi_label", False)
+                if is_multi_label and isinstance(labels, list):
+                    # Convert multi-label list (of strings or ints) to one-hot tensor
+                    num_classes = dataset_info[dataset_name]["num_classes"]
+                    label_tensor = torch.zeros(num_classes, dtype=torch.float32)
+                    label_to_idx = {name: idx for idx, name in enumerate(classnames)} if classnames else {}
+                    for label_item in labels:
+                        if isinstance(label_item, str) and label_item in label_to_idx:
+                            label_tensor[label_to_idx[label_item]] = 1.0
+                        elif isinstance(label_item, int) and 0 <= label_item < num_classes:
+                            label_tensor[label_item] = 1.0
+                    transformed[output_column] = label_tensor
+                else:
+                    transformed[output_column] = labels
+                return transformed
 
         def apply_transforms_test(example):
-            transformed = {}
-            if "image" in features:
-                transformed["image"] = transformation_pipeline["image"].apply_test_transform(example["image"])
-            if "text" in features:
-                transformed["text"] = transformation_pipeline["text"].apply_test_transform(example["text"])
-            transformed["labels"] = example["labels"]
-            return transformed
+            # Check if this is a batch (dict of lists) or single example
+            image_val = example.get("image") if isinstance(example, dict) else None
+            text_val = example.get("text") if isinstance(example, dict) else None
+            is_batch = isinstance(image_val, list) or isinstance(text_val, list)
+            
+            if is_batch:
+                # Process batch: DataLoader may call this with batch
+                transformed = {}
+                if "image" in features:
+                    # Process each image in batch, filtering out any non-PIL Image items
+                    processed_images = []
+                    for idx, img in enumerate(example["image"]):
+                        # Skip if img is a list (shouldn't happen but defensive)
+                        if isinstance(img, list):
+                            if len(img) > 0:
+                                img = img[0]
+                            else:
+                                continue
+                        processed_images.append(clip_img_transform(img))
+                    transformed["image"] = torch.stack(processed_images)
+                if "text" in features:
+                    text_encodings = tokenizer(
+                        example["text"],
+                        padding="max_length",
+                        max_length=max_seq_length,
+                        truncation=True,
+                        return_tensors="pt",
+                    )
+                    transformed["input_ids"] = text_encodings["input_ids"]
+                    transformed["attention_mask"] = text_encodings["attention_mask"]
+                
+                # Handle labels for batch
+                labels = example[output_column]
+                is_multi_label = dataset_info[dataset_name].get("multi_label", False)
+                if is_multi_label:
+                    # Convert each label list to one-hot tensor
+                    num_classes = dataset_info[dataset_name]["num_classes"]
+                    label_to_idx = {name: idx for idx, name in enumerate(classnames)} if classnames else {}
+                    label_tensors = []
+                    for label_list in labels:
+                        label_tensor = torch.zeros(num_classes, dtype=torch.float32)
+                        if isinstance(label_list, list):
+                            for label_item in label_list:
+                                if isinstance(label_item, str) and label_item in label_to_idx:
+                                    label_tensor[label_to_idx[label_item]] = 1.0
+                                elif isinstance(label_item, int) and 0 <= label_item < num_classes:
+                                    label_tensor[label_item] = 1.0
+                        label_tensors.append(label_tensor)
+                    transformed[output_column] = torch.stack(label_tensors)
+                else:
+                    transformed[output_column] = labels
+                return transformed
+            else:
+                # Process single example
+                transformed = {}
+                if "image" in features:
+                    transformed["image"] = clip_img_transform(example["image"])
+                if "text" in features:
+                    text_encodings = tokenizer(
+                        example["text"],
+                        padding="max_length",
+                        max_length=max_seq_length,
+                        truncation=True,
+                        return_tensors="pt",
+                    )
+                    transformed["input_ids"] = text_encodings["input_ids"].squeeze(0)
+                    transformed["attention_mask"] = text_encodings["attention_mask"].squeeze(0)
+                
+                # Handle labels: convert list to tensor for multi-label datasets
+                labels = example[output_column]
+                is_multi_label = dataset_info[dataset_name].get("multi_label", False)
+                if is_multi_label and isinstance(labels, list):
+                    # Convert multi-label list (of strings or ints) to one-hot tensor
+                    num_classes = dataset_info[dataset_name]["num_classes"]
+                    label_tensor = torch.zeros(num_classes, dtype=torch.float32)
+                    label_to_idx = {name: idx for idx, name in enumerate(classnames)} if classnames else {}
+                    for label_item in labels:
+                        if isinstance(label_item, str) and label_item in label_to_idx:
+                            label_tensor[label_to_idx[label_item]] = 1.0
+                        elif isinstance(label_item, int) and 0 <= label_item < num_classes:
+                            label_tensor[label_item] = 1.0
+                    transformed[output_column] = label_tensor
+                else:
+                    transformed[output_column] = labels
+                return transformed
+        # For multimodal, apply_transforms and apply_transforms_test are already defined above
+        # No need to call get_transformations()
     else: 
-        # For image datasets, we can use the existing transformation pipeline
-        transformation_pipeline = TransformationPipeline(dataset_name=dataset_name)
-        
-    # Get the transformations for train and test data
-    apply_transforms, apply_transforms_test = transformation_pipeline.get_transformations()
+        # For image datasets, check if CLIP model is used
+        if model_name == "clip" or config_sim["server"]["strategy"] == "PFedMoAP":
+            # Use CLIPTransformationPipeline for CLIP models
+            transformation_pipeline = CLIPTransformationPipeline(dataset_name=dataset_name, img_size=224)
+        else:
+            # Use standard TransformationPipeline for other image models
+            transformation_pipeline = TransformationPipeline(dataset_name=dataset_name)
+        # Get the transformations for train and test data
+        apply_transforms, apply_transforms_test = transformation_pipeline.get_transformations()
 
     device, ray_init_args, client_res = get_device_and_resources(config_sim=config_sim)
     out_file_path, saved_models_path = gen_dir_outfile_server(config=config_sim)
@@ -120,8 +303,6 @@ def main():
             #Compute client distributions and kl_norm values
             client_distributions = compute_client_distributions(config = config_sim, dataset=fds,num_clients=config_sim['server']['num_clients'])
             kl_normalized_per_client = compute_KL_divergence(client_distributions, num_classes=dataset_info[dataset_name]["num_classes"])
-            print(f"KL Normalized per client: {kl_normalized_per_client}")
-            print("Mean KL Normalized per client: ", sum(kl_normalized_per_client.values())/len(kl_normalized_per_client))
             for cid, kl_norm_val in kl_normalized_per_client.items():
                 log(INFO, f"Client {cid}: Normalized KL Divergence = {kl_norm_val:.4f}")
 

@@ -157,11 +157,14 @@ def gen_dir_outfile_server(config):
 
 def get_partitioner(config_sim):
     num_clients = config_sim["server"]["num_clients"]
-    if config_sim["common"]["data_type"] == "dirichlet_niid":
+    dataset_name = config_sim["common"]["dataset"]
+    
+    # Check if dataset is multi-label
+    is_multi_label = dataset_info.get(dataset_name, {}).get("multi_label", False)
+    
+    if config_sim["common"]["data_type"] == "dirichlet_niid" and not is_multi_label:
         # alpha value
         dirichlet_alpha = config_sim["common"]["dirichlet_alpha"]
-        # dataset
-        dataset_name = config_sim["common"]["dataset"]
         # dataset's label column
         label = dataset_info[dataset_name]["output_column"]
         # create partitioner
@@ -174,8 +177,12 @@ def get_partitioner(config_sim):
             shuffle=True,
             seed=config_sim["common"]["seed"],
         )
-        
     else:
+        # Use IID partitioning for:
+        # 1. data_type != "dirichlet_niid"
+        # 2. Multi-label datasets (DirichletPartitioner doesn't support list-type labels)
+        if is_multi_label and config_sim["common"]["data_type"] == "dirichlet_niid":
+            log(INFO, f"Dataset {dataset_name} is multi-label. Using IID partitioning instead of Dirichlet (DirichletPartitioner doesn't support list-type labels).")
         partitioner = IidPartitioner(num_partitions=num_clients)
     # return train data
     return {"train": partitioner}
@@ -189,7 +196,14 @@ def get_dataset(config_sim):
         fds = FederatedDataset(dataset=dataset_name, partitioners=partitioner)
         # get test column name
         test_set = dataset_info[dataset_name]["test_set"]
-        centralized_testset = fds.load_split(test_set)
+        if test_set is None:
+            # If no test set, use train split and create validation split
+            train_data = fds.load_split("train")
+            # Split train into train/val (80/20)
+            train_data = train_data.train_test_split(test_size=0.2, seed=config_sim["common"]["seed"])
+            centralized_testset = train_data["test"]
+        else:
+            centralized_testset = fds.load_split(test_set)
 
         # get class names for pFedMoAP
         out_col = dataset_info[dataset_name]["output_column"]
@@ -454,7 +468,6 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
 
                 # ----- Compute relative differences -----
                 rel_recon_error = torch.norm(weight_matrix - (A @ B).view(c_out, c_in, k1, k2)) / torch.norm(weight_matrix)
-                print(f"Relative reconstruction error (W vs ΔW): {rel_recon_error:.6f}")
 
             else: #Linear layer SVD
                 U, S, Vt = torch.linalg.svd(weight_matrix, full_matrices=False) 
@@ -572,17 +585,29 @@ def compute_client_distributions(config, dataset, num_clients: int) -> dict:
         dict: Mapping of client IDs to their label distributions
     """
     client_distributions = {}
+    dataset_name = config["common"]["dataset"]
+    is_multi_label = dataset_info.get(dataset_name, {}).get("multi_label", False)
+    output_column = dataset_info[dataset_name]["output_column"]
     
     log(INFO, "=>>>>> CLASS DISTRIBUTIONS OF ALL CLIENTS <<<<<<=")
     for cid in range(num_clients):
-        if config["common"]["dataset"] == "pranavmr/MM-IMDb":
-            client_data = dataset[cid]["train"]
-        else:
-            client_data = dataset.load_partition(cid)
-        dataset_name = config["common"]["dataset"]
-        output_column = dataset_info[dataset_name]["output_column"]
+        # Load partition for all datasets using load_partition method
+        client_data = dataset.load_partition(cid)
         labels = [item[output_column] for item in client_data]
-        client_distributions[cid] = dict(sorted(Counter(labels).items()))
+        
+        if is_multi_label:
+            # For multi-label datasets, labels are lists - flatten and count individual labels
+            flattened_labels = []
+            for label_list in labels:
+                if isinstance(label_list, list):
+                    flattened_labels.extend(label_list)
+                else:
+                    flattened_labels.append(label_list)
+            client_distributions[cid] = dict(sorted(Counter(flattened_labels).items()))
+        else:
+            # For single-label datasets, count labels directly
+            client_distributions[cid] = dict(sorted(Counter(labels).items()))
+        
         log(INFO, f"Client {cid} ({len(client_distributions[cid])} classes, {len(client_data)} samples) : {client_distributions[cid]}")
     log(INFO, f"Total samples from all clients: {sum([sum(dist.values()) for dist in client_distributions.values()])}")
     log(INFO, "*" * 150)
@@ -618,7 +643,7 @@ def get_model(config, shape, classnames=None):
         )
         return model
     # check if model is from huggingface
-    elif model_name in ["distilbert-base-uncased", "Qwen/Qwen1.5-0.5B", "openai/clip-vit-base-patch32"""]:  # Add more as needed
+    elif model_name in ["distilbert-base-uncased", "Qwen/Qwen1.5-0.5B", "openai/clip-vit-base-patch32", "openai/clip-vit-large-patch14"]:  # Add more as needed
         from transformers import AutoModelForSequenceClassification, BitsAndBytesConfig, CLIPModel
         if model_name == "Qwen/Qwen1.5-0.5B": #Need to check again when applying the quantization -> still error
             quantization_8_bit_config = BitsAndBytesConfig(
@@ -640,7 +665,7 @@ def get_model(config, shape, classnames=None):
             # Set pad_token_id to eos_token_id
             if base_model.config.pad_token_id is None:
                 base_model.config.pad_token_id = base_model.config.eos_token_id
-        elif model_name == "openai/clip-vit-base-patch32": #For multimodal dataset MM-IMDB
+        elif model_name in ["openai/clip-vit-base-patch32", "openai/clip-vit-large-patch14"]: #For multimodal datasets MM-IMDb and UPMC-Food101
             clip_model = CLIPModel.from_pretrained(model_name)
             class CustomCLIP(torch.nn.Module):
                 def __init__(self):
@@ -694,7 +719,8 @@ def get_evaluate_fn(
         method = config_sim.get("peft", {}).get("method", "")
         bias = config_sim.get("peft", {}).get("bias", "")
 
-        if strategy == "PFedMoAP" or method == "pfedmoap":
+        # Only use PFedMoAP-specific logic if strategy is explicitly "PFedMoAP"
+        if strategy == "PFedMoAP":
             if len(parameters) != 1:
                 raise ValueError(f"PFedMoAP centralized eval expects 1 prompt, got {len(parameters)}")
 
@@ -719,7 +745,7 @@ def get_evaluate_fn(
         testloader = DataLoader(testset, batch_size=config_sim["client"]["test_batch_size"])
 
         feature_key = dataset_info[dataset_name]["feature_key"]
-        loss, accuracy, f1 = test(model, testloader, device=device, feature_key=feature_key)
+        loss, accuracy, f1 = test(model, testloader, device=device, feature_key=feature_key, dataset_name=dataset_name)
         metrics_df = pd.read_csv(metrics_file)
         if metrics_df["global_loss"].min() > loss:
             log(

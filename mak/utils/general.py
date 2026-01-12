@@ -12,9 +12,13 @@ from sklearn.metrics import f1_score
 
 
 # Testing if the dataset is text or image
-def test(net, testloader, device: str, feature_key: str) -> Tuple[float, float, float]:
-    """Validate the network on the entire test set."""
-    criterion = torch.nn.CrossEntropyLoss()
+def test(net, testloader, device: str, feature_key, dataset_name: str = None) -> Tuple[float, float, float]:
+    """Validate the network on the entire test set.
+    
+    Args:
+        feature_key: Can be str (for text/image-only) or list (for multimodal)
+        dataset_name: Dataset name to determine multi-label vs single-label
+    """
     correct, loss = 0, 0.0
     total = 0
     all_labels = []
@@ -23,8 +27,61 @@ def test(net, testloader, device: str, feature_key: str) -> Tuple[float, float, 
     
     # Set the network to evaluation mode
     net.eval()
+    
+    # Determine if multi-label based on dataset_info
+    is_multi_label = False
+    output_column = "label"
+    if dataset_name and dataset_name in dataset_info:
+        is_multi_label = dataset_info[dataset_name].get("multi_label", False)
+        output_column = dataset_info[dataset_name].get("output_column", "label")
 
-    if feature_key == "text" or feature_key == "content":
+    # Check if multimodal (feature_key is a list with both image and text)
+    if isinstance(feature_key, list) and "image" in feature_key and "text" in feature_key:
+        # Multimodal evaluation
+        if is_multi_label:
+            criterion = torch.nn.BCEWithLogitsLoss()
+        else:
+            criterion = torch.nn.CrossEntropyLoss()
+        
+        with torch.no_grad():
+            for batch in testloader:
+                pixel_values = batch["image"].to(device)
+                input_ids = batch["input_ids"].to(device)
+                attention_mask = batch["attention_mask"].to(device)
+                labels = batch[output_column].to(device)
+                logits = net(pixel_values=pixel_values, input_ids=input_ids, attention_mask=attention_mask)
+                
+                if is_multi_label:
+                    # Multi-label: use sigmoid and threshold
+                    loss += criterion(logits, labels.float()).item()
+                    probs = torch.sigmoid(logits)
+                    predicted = (probs > 0.5).int()
+                    # For multi-label, accuracy is computed differently (exact match or hamming)
+                    # Using exact match for now
+                    correct += (predicted == labels.int()).all(dim=1).sum().item()
+                else:
+                    # Single-label: use softmax and argmax
+                    loss += criterion(logits, labels).item()
+                    probs = F.softmax(logits, dim=1)
+                    predicted = torch.argmax(logits, dim=1)
+                    correct += (predicted == labels).sum().item()
+                
+                total += labels.size(0)
+                # Collect for F1 score
+                all_labels.extend(labels.cpu().numpy())
+                all_preds.extend(predicted.cpu().numpy())
+                all_probs.extend(probs.cpu().numpy())
+        
+        accuracy = correct / total if total > 0 else 0.0
+        # For multi-label, use appropriate F1 metric
+        if is_multi_label:
+            f1 = f1_score(all_labels, all_preds, average='micro')  # micro-averaged for multi-label
+        else:
+            f1 = f1_score(all_labels, all_preds, average='weighted')
+        
+        return loss, accuracy, f1
+    
+    elif feature_key == "text" or feature_key == "content":
         #for text datasets, we need to use a different loss function
         with torch.no_grad():
             for batch in testloader:
@@ -48,6 +105,7 @@ def test(net, testloader, device: str, feature_key: str) -> Tuple[float, float, 
         return loss, accuracy, f1
     #for image datasets, we can use the standard loss function
     else:
+        criterion = torch.nn.CrossEntropyLoss()
         with torch.no_grad():
             for data in testloader:
                 keys = list(data.keys())

@@ -94,9 +94,9 @@ dataset_info = {  # Image datasets
         "test_set": None,  # only 'train' split is provided
         "input_shape": {
             "image": (3, 224, 224),
-            "text": (128,)
+            "text": (77,)
         },  
-        "max_sequence_length": 128,  # For transformer models
+        "max_sequence_length": 77,  # CLIP model max_position_embeddings is 77
         "multi_label": True, # each movice can have multiple genres
     },
     
@@ -108,9 +108,9 @@ dataset_info = {  # Image datasets
         "test_set": None,  # only 'train' split is provided
         "input_shape": {
             "image": (3, 224, 224),
-            "text": (128,)
+            "text": (77,)
         },  
-        "max_sequence_length": 128,  # For transformer models
+        "max_sequence_length": 77,  # CLIP model max_position_embeddings is 77
         "multi_label": False,
     },
 }
