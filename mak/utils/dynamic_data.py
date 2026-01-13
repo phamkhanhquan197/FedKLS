@@ -152,26 +152,28 @@ class DynamicDataScheduler:
                 milestone_sizes.append((milestone, target_size))
             
             # Allocate indices incrementally
-            current_indices = []
+            # Use set for O(1) lookup instead of O(n) list lookup (critical for large datasets)
+            current_indices_set = set()
             
             for i, (milestone, target_size) in enumerate(milestone_sizes):
                 # Ensure we have at least target_size indices
                 # In incremental mode, we ADD to existing, never remove
-                while len(current_indices) < target_size:
+                while len(current_indices_set) < target_size:
                     # Select new indices deterministically from available pool
-                    remaining_indices = [idx for idx in available_indices if idx not in current_indices]
+                    # Optimized: Use set difference for O(n) instead of O(n*m) list comprehension
+                    remaining_indices = [idx for idx in available_indices if idx not in current_indices_set]
                     if not remaining_indices:
                         break  # No more indices available
                     
-                    needed = target_size - len(current_indices)
+                    needed = target_size - len(current_indices_set)
                     # Use deterministic selection based on seed + cid + milestone
-                    self.np_rng.seed(self.seed + cid * 1000 + milestone + len(current_indices))
+                    self.np_rng.seed(self.seed + cid * 1000 + milestone + len(current_indices_set))
                     selected = self.np_rng.choice(
                         remaining_indices, 
                         size=min(needed, len(remaining_indices)), 
                         replace=False
                     ).tolist()
-                    current_indices.extend(sorted(selected))
+                    current_indices_set.update(selected)
                 
                 # Determine end round for this milestone
                 if i + 1 < len(milestone_sizes):
@@ -181,8 +183,8 @@ class DynamicDataScheduler:
                     end_round = self.total_rounds + 1
                 
                 # Cache for all rounds in this milestone period
-                # IMPORTANT: Use a copy to avoid reference issues
-                indices_copy = sorted(current_indices.copy())
+                # Convert set to sorted list for caching
+                indices_copy = sorted(list(current_indices_set))
                 for round_num in range(milestone, end_round):
                     self._schedule_cache[(cid, round_num)] = indices_copy
   

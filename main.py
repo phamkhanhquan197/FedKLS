@@ -51,6 +51,8 @@ def main():
     if dataset_name in ['SetFit/20_newsgroups', 'legacy-datasets/banking77', 'fancyzhx/dbpedia_14'] or model_name in ['distilbert-base-uncased', 'microsoft/deberta-v3-base', 'llama2-7b']:
         # For text datasets, we need to use a different transformation pipeline
         transformation_pipeline = TextTransformationPipeline(dataset_name=dataset_name, model_name=model_name)
+        # Get the transformations for train and test data
+        apply_transforms, apply_transforms_test = transformation_pipeline.get_transformations()
     elif dataset_name in ['pranavmr/MM-IMDb', 'kkim0451/UPMC-Food101']:
         # Get multimodal feature keys from dataset_info
         features = dataset_info[dataset_name]["feature_key"]

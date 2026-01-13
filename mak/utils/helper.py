@@ -593,7 +593,15 @@ def compute_client_distributions(config, dataset, num_clients: int) -> dict:
     for cid in range(num_clients):
         # Load partition for all datasets using load_partition method
         client_data = dataset.load_partition(cid)
-        labels = [item[output_column] for item in client_data]
+        
+        # Optimized: Use direct column access instead of iterating through all items
+        # This is much faster for large datasets (e.g., 405K samples)
+        try:
+            # Try direct column access (HuggingFace datasets support this)
+            labels = client_data[output_column]
+        except (TypeError, KeyError):
+            # Fallback to iteration if direct access not supported
+            labels = [item[output_column] for item in client_data]
         
         if is_multi_label:
             # For multi-label datasets, labels are lists - flatten and count individual labels

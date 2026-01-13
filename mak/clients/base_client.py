@@ -41,6 +41,8 @@ class BaseClient(fl.client.NumPyClient):
         self.feature_key = dataset_info[self.dataset_name]["feature_key"]
         self.output_column = dataset_info[self.dataset_name]["output_column"]
         self.bias = self.config_sim.get("peft", {}).get("bias", True)
+        # Track last reloaded round to avoid redundant reloads in the same round
+        self._last_reloaded_round = None
         #NEW: Store dataset reference and transform function for dynamic reload
         self.dataset = dataset
         self.apply_transforms = apply_transforms
@@ -110,6 +112,11 @@ class BaseClient(fl.client.NumPyClient):
                 - "append": For incremental mode, dataset size increases monotonically
             round_num: Current round number for schedule lookup
         """
+        # Optimize: Skip reload if already reloaded for this round
+        # This avoids redundant reloads when evaluate() is called after fit() in the same round
+        if hasattr(self, '_last_reloaded_round') and self._last_reloaded_round == round_num:
+            return
+        
         # Use scheduler if available (new approach)
         if self.data_scheduler is not None:
             trainset, valset = self.data_scheduler.get_client_round_datasets(
@@ -119,6 +126,7 @@ class BaseClient(fl.client.NumPyClient):
             )
             self.trainset = trainset
             self.valset = valset
+            self._last_reloaded_round = round_num  # Cache reloaded round
             return
         
         # Fallback to old approach if scheduler not available
@@ -143,6 +151,8 @@ class BaseClient(fl.client.NumPyClient):
         else:
             self.trainset = new_trainset
             self.valset = new_valset
+        
+        self._last_reloaded_round = round_num  # Cache reloaded round
 
     def set_parameters(self, parameters):
         method = self.config_sim["peft"]["method"] if self.config_sim["peft"]["enabled"] else None
