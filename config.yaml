@@ -52,7 +52,7 @@ peft:
 
 # NEW: Dynamic Data Updates Configuration
 dynamic_data:
-  enabled: True  # Enable/disable dynamic data updates
+  enabled: False  # Enable/disable dynamic data updates
   mode: "incremental"  # "reset" or "incremental"
   round_step: 100  # Dataset update frequency (trigger reload every N rounds)
   start_fraction: 0.3  # For incremental: initial data fraction per client (e.g., 0.3 = 30%)
@@ -101,3 +101,4 @@ fedprox:
 
 powd_config:
   candidate_client_set: 20 # the d parameter (client fraction ≤ d ≤ total clients)
+
