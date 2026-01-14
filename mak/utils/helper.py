@@ -29,11 +29,15 @@ from mak.servers.ffa_lora_server import FFALoRAServer
 from mak.servers.fednova_server import FedNovaServer
 from mak.servers.scaffold_server import ScaffoldServer
 from mak.servers.pfedmoap_server import PFedMoAPServer
+from mak.servers.fedpoe_server import FedPOEServer
+from mak.servers.fedpoe_server import FedPOERegressionTextServer
 from mak.strategies.fednova_strategy import FedNovaStrategy
 from mak.strategies.scaffold_strategy import ScaffoldStrategy
 from mak.strategies.fedklsvd_strategy import FedKLSVDStrategy
 from mak.strategies.ffa_lora_strategy import FFALoRAStrategy
 from mak.strategies.pfedmoap_strategy import PFedMoAPStrategy
+from mak.strategies.fedpoe_strategy import FedPOEStrategy
+from mak.strategies.fedpoe_strategy import FedPOERegressionTextStrategy
 from mak.utils.dataset_info import dataset_info
 from mak.utils.general import set_params, test, weighted_average
 from mak.models.svd_model import SVDAdapter, ConvAdapter
@@ -227,16 +231,23 @@ def get_dataset(config_sim):
         raise Exception(f"Dataset name should be among : {list(dataset_info.keys())}")
     else:
         fds = FederatedDataset(dataset=dataset_name, partitioners=partitioner)
-        # get test column name
-        test_set = dataset_info[dataset_name]["test_set"]
-        centralized_testset = fds.load_split(test_set)
+        # get test split name (can be None for datasets with only 'train')
+        test_set = dataset_info[dataset_name].get("test_set")
+        centralized_testset = None
+        if test_set is not None:
+            centralized_testset = fds.load_split(test_set)
 
         # get class names for pFedMoAP
         out_col = dataset_info[dataset_name]["output_column"]
-        feat = centralized_testset.features.get(out_col, None)
-        if feat is not None and hasattr(feat, "names") and feat.names:
-            classnames = list(feat.names)
+        if centralized_testset is not None:
+            feat = centralized_testset.features.get(out_col, None)
+            if feat is not None and hasattr(feat, "names") and feat.names:
+                classnames = list(feat.names)
+            else:
+                num_classes = dataset_info[dataset_name]["num_classes"]
+                classnames = [f"class{i}" for i in range(num_classes)]
         else:
+            # Fallback: if there's no centralized testset, we can't read label names
             num_classes = dataset_info[dataset_name]["num_classes"]
             classnames = [f"class{i}" for i in range(num_classes)]
 
@@ -722,6 +733,7 @@ def get_evaluate_fn(
     model,
 ):
     """Return an evaluation function for centralized evaluation."""
+
     dataset_name = config_sim["common"]["dataset"]
     # shape = dataset_info[dataset_name]["input_shape"]
 
@@ -893,6 +905,24 @@ def get_server(strategy, client_manager, out_file_path, target_acc, num_train_th
             num_train_thread=num_train_thread,
             num_test_thread=num_test_thread,
         )
+    elif isinstance(strategy, FedPOEStrategy):
+        return FedPOEServer(
+            strategy=strategy,
+            client_manager=client_manager,
+            out_file_path=out_file_path,
+            target_acc=target_acc,
+            num_train_thread=num_train_thread,
+            num_test_thread=num_test_thread,
+        )
+    elif isinstance(strategy, FedPOERegressionTextStrategy):
+        return FedPOERegressionTextServer(
+            strategy=strategy,
+            client_manager=client_manager,
+            out_file_path=out_file_path,
+            target_acc=target_acc,
+            num_train_thread=num_train_thread,
+            num_test_thread=num_test_thread,
+        )
     elif isinstance(strategy, PFedMoAPStrategy):
         return PFedMoAPServer(
             strategy=strategy,
@@ -977,6 +1007,43 @@ def get_strategy(
         },
     } 
 
+    # FedPOE configuration (Hedge mixture weights a/b updated from client-reported losses)
+    if STRATEGY == "FedPOE":
+        fedpoe_cfg = config.get("fedpoe_config", {}) or {}
+        kwargs["FedPOE"] = {
+            "eta": float(fedpoe_cfg.get("eta", 0.0) or 0.0),
+        }
+
+    # FedPOERegressionText configuration (Fed-POE regression-style over text embeddings)
+    if STRATEGY == "FedPOERegressionText":
+        poe_cfg = config.get("fedpoe_regression_text_config", {}) or {}
+        kwargs["FedPOERegressionText"] = {
+            "eta": float(poe_cfg.get("eta", 0.0) or 0.0),
+            "lam": float(poe_cfg.get("lam", 0.0) or 0.0),
+            "num_kernels": int(poe_cfg.get("num_kernels", 4) or 4),
+            "n_components": int(poe_cfg.get("n_components", 256) or 256),
+            "pooling": str(poe_cfg.get("pooling", "auto") or "auto"),
+        }
+
+    # Centralized evaluation:
+    # - For most strategies: require a test split (test_data must not be None).
+    # - For FedPOE / FedPOERegressionText: if the dataset has no test split
+    #   (test_data is None), skip centralized evaluation because these methods
+    #   rely on client-side eval signals.
+    if test_data is None and STRATEGY in {"FedPOE", "FedPOERegressionText"}:
+        log(INFO, f"{STRATEGY}: centralized testset is None -> skipping centralized evaluation.")
+        evaluate_fn = None
+    else:
+        evaluate_fn = get_evaluate_fn(
+            centralized_testset=test_data,
+            config_sim=config,
+            save_model_dir=save_model_dir,
+            metrics_file=out_file_path,
+            device=device,
+            apply_transforms_test=apply_transforms_test,
+            model=model,
+        )
+
     # FedSVD configuration (matches config.yaml:fedsvd_config)
     # NOTE: The strategy can aggregate subsets (LoRA A/B) only if it can map
     # incoming ndarrays to parameter names. For standard PyTorch models we can
@@ -1004,6 +1071,10 @@ def get_strategy(
         # init global prompt
         prompt0 = (0.02 * np.random.randn(prompt_len, prompt_dim)).astype(np.float32)
         init_params = fl.common.ndarrays_to_parameters([prompt0])
+    elif STRATEGY == "FedPOERegressionText":
+        # This strategy only exchanges a lightweight theta vector for an RFF head.
+        # The theta shape is derived client-side from embedding dim, so we start empty.
+        init_params = fl.common.ndarrays_to_parameters([])
     else:
         init_params = fl.common.ndarrays_to_parameters(
             [val.cpu().numpy() for _, val in model.state_dict().items()]
@@ -1015,15 +1086,7 @@ def get_strategy(
         min_fit_clients=MIN_CLIENTS_FIT,
         min_evaluate_clients=MIN_CLIENTS_EVAL,
         min_available_clients=NUM_CLIENTS,
-        evaluate_fn=get_evaluate_fn(
-            centralized_testset=test_data,
-            config_sim=config,
-            save_model_dir=save_model_dir,
-            metrics_file=out_file_path,
-            device=device,
-            apply_transforms_test=apply_transforms_test,
-            model=model,
-        ),
+        evaluate_fn=evaluate_fn,
         evaluate_metrics_aggregation_fn=weighted_average,
         on_fit_config_fn=get_fit_config_fn(config_sim=config),
         on_evaluate_config_fn=get_evaluate_config_fn(config_sim=config),

@@ -9,8 +9,8 @@ common:
   target_acc : 0.99
   # Optional: redirect Ray session/spill files off /tmp (useful when /tmp is nearly full)
   ray_tmp_dir: /tmp # /home/ai/tmp, /tmp
-  # model : Qwen/Qwen1.5-0.5B # one among [distilbert-base-uncased, bert-base-uncased, meta-llama/Llama-2-7b-hf, Qwen/Qwen1.5-0.5B, Net, CifarNet, SimpleCNN, KerasExpCNN, MNISTCNN, SimpleDNN, FMCNNModel,FedAVGCNN,Resnet18, Resnet34,ResNet18Pretrained, ResNet34Pretrained,ResNet18Small, ResNet20Small,MobileNetV2,EfficientNetB0,LSTMModel]
-  model: distilbert-base-uncased
+  model : Qwen/Qwen1.5-0.5B # one among [distilbert-base-uncased, bert-base-uncased, meta-llama/Llama-2-7b-hf, Qwen/Qwen1.5-0.5B, Net, CifarNet, SimpleCNN, KerasExpCNN, MNISTCNN, SimpleDNN, FMCNNModel,FedAVGCNN,Resnet18, Resnet34,ResNet18Pretrained, ResNet34Pretrained,ResNet18Small, ResNet20Small,MobileNetV2,EfficientNetB0,LSTMModel]
+  # model: distilbert-base-uncased
   # model: Clip
   optimizer : sgd # one among [sgd,adam]
   sgd_momentum : 0.9
@@ -30,13 +30,13 @@ server:
   num_clients : 10 # total number of clients participating in training
   fraction_evaluate : 1 # fraction of clients to be selected for evaluation
   min_evaluate_clients : 10 # minimum number of clients to be selected for evaluation
-  strategy : FedSVD  #[FedAWA, FedKLSVD, FedAvg, FFALoRA, PFedMoAP, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova, FedSVD]
+  strategy : FedSVD  #[FedAWA, FedKLSVD, FedAvg, FFALoRA, PFedMoAP, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova, FedSVD, FedPOE]
 
 client:
   loss: FocalLoss # [CrossEntropyLoss, FocalLoss]
   epochs : 1
-  batch_size : 8
-  test_batch_size : 8
+  batch_size : 4
+  test_batch_size : 4
   lr: 0.005 #  [0.00002, 0.0001,0.001, 0.005, 0.01, 0.1, 0.2] 0.005->distilbert-base-uncased, 0.001->bert-base-uncased, 0.0001->Qwen/Qwen1.5-0.5B
   save_train_res : True
   # Too many total_cpus lets Ray schedule many actors concurrently and can OOM host RAM.
@@ -73,6 +73,20 @@ fedsvd_config:
     max_grad_norm: 2.0    # per-sample grad clipping norm
     noise_multiplier: null  # override if set; otherwise computed from (eps, delta, sample_rate, epochs)
     secure_rng: False     # True => use secure RNG (slower)
+
+# FedPOE (Hedge mixture) config
+# Mirrors the 3rd-party Fed-POE idea of updating per-client weights (a,b)
+# via exponentiated losses.
+fedpoe_config:
+  eta: 0.0  # set >0 to enable a,b updates: a*=exp(-eta*loss_fed), b*=exp(-eta*loss_loc)
+
+# FedPOERegressionText: regression-style POE over text embeddings using an RFF head
+fedpoe_regression_text_config:
+  eta: 0.1
+  lam: 0.0
+  num_kernels: 4
+  n_components: 256
+  pooling: auto
 
 # NEW: Dynamic Data Updates Configuration
 dynamic_data:
