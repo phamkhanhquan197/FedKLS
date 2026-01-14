@@ -32,65 +32,60 @@ def resolve_layer_group(base: str) -> str:
         return "ffn"
     return "all"
 
-
-def get_global_rank(config: dict) -> int:
-    flex_cfg = config.get("flex_lora_config", {})
-    return int(flex_cfg.get("global_rank", config.get("peft", {}).get("rank", 32)))
-
-
+# ---------------------------------------------------------------------
+# Client type sampling (Figure-3 distributions only)
+# ---------------------------------------------------------------------
 def build_client_type_map(config: dict, num_clients: int) -> ClientTypeMap:
-    """Build deterministic client_id -> type_id map (Type 1..4).
+    """Build client_id -> LoRA type map (Type 1..4), paper-aligned.
 
-    Supports:
-    - flex_lora_config.client_type_map: explicit override mapping
-    - flex_lora_config.client_type_distribution: list of {type, ratio}
+    Supported distributions (Figure 3):
+      - uniform
+      - heavy_tail_light
+      - heavy_tail_strong
+      - normal
 
-    Notes:
-    - This repo uses small smoke tests; determinism matters more than perfect sampling.
-    - If no distribution is provided, defaults to Uniform over 4 types.
+    Optional:
+      - flex_lora_config.client_type_map for deterministic override
     """
     flex_cfg = config.get("flex_lora_config", {})
-    seed = int(flex_cfg.get("seed", config.get("common", {}).get("seed", 42)))
-
-    # Explicit override for smoke tests
-    override = flex_cfg.get("client_type_map", None)
-    if isinstance(override, dict) and override:
-        out: ClientTypeMap = {}
-        for k, v in override.items():
-            out[int(k)] = int(v)
-        # Fill missing cids with Type 1
-        for cid in range(int(num_clients)):
-            out.setdefault(int(cid), 1)
-        return out
-
-    dist = flex_cfg.get("client_type_distribution", None)
-    if not dist:
-        dist = [
-            {"type": 1, "ratio": 0.25},
-            {"type": 2, "ratio": 0.25},
-            {"type": 3, "ratio": 0.25},
-            {"type": 4, "ratio": 0.25},
-        ]
-
+    seed = config.get("common", {}).get("seed", 42)
     rng = np.random.default_rng(seed)
-    types = [int(item["type"]) for item in dist]
-    probs = np.asarray([float(item.get("ratio", 0.0)) for item in dist], dtype=np.float64)
-    probs = probs / probs.sum() if probs.sum() > 0 else np.ones_like(probs) / len(probs)
 
-    sampled = rng.choice(np.asarray(types), size=int(num_clients), replace=True, p=probs)
+    dist_name = flex_cfg.get("distribution", "uniform").lower()
 
+    if dist_name == "uniform":
+        types = [1, 2, 3, 4]
+        probs = [0.25, 0.25, 0.25, 0.25]
 
-    return {i: int(sampled[i]) for i in range(int(num_clients))}
+    elif dist_name == "heavy_tail_light":
+        # Figure 3: many low-resource clients
+        types = [1, 2, 3, 4]
+        probs = [0.80, 0.10, 0.05, 0.05]
+
+    elif dist_name == "heavy_tail_strong":
+        # Figure 3: many high-resource clients
+        types = [1, 2, 3, 4]
+        probs = [0.10, 0.05, 0.05, 0.80]
+
+    elif dist_name == "normal":
+        positions = np.array([1, 2, 3, 4])
+        mu, sigma = 2.5, 0.7
+        probs = np.exp(-0.5 * ((positions - mu) / sigma) ** 2)
+        probs = probs / probs.sum()
+        types = positions.tolist()
+
+    else:
+        raise ValueError(f"Unknown FlexLoRA distribution: {dist_name}")
+
+    sampled = rng.choice(types, size=int(num_clients), replace=True, p=probs)
+
+    return {cid: int(sampled[cid]) for cid in range(int(num_clients))}
 
 
 def build_client_rank_policy_map(config: dict, client_type_map: ClientTypeMap) -> ClientRankPolicyMap:
-    """Build client_id -> rank policy map aligned with paper Table 1.
-
-    global_rank is assumed to be max rank (e.g., 200).
-    local ranks must satisfy local <= global.
+    """Build client_id -> per-layer rank policy map (Table 1).
     """
     flex_cfg = config.get("flex_lora_config", {})
-    global_rank = int(flex_cfg.get("global_rank", 200))
 
     # Defaults per paper Table 1
     type1_r = int(flex_cfg.get("type1_rank", 8))
@@ -99,29 +94,21 @@ def build_client_rank_policy_map(config: dict, client_type_map: ClientTypeMap) -
     type3_ffn_r = int(flex_cfg.get("type3_ffn_rank", 200))
     type4_r = int(flex_cfg.get("type4_rank", 200))
 
-    def _check(r: int, cid: int) -> int:
-        if r > global_rank:
-            raise ValueError(
-                f"FlexLoRA: local rank must be <= global_rank. cid={cid} rank={r} global_rank={global_rank}"
-            )
-        return int(r)
-
     out: ClientRankPolicyMap = {}
     for cid, t in client_type_map.items():
-        tid = int(t)
-        if tid == 1:
-            out[int(cid)] = {"all": _check(type1_r, cid)}
-        elif tid == 2:
-            out[int(cid)] = {"all": _check(type2_r, cid)}
-        elif tid == 3:
-            out[int(cid)] = {
-                "attn": _check(type3_attn_r, cid),
-                "ffn": _check(type3_ffn_r, cid),
+        if t == 1:
+            out[cid] = {"all": type1_r}
+        elif t == 2:
+            out[cid] = {"all": type2_r}
+        elif t == 3:
+            out[cid] = {
+                "attn": type3_attn_r,
+                "ffn": type3_ffn_r,
             }
-        elif tid == 4:
-            out[int(cid)] = {"all": _check(type4_r, cid)}
+        elif t == 4:
+            out[cid] = {"all": type4_r}
         else:
-            raise ValueError(f"FlexLoRA: unknown client type: {tid} (cid={cid})")
+            raise ValueError(f"Unknown client type {t} (cid={cid})")
 
     return out
 
@@ -134,38 +121,6 @@ def get_rank_for_base(rank_policy: RankPolicy, base: str) -> int:
         return int(rank_policy["all"])
     # fallback: choose max provided
     return int(max(rank_policy.values()))
-
-
-def generate_rank_map(config: dict, num_clients: int) -> Dict[int, int]:
-    """Backward-compatible: generate single-rank map.
-
-    Kept for older configs; new implementation uses client types and rank policies.
-    """
-    flex_cfg = config.get("flex_lora_config", {})
-    dist = flex_cfg.get("rank_distribution", [])
-    global_rank = int(flex_cfg.get("global_rank", config.get("peft", {}).get("rank", 32)))
-    seed = int(flex_cfg.get("seed", config.get("common", {}).get("seed", 42)))
-
-    if not dist:
-        return {i: global_rank for i in range(int(num_clients))}
-
-    rng = np.random.default_rng(seed)
-
-    ranks = [int(item["rank"]) for item in dist]
-    probs = np.asarray([float(item["ratio"]) for item in dist], dtype=np.float64)
-    probs = probs / probs.sum() if probs.sum() > 0 else np.ones_like(probs) / len(probs)
-
-    sampled = rng.choice(np.asarray(ranks), size=int(num_clients), replace=True, p=probs)
-    sampled[0] = global_rank
-
-    return {i: int(sampled[i]) for i in range(int(num_clients))}
-
-
-def setup_server_config(config: dict, global_rank: int) -> dict:
-    """Create a server-side config copy with peft.rank overridden to global_rank."""
-    server_cfg = copy.deepcopy(config)
-    server_cfg.setdefault("peft", {})["rank"] = int(global_rank)
-    return server_cfg
 
 
 def _slice_pad_lora_factor(t: torch.Tensor, local_rank: int, is_A: bool) -> torch.Tensor:
@@ -193,134 +148,6 @@ def _slice_pad_lora_factor(t: torch.Tensor, local_rank: int, is_A: bool) -> torc
         pad_rows = local_rank - r
         return torch.nn.functional.pad(t, (0, 0, 0, pad_rows), mode="constant", value=0.0)
     return t
-
-
-def _inject_lora_adapters_no_svd(
-    model: torch.nn.Module,
-    base_config: dict,
-    local_rank: int,
-) -> torch.nn.Module:
-    """Inject LoRA/SVDAdapter modules WITHOUT running SVD (client-side safe).
-
-    Policy:
-    - A: small Gaussian init
-    - B: zeros
-    - W_res: original linear weight (frozen)
-
-    This is used to create a local-rank architecture on the client side while
-    respecting the constraint: "SVD must happen on the server, not on clients".
-
-    NOTE: This injection path only works if the model still contains nn.Linear.
-    If the model was already adapted (nn.Linear -> SVDAdapter), use the
-    SVDAdapter rebuild path (_rebuild_svd_adapters_no_svd).
-    """
-    from mak.models.svd_model import SVDAdapter
-
-    rank = int(local_rank)
-    alpha = float(base_config.get("peft", {}).get("alpha", rank))
-
-    # Deterministic init if seed is set
-    seed = base_config.get("common", {}).get("seed", None)
-    if seed is not None:
-        torch.manual_seed(int(seed))
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(int(seed))
-
-    # Replace Linear layers similarly to apply_svd_to_model.extract_linear_layers
-    def should_skip(name: str) -> bool:
-        return name in ["pre_classifier", "classifier", "model.norm", "score"]
-
-    replaced = 0
-    for name, module in list(model.named_modules()):
-        if not isinstance(module, torch.nn.Linear):
-            continue
-        if should_skip(name):
-            continue
-
-        d_out, d_in = module.weight.data.shape
-        device = module.weight.data.device
-        dtype = module.weight.data.dtype
-
-        A = (torch.randn(d_out, rank, device=device, dtype=dtype) * 0.01)
-        B = torch.zeros(rank, d_in, device=device, dtype=dtype)
-
-        W_res = module.weight.data.clone().detach()
-        original_bias = module.bias.data.clone().detach() if module.bias is not None else None
-
-        new_layer = SVDAdapter(W_res=W_res, A=A, B=B, alpha=alpha, rank=rank, original_bias=original_bias)
-
-        # Replace module in parent
-        parent_name, child_name = name.rsplit(".", 1)
-        parent = model.get_submodule(parent_name)
-        setattr(parent, child_name, new_layer)
-        replaced += 1
-
-    log(INFO, f"[FlexLoRA] Injected {replaced} LoRA adapters without SVD (rank={rank}).")
-    return model
-
-
-def _rebuild_svd_adapters_no_svd(
-    model: torch.nn.Module,
-    base_config: dict,
-    local_rank: int,
-) -> tuple[torch.nn.Module, int]:
-    """Rebuild SVDAdapter modules to `local_rank` without SVD (client-safe)."""
-    from mak.models.svd_model import SVDAdapter
-
-    rank = int(local_rank)
-    alpha = float(base_config.get("peft", {}).get("alpha", rank))
-
-    # Deterministic init if seed is set
-    seed = base_config.get("common", {}).get("seed", None)
-    if seed is not None:
-        torch.manual_seed(int(seed))
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(int(seed))
-
-    rebuilt = 0
-
-    for name, module in list(model.named_modules()):
-        if not isinstance(module, SVDAdapter):
-            continue
-
-        # W_res is a buffer tensor with shape [d_out, d_in]
-        W_res = module.W_res
-        d_out, d_in = int(W_res.shape[0]), int(W_res.shape[1])
-
-        device = W_res.device
-        dtype = W_res.dtype
-
-        A = (torch.randn(d_out, rank, device=device, dtype=dtype) * 0.01)
-        B = torch.zeros(rank, d_in, device=device, dtype=dtype)
-
-        # Preserve bias values if present
-        if getattr(module, "bias", None) is not None:
-            original_bias = module.bias.detach().clone()
-        else:
-            original_bias = None
-
-        new_layer = SVDAdapter(
-            W_res=W_res.detach().clone(),
-            A=A,
-            B=B,
-            alpha=alpha,
-            rank=rank,
-            original_bias=original_bias,
-        )
-
-        # Replace module in parent
-        if "." in name:
-            parent_name, child_name = name.rsplit(".", 1)
-            parent = model.get_submodule(parent_name)
-        else:
-            # Top-level module edge-case
-            parent = model
-            child_name = name
-
-        setattr(parent, child_name, new_layer)
-        rebuilt += 1
-
-    return model, rebuilt
 
 
 def _rebuild_svd_adapters_no_svd_policy(
@@ -435,11 +262,11 @@ def ensure_local_rank_adapters(
             if a_bad == 0 and b_bad == 0:
                 return model
 
-            log(
-                INFO,
-                f"[FlexLoRA] Adapter rank-policy mismatch detected. A_bad={a_bad}/{len(a_keys)} "
-                f"B_bad={b_bad}/{len(b_keys)} -> rebuilding adapters (no SVD).",
-            )
+            # log(
+            #     INFO,
+            #     f"[FlexLoRA] Adapter rank-policy mismatch detected. A_bad={a_bad}/{len(a_keys)} "
+            #     f"B_bad={b_bad}/{len(b_keys)} -> rebuilding adapters (no SVD).",
+            # )
         except Exception as e:
             log(INFO, f"[FlexLoRA] Adapter inspection failed ({e}); rebuilding adapters (no SVD).")
 
@@ -450,7 +277,7 @@ def ensure_local_rank_adapters(
             rank_policy=rank_policy,
             rank_for_base=rank_for_base,
         )
-        log(INFO, f"[FlexLoRA] Rebuilt {rebuilt} SVDAdapter modules without SVD (rank_policy).")
+        # log(INFO, f"[FlexLoRA] Rebuilt {rebuilt} SVDAdapter modules without SVD (rank_policy).")
         if rebuilt > 0:
             return model
 
@@ -510,10 +337,10 @@ def load_server_eval_params_flex_lora(
 ) -> None:
     """Load parameters for SERVER-side centralized evaluation for FlexLoRA."""
     # Lazy import to avoid circular dependency
-    from mak.utils.helper import get_ffa_target_keys
+    from mak.utils.helper import get_ffa_target_keys, get_config, parse_args
 
     dev = torch.device(device) if isinstance(device, str) else device
-
+    config = get_config(parse_args().config)
     model_state = model.state_dict()
 
     # FULL payload
@@ -525,7 +352,7 @@ def load_server_eval_params_flex_lora(
         return
 
     # PARTIAL payload
-    target_keys = get_ffa_target_keys(model)
+    target_keys = get_ffa_target_keys(model, bias=config.get("peft", {}).get("bias", True))
     if len(parameters) != len(target_keys):
         raise ValueError(
             f"FlexLoRA server eval payload length mismatch: expected {len(target_keys)} got {len(parameters)}"
@@ -547,3 +374,51 @@ def load_server_eval_params_flex_lora(
 
     model_state.update(update)
     model.load_state_dict(model_state, strict=True)
+
+def log_flexlora_assignment(
+    client_type_map: dict[int, int],
+    rank_policy_map: dict[int, dict],
+    config: dict,
+) -> None:
+    from collections import Counter
+    from flwr.common.logger import log
+    from logging import INFO
+
+    flex_cfg = config.get("flex_lora_config", {})
+
+    # ----- Type descriptions -----
+    type_desc = {
+        1: f"Type-1: r={flex_cfg.get('type1_rank', 8)} on all layers",
+        2: f"Type-2: r={flex_cfg.get('type2_rank', 30)} on all layers",
+        3: (
+            f"Type-3: r={flex_cfg.get('type3_attn_rank', 30)} on attention, "
+            f"r={flex_cfg.get('type3_ffn_rank', 200)} on FFN"
+        ),
+        4: f"Type-4: r={flex_cfg.get('type4_rank', 200)} on all layers (server-equivalent)",
+    }
+
+    log(INFO, "========== FlexLoRA Client Type Definitions ==========")
+    for k in sorted(type_desc):
+        log(INFO, type_desc[k])
+
+    # ----- Distribution summary -----
+    counts = Counter(client_type_map.values())
+    log(INFO, "========== FlexLoRA Client Type Distribution ==========")
+    log(INFO, f"Distribution: {flex_cfg.get('distribution', 'uniform')}, Global rank: {flex_cfg.get('global_rank', 'N/A')}")
+    for t in sorted(type_desc):
+        log(INFO, f"Type-{t}: {counts.get(t, 0)} clients")
+
+    # ----- Per-client assignment -----
+    log(INFO, "========== FlexLoRA Client Assignments ==========")
+    for cid in sorted(client_type_map):
+        t = client_type_map[cid]
+        policy = rank_policy_map[cid]
+
+        if "all" in policy:
+            policy_str = f"r={policy['all']} (all layers)"
+        else:
+            policy_str = ", ".join(
+                f"{k}=r{v}" for k, v in policy.items()
+            )
+
+        log(INFO, f"Client {cid}: Type-{t} | {policy_str}")
