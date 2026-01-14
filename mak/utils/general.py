@@ -1,7 +1,7 @@
 from collections import OrderedDict
 from typing import List, Tuple
-import numpy as np
 
+import numpy as np
 import flwr as fl
 import torch
 from flwr.common import Metrics
@@ -102,23 +102,16 @@ def _slice_pad_lora_params(t: torch.Tensor, target_rank: int, param_type: str) -
 
     return t
 
-
-def set_params(
-    model: torch.nn.Module,
-    params: List[fl.common.NDArrays],
-    device: str = "cuda",
-    method: str = None,
-    bias: str = True,
-    rank_policy_map: dict | None = None,
-    client_id: int | None = None,
-):
+def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays], 
+               device: str = "cuda", method: str = None, bias: bool = True,
+               rank_policy_map: dict | None = None, client_id: str | None = None):
 
     """Set model weights from a list of NumPy ndarrays."""
     model_state = model.state_dict()
     if params is None:
         return  # Skip if parameters is None
 
-    if len(model_state.items()) == len(params): #Full model update (Round = 1)
+    if len(model_state.items()) == len(params): #Full model update (Round = 1 or full finetune)
         params_dict = zip(model_state.keys(), params)
         state_dict = OrderedDict({k: v.clone().detach().to(device) if isinstance(v, torch.Tensor) else torch.tensor(v, device=device)
                                   for k, v in params_dict})
@@ -126,130 +119,150 @@ def set_params(
         if method == "ffa_lora": #Freeze all A adapters after full model update
             [p.__setattr__("requires_grad", False) for name, p in model.named_parameters() if name.endswith(".A")]
         return
+    else:
+        if method == "ffa_lora": #Send and receive only LoRA B adapters
+            if any(k.startswith("distilbert.") for k in model_state.keys()):
+                if bias:
+                    lora_keys = [
+                        k for k in model_state.keys()
+                        if k.endswith(".B") or (k.endswith(".bias") and "lin" in k)
+                    ]
+                else:
+                    lora_keys = [k for k in model_state.keys() if k.endswith(".B")]
+            elif any(k.startswith("bert.") for k in model_state.keys()):
+                if bias:
+                    lora_keys = [
+                        k for k in model_state.keys()
+                        if (
+                            k.endswith(".B")
+                            or (k.endswith(".bias") and "self" in k)
+                            or (k.endswith(".bias") and "dense" in k)
+                        )
+                    ]
+                else:
+                    lora_keys = [k for k in model_state.keys() if k.endswith(".B")]
+            elif any(k.startswith("model.") for k in model_state.keys()):
+                if bias:
+                    lora_keys = [
+                        k for k in model_state.keys()
+                        if (
+                            k.endswith(".B")
+                            or (k.endswith(".bias") and "self_attn" in k)
+                            or (k.endswith(".bias") and "mlp" in k)
+                        )
+                    ]
+                else:
+                    lora_keys = [k for k in model_state.keys() if k.endswith(".B")]
+        
+        elif method == "fedsa_lora": #Send and receive only LoRA A adapters
+            if any(k.startswith("distilbert.") for k in model_state.keys()):
+                if bias:
+                    lora_keys = [
+                        k for k in model_state.keys()
+                        if k.endswith(".A") or (k.endswith(".bias") and "lin" in k)
+                    ]
+                else:
+                    lora_keys = [k for k in model_state.keys() if k.endswith(".A")]
 
-    # FlexLoRA partial update (Round > 1)
-    elif method == "flex_lora":
-        # Lazy import to avoid circular dependency (helper imports general)
-        from mak.utils.helper import get_ffa_target_keys
-        from mak.utils.flex_lora_utils import get_rank_for_base
+            elif any(k.startswith("bert.") for k in model_state.keys()):
+                if bias:
+                    lora_keys = [
+                        k for k in model_state.keys()
+                        if (
+                            k.endswith(".A")
+                            or (k.endswith(".bias") and "self" in k)
+                            or (k.endswith(".bias") and "dense" in k)
+                        )
+                    ]
+                else:
+                    lora_keys = [k for k in model_state.keys() if k.endswith(".A")]
 
-        target_keys = get_ffa_target_keys(model)
-        if len(params) != len(target_keys):
-            raise ValueError(
-                f"FlexLoRA set_params expects {len(target_keys)} params (target keys), got {len(params)}"
-            )
+            elif any(k.startswith("model.") for k in model_state.keys()):
+                if bias:
+                    lora_keys = [
+                        k for k in model_state.keys()
+                        if (
+                            k.endswith(".A")
+                            or (k.endswith(".bias") and "self_attn" in k)
+                            or (k.endswith(".bias") and "mlp" in k)
+                        )
+                    ]
+                else:
+                    lora_keys = [k for k in model_state.keys() if k.endswith(".A")]
 
-        if rank_policy_map is None or client_id is None:
-            raise ValueError("FlexLoRA set_params requires rank_policy_map and client_id")
+        # FlexLoRA partial update (Round > 1)
+        elif method == "flex_lora":
+            # Lazy import to avoid circular dependency (helper imports general)
+            from mak.utils.helper import get_ffa_target_keys
+            from mak.utils.flex_lora_utils import get_rank_for_base
 
-        cid = int(client_id)
-        if cid not in rank_policy_map:
-            raise ValueError(f"FlexLoRA missing rank policy for client_id={cid}")
-        rank_policy = rank_policy_map[cid]
+            target_keys = get_ffa_target_keys(model, bias)
+            if len(params) != len(target_keys):
+                raise ValueError(
+                    f"FlexLoRA set_params expects {len(target_keys)} params (target keys), got {len(params)}"
+                )
 
-        # Ensure tensors are created on the requested device
-        dev = torch.device(device) if isinstance(device, str) else device
+            if rank_policy_map is None or client_id is None:
+                raise ValueError("FlexLoRA set_params requires rank_policy_map and client_id")
 
-        update = OrderedDict()
-        for key, array in zip(target_keys, params):
-            t = torch.from_numpy(np.asarray(array)).to(device=dev)
+            cid = int(client_id)
+            if cid not in rank_policy_map:
+                raise ValueError(f"FlexLoRA missing rank policy for client_id={cid}")
+            rank_policy = rank_policy_map[cid]
 
-            # Slice/pad LoRA factors per-layer according to rank policy
-            if key.endswith(".A"):
-                base = key[:-2]
-                target_rank = int(get_rank_for_base(rank_policy, base))
-                t = _slice_pad_lora_params(t, target_rank=target_rank, param_type="A")
-            elif key.endswith(".B"):
-                base = key[:-2]
-                target_rank = int(get_rank_for_base(rank_policy, base))
-                t = _slice_pad_lora_params(t, target_rank=target_rank, param_type="B")
+            # Ensure tensors are created on the requested device
+            dev = torch.device(device) if isinstance(device, str) else device
 
-            update[key] = t
+            update = OrderedDict()
+            for key, array in zip(target_keys, params):
+                t = torch.from_numpy(np.asarray(array)).to(device=dev)
 
-        model_state.update(update)
-        model.load_state_dict(model_state, strict=False)
-        return
+                # Slice/pad LoRA factors per-layer according to rank policy
+                if key.endswith(".A"):
+                    base = key[:-2]
+                    target_rank = int(get_rank_for_base(rank_policy, base))
+                    t = _slice_pad_lora_params(t, target_rank=target_rank, param_type="A")
+                elif key.endswith(".B"):
+                    base = key[:-2]
+                    target_rank = int(get_rank_for_base(rank_policy, base))
+                    t = _slice_pad_lora_params(t, target_rank=target_rank, param_type="B")
 
-    # Handle LoRA-only update (Round > 1) for other methods
-    elif len(model_state.items()) != len(params) and method != "ffa_lora": # Handle normal LoRA parameter update
-        if any(key.startswith("distilbert.") for key in model_state.keys()):
-            if bias:
-                lora_keys = [k for k in model_state.keys() 
-                        if ("lin" in k)]
-            else:
-                lora_keys = [k for k in model_state.keys() 
-                        if k.endswith(".B") or k.endswith(".A")]
-                
-        elif any(key.startswith("bert.") for key in model_state.keys()):
-            if bias:
-                lora_keys = [k for k in model_state.keys() 
-                        if ("self" in k or "dense" in k)]
-            else:
-                lora_keys = [k for k in model_state.keys() 
-                        if k.endswith(".B") or k.endswith(".A")]
-        elif any(key.startswith("model.") for key in model_state.keys()):
-            if bias:
-                lora_keys = [k for k in model_state.keys() 
-                        if ("self_attn" in k or "mlp" in k)]
-            else:
-                lora_keys = [k for k in model_state.keys() 
-                        if k.endswith(".B") or k.endswith(".A")]
+                update[key] = t
 
-    elif len(model_state.items()) != len(params) and method == "ffa_lora": #Handle FFA-LoRA parameter update
-        if any(k.startswith("distilbert.") for k in model_state.keys()):
-            if bias:
-                lora_keys = [
-                    k for k in model_state.keys()
-                    if k.endswith(".B") or (k.endswith(".bias") and "lin" in k)
-                ]
-            else:
-                lora_keys = [
-                    k for k in model_state.keys()
-                    if k.endswith(".B")
-                ]
-        elif any(k.startswith("bert.") for k in model_state.keys()):
-            if bias:
-                lora_keys = [
-                    k for k in model_state.keys()
-                    if (
-                        k.endswith(".B")
-                        or (k.endswith(".bias") and "self" in k)
-                        or (k.endswith(".bias") and "dense" in k)
-                    )
-                ]
-            else:
-                lora_keys = [
-                    k for k in model_state.keys()
-                    if k.endswith(".B")
-                ]
-        elif any(k.startswith("model.") for k in model_state.keys()):
-            if bias:
-                lora_keys = [
-                    k for k in model_state.keys()
-                    if (
-                        k.endswith(".B")
-                        or (k.endswith(".bias") and "self_attn" in k)
-                        or (k.endswith(".bias") and "mlp" in k)
-                    )
-                ]
-            else:
-                lora_keys = [
-                    k for k in model_state.keys()
-                    if k.endswith(".B")
-                ]
-    
-    # Build partial update state_dict
-    lora_params = OrderedDict()
+            model_state.update(update)
+            model.load_state_dict(model_state, strict=False)
+            return 
+        
+        else: #Other methods (send and receive A+B)
+            if any(key.startswith("distilbert.") for key in model_state.keys()):
+                if bias:
+                    lora_keys = [k for k in model_state.keys() if ("lin" in k)]
+                else:
+                    lora_keys = [k for k in model_state.keys() if k.endswith(".B") or k.endswith(".A")]
+                    
+            elif any(key.startswith("bert.") for key in model_state.keys()):
+                if bias:
+                    lora_keys = [k for k in model_state.keys() if ("self" in k or "dense" in k)]
+                else:
+                    lora_keys = [k for k in model_state.keys() if k.endswith(".B") or k.endswith(".A")]
+            elif any(key.startswith("model.") for key in model_state.keys()):
+                if bias:
+                    lora_keys = [k for k in model_state.keys() if ("self_attn" in k or "mlp" in k)]
+                else:
+                    lora_keys = [k for k in model_state.keys() if k.endswith(".B") or k.endswith(".A")]
+            elif any(key.startswith("layer") for key in model_state.keys()): #RESNET models
+                if bias:
+                    lora_keys = [k for k in model_state.keys() if ("conv" in k)]
+                else:
+                    lora_keys = [k for k in model_state.keys() if k.endswith(".B") or k.endswith(".A")]
 
-    for key, array in zip(lora_keys, params):
-        t = torch.from_numpy(np.asarray(array))
-        lora_params[key] = t
-
-    # Update model with partial parameters only
-    model_state.update(lora_params)
-    model.load_state_dict(model_state, strict=True)
-
-
+        # Create state dict with only LoRA parameters
+        lora_params = OrderedDict()
+        for key, array in zip(lora_keys, params):
+            lora_params[key] = torch.from_numpy(array)
+        # Update model with LoRA parameters only
+        model_state.update(lora_params)
+        model.load_state_dict(model_state, strict=True)
 
 
 def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
