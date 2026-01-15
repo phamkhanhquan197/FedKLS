@@ -3,8 +3,7 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Optional, Tuple, Union
 
-import flwr as fl
-from flwr.common import EvaluateRes, FitRes, Parameters, Scalar
+from flwr.common import FitRes, Parameters, Scalar, ndarrays_to_parameters, parameters_to_ndarrays
 from flwr.server.client_proxy import ClientProxy
 from flwr.server.strategy import FedAvg
 
@@ -147,7 +146,7 @@ class FedPOEStrategy(FedAvg):
         return loss_avg, out
 
 
-class FedPOERegressionTextStrategy(fl.server.strategy.Strategy):
+class FedPOERegressionTextStrategy(FedAvg):
     """Fed-POE regression-style strategy for text.
 
     Server state is a single parameter vector: theta (flattened all kernels).

@@ -8,6 +8,45 @@ from mak.clients.base_client import BaseClient
 
 
 class FedPOEClient(BaseClient):
+    def ensemble_predict_and_update_hedge(self, x, y, M=1, eta=0.1):
+        """
+        Chọn M snapshot từ pool dic theo trọng số Hedge, ensemble predict, update w giống 3rd-party.
+        x, y: input (tensor or numpy), single sample or batch.
+        M: số snapshot lấy từ pool.
+        eta: learning rate Hedge update.
+        Returns: ensemble prediction (numpy), list of snapshot losses.
+        """
+        import torch
+        import numpy as np
+        device = self.device
+        indices = self.model_selection(M)
+        if not indices or not self.dic:
+            return None, []
+        preds = []
+        losses = []
+        ce = torch.nn.CrossEntropyLoss(reduction="mean")
+        # Lưu lại state_dict hiện tại để restore sau khi predict xong
+        orig_state = self.model.state_dict()
+        x_tensor = torch.as_tensor(x, device=device)
+        y_tensor = torch.as_tensor(y, device=device)
+        for idx in indices:
+            self.model.load_state_dict(self.dic[idx])
+            self.model.eval()
+            with torch.no_grad():
+                out = self.model(x_tensor)
+                if out.dim() == 1:
+                    out = out.unsqueeze(0)
+                preds.append(out.cpu().numpy())
+                loss = ce(out, y_tensor)
+                losses.append(float(loss.item()))
+        # Ensemble: trung bình xác suất (softmax)
+        preds_np = np.stack(preds, axis=0)  # (M, batch, num_class)
+        probs = np.mean(preds_np, axis=0)   # (batch, num_class)
+        # Update Hedge weights
+        self.update_hedge_weights(losses, eta=eta)
+        # Restore model state
+        self.model.load_state_dict(orig_state)
+        return probs, losses
     """Fed-POE client (Flower port, Hedge mixture signals).
 
     This client behaves like the standard training client (inherits BaseClient),
@@ -57,11 +96,73 @@ class FedPOEClient(BaseClient):
         # Keep a copy of the *local* parameters after fit.
         self._local_params = None
 
+        # Pool of model snapshots (PyTorch state_dict)
+        self.dic = []  # List of state_dicts (snapshots)
+        # Hedge weights for each snapshot
+        self.w = []    # List of floats, same length as dic
+        # Period for saving snapshot
+        self.period = int(config_sim.get('fedpoe_config', {}).get('period', 20))
+        self.round = 0
+        print("init client fedpoe")
+        
+    def model_selection(self, M=1):
+        """Weighted sampling không hoàn lại M snapshot index theo Hedge weights w."""
+        import numpy as np
+        if not self.w:
+            return []
+        total = []
+        s = 0
+        for weight in self.w:
+            s += weight
+            total.append(s)
+        indices = []
+        for _ in range(M):
+            n = np.random.rand() * total[-1]
+            l, r = 0, len(self.w)
+            while l < r:
+                mid = (l + r) // 2
+                if n > total[mid]:
+                    l = mid + 1
+                else:
+                    r = mid
+            if l not in indices:
+                indices.append(l)
+        return indices
+
     def fit(self, parameters, config):
+        print("client fittttttttttttt")
+        print("self.period : ", self.period)
         params_to_send, num_examples, metrics = super().fit(parameters, config)
-        # Store local parameters (numpy ndarrays) for Fed-POE local evaluation.
         self._local_params = params_to_send
+        print("id client : ", self.client_id)
+        print(id(self))
+
+        # Pool snapshot logic: save snapshot mỗi period round
+        self.round += 1
+        print("self.round : ", self.round)
+        if self.round % self.period == 0:
+            # Save a deep copy of current model state_dict
+            import copy
+            self.dic.append(copy.deepcopy(self.model.state_dict()))
+            # Khởi tạo trọng số Hedge cho snapshot mới
+            self.w.append(1.0)
+            print("self.w in fit : " , self.w)
+
         return params_to_send, num_examples, metrics
+    
+    def update_hedge_weights(self, losses, eta=0.1):
+        """Update Hedge weights self.w theo losses (list of floats, cùng thứ tự với dic)."""
+        print("update_hedge_weights")
+        x = input()
+        import numpy as np
+        if not self.w or not losses:
+            return
+        for i, loss in enumerate(losses):
+            self.w[i] *= np.exp(-eta * loss)
+        # Optional: normalize w
+        s = sum(self.w)
+        if s > 0:
+            self.w = [w_i / s for w_i in self.w]
 
     def evaluate(self, parameters, config):
         """Evaluate both fed and local models.
@@ -71,23 +172,60 @@ class FedPOEClient(BaseClient):
         makes sense) and include both losses in metrics.
         """
 
+        print("evaluate client model")
+        
+
+        import torch
+        import numpy as np
+
         # 1) Evaluate fed/global parameters (the ones provided by server)
         loss_fed, num_examples, metrics = super().evaluate(parameters, config)
 
         # 2) Evaluate local/personalized parameters (stored after last fit)
         loss_loc = loss_fed
-        try:
-            if self._local_params is not None:
-                loss_loc, _, _ = super().evaluate(self._local_params, config)
-        except Exception:
-            # Best-effort: if local eval fails, fall back to loss_fed
+        print("self.w : " , self.w)
+        print("self.dic : " , self.dic)
+        print("metrics : ", metrics)
+        print("num_examples : ", num_examples)
+        print("loss_fed : ", loss_fed)
+        print("id client : ", self.client_id)
+        print(id(self))
+        x = input()
+
+        if self.dic and self.w:
+            # Lấy batch đầu tiên từ valset để tính ensemble loss
+            loader = torch.utils.data.DataLoader(self.valset, batch_size=self.test_batch_size)
+            try:
+                print("Try calculate loc loss")
+                batch = next(iter(loader))
+                x = batch[0] if isinstance(batch, (list, tuple)) else batch["x"] if "x" in batch else batch
+                y = batch[1] if isinstance(batch, (list, tuple)) else batch["y"] if "y" in batch else batch
+                # Nếu batch là dict, ưu tiên "x", "y" hoặc "input", "label"
+                if isinstance(batch, dict):
+                    x = batch.get("x") or batch.get("input") or batch.get("input_ids")
+                    y = batch.get("y") or batch.get("label") or batch.get("labels")
+                # Chuyển về numpy nếu là tensor
+                if hasattr(x, "cpu"):
+                    x = x.cpu().numpy()
+                if hasattr(y, "cpu"):
+                    y = y.cpu().numpy()
+                # Gọi ensemble_predict_and_update_hedge
+                print("x : {}, y :{}".format(x, y))
+                probs, losses = self.ensemble_predict_and_update_hedge(x, y, M=min(len(self.dic), 3), eta=0.1)
+                print("probs : {}, losses : {}".format(probs, losses))
+                if losses:
+                    loss_loc = float(np.mean(losses))
+            except Exception:
+                # Nếu lỗi, fallback về loss_fed
+                loss_loc = loss_fed
+        else:
+            # Nếu chưa có snapshot, fallback về loss_fed
             loss_loc = loss_fed
 
         poe_metrics: Dict[str, fl.common.Scalar] = dict(metrics)
         poe_metrics["loss_fed"] = float(loss_fed) if loss_fed is not None else None
         poe_metrics["loss_loc"] = float(loss_loc) if loss_loc is not None else None
 
-        # Return loss_fed as the main loss so existing logs stay consistent.
         return loss_fed, num_examples, poe_metrics
 
 

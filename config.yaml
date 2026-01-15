@@ -3,13 +3,13 @@
 common:
   data_type : dirichlet_niid # data_type = data distribution one among ['iid','dirichlet_niid']
   # dataset : zh-plus/tiny-imagenet # data_set = data set used one among ['kkim0451/UPMC-Food101', 'pranavmr/MM-IMDb','SetFit/20_newsgroups', 'legacy-datasets/banking77', 'fancyzhx/dbpedia_14', 'cifar10', 'cifar100', 'mnist', 'fashion_mnist', 'sasha/dog-food', 'zh-plus/tiny-imagenet', 'Mike0307/MNIST-M', 'flwrlabs/usps']
-  dataset: SetFit/20_newsgroups
+  dataset: cifar10
   # dataset: legacy-datasets/banking77
   dirichlet_alpha : 0.05 #dirichlet concentration parameter (only used if data_type is dirchlet-niid)
   target_acc : 0.99
   # Optional: redirect Ray session/spill files off /tmp (useful when /tmp is nearly full)
-  ray_tmp_dir: /tmp # /home/ai/tmp, /tmp
-  model : Qwen/Qwen1.5-0.5B # one among [distilbert-base-uncased, bert-base-uncased, meta-llama/Llama-2-7b-hf, Qwen/Qwen1.5-0.5B, Net, CifarNet, SimpleCNN, KerasExpCNN, MNISTCNN, SimpleDNN, FMCNNModel,FedAVGCNN,Resnet18, Resnet34,ResNet18Pretrained, ResNet34Pretrained,ResNet18Small, ResNet20Small,MobileNetV2,EfficientNetB0,LSTMModel]
+  ray_tmp_dir: /home/ai/tmp # /home/ai/tmp, /tmp
+  model : Resnet34 # one among [distilbert-base-uncased, bert-base-uncased, meta-llama/Llama-2-7b-hf, Qwen/Qwen1.5-0.5B, Net, CifarNet, SimpleCNN, KerasExpCNN, MNISTCNN, SimpleDNN, FMCNNModel,FedAVGCNN,Resnet18, Resnet34,ResNet18Pretrained, ResNet34Pretrained,ResNet18Small, ResNet20Small,MobileNetV2,EfficientNetB0,LSTMModel]
   # model: distilbert-base-uncased
   # model: Clip
   optimizer : sgd # one among [sgd,adam]
@@ -30,7 +30,7 @@ server:
   num_clients : 10 # total number of clients participating in training
   fraction_evaluate : 1 # fraction of clients to be selected for evaluation
   min_evaluate_clients : 10 # minimum number of clients to be selected for evaluation
-  strategy : FedSVD  #[FedAWA, FedKLSVD, FedAvg, FFALoRA, PFedMoAP, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova, FedSVD, FedPOE]
+  strategy : FedPOE  #[FedAWA, FedKLSVD, FedAvg, FFALoRA, PFedMoAP, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova, FedSVD, FedPOE]
 
 client:
   loss: FocalLoss # [CrossEntropyLoss, FocalLoss]
@@ -41,16 +41,16 @@ client:
   save_train_res : True
   # Too many total_cpus lets Ray schedule many actors concurrently and can OOM host RAM.
   # Keep this near your physical core count.
-  total_cpus : 12
+  total_cpus : 40
   total_gpus : 1 # no. of GPU's assigned for whole simulation
   gpu : True  # True or Faslse, Use GPU for training or not.
   # Request more resources per actor => fewer concurrent actors => less RAM/GPU contention.
-  num_cpus : 4
+  num_cpus : 8
   # With 1 GPU total, setting 1.0 forces a single GPU actor at a time.
   num_gpus : 1.0
 
 peft:
-  enabled: True #False = FFT, do not set method = fedkls when running FFT, pfedmoap do not run with peft=True
+  enabled: False #False = FFT, do not set method = fedkls when running FFT, pfedmoap do not run with peft=True
   rank: 32
   alpha: 32 #Equal to the rank
   method: lora # ['pissa', 'milora', 'middle', 'fedkls', 'lora', 'ffa_lora', 'pfedmoap']
@@ -78,7 +78,8 @@ fedsvd_config:
 # Mirrors the 3rd-party Fed-POE idea of updating per-client weights (a,b)
 # via exponentiated losses.
 fedpoe_config:
-  eta: 0.0  # set >0 to enable a,b updates: a*=exp(-eta*loss_fed), b*=exp(-eta*loss_loc)
+  eta: 0.1  # set >0 to enable a,b updates: a*=exp(-eta*loss_fed), b*=exp(-eta*loss_loc)
+  period : 1 # number update model server, default if POE is 20
 
 # FedPOERegressionText: regression-style POE over text embeddings using an RFF head
 fedpoe_regression_text_config:
