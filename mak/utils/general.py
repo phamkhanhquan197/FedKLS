@@ -22,7 +22,7 @@ def test(net, testloader, device: str, feature_key: str) -> Tuple[float, float, 
     # Set the network to evaluation mode
     net.eval()
 
-    if feature_key in ("text", "content", "sentence"):
+    if feature_key in ["text", "content", "sentence"]:
         #for text datasets, we need to use a different loss function
         with torch.no_grad():
             for batch in testloader:
@@ -107,28 +107,17 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays],
                rank_policy_map: dict | None = None, client_id: str | None = None):
 
     """Set model weights from a list of NumPy ndarrays."""
-
     model_state = model.state_dict()
     if params is None:
         return  # Skip if parameters is None
 
     if len(model_state.items()) == len(params): #Full model update (Round = 1 or full finetune)
         params_dict = zip(model_state.keys(), params)
-        state_dict = OrderedDict(
-            {
-                k: v.clone().detach().to(device)
-                if isinstance(v, torch.Tensor)
-                else torch.tensor(v, device=device)
-                for k, v in params_dict
-            }
-        )
+        state_dict = OrderedDict({k: v.clone().detach().to(device) if isinstance(v, torch.Tensor) else torch.tensor(v, device=device)
+                                  for k, v in params_dict})
         model.load_state_dict(state_dict, strict=False)
-
-        # Freeze all A adapters after full model update for FFA-LoRA
-        if method == "ffa_lora":
-            for name, p in model.named_parameters():
-                if name.endswith(".A"):
-                    p.requires_grad = False
+        if method == "ffa_lora": #Freeze all A adapters after full model update
+            [p.__setattr__("requires_grad", False) for name, p in model.named_parameters() if name.endswith(".A")]
         return
     else:
         if method == "ffa_lora": #Send and receive only LoRA B adapters
