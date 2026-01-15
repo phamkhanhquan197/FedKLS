@@ -8,7 +8,7 @@ common:
   dirichlet_alpha : 0.05 #dirichlet concentration parameter (only used if data_type is dirchlet-niid)
   target_acc : 0.99
   # Optional: redirect Ray session/spill files off /tmp (useful when /tmp is nearly full)
-  ray_tmp_dir: /home/ai/tmp # /home/ai/tmp, /tmp
+  ray_tmp_dir: /tmp # /home/ai/tmp, /tmp
   model : Resnet34 # one among [distilbert-base-uncased, bert-base-uncased, meta-llama/Llama-2-7b-hf, Qwen/Qwen1.5-0.5B, Net, CifarNet, SimpleCNN, KerasExpCNN, MNISTCNN, SimpleDNN, FMCNNModel,FedAVGCNN,Resnet18, Resnet34,ResNet18Pretrained, ResNet34Pretrained,ResNet18Small, ResNet20Small,MobileNetV2,EfficientNetB0,LSTMModel]
   # model: distilbert-base-uncased
   # model: Clip
@@ -41,11 +41,11 @@ client:
   save_train_res : True
   # Too many total_cpus lets Ray schedule many actors concurrently and can OOM host RAM.
   # Keep this near your physical core count.
-  total_cpus : 40
+  total_cpus : 10
   total_gpus : 1 # no. of GPU's assigned for whole simulation
   gpu : True  # True or Faslse, Use GPU for training or not.
   # Request more resources per actor => fewer concurrent actors => less RAM/GPU contention.
-  num_cpus : 8
+  num_cpus : 4
   # With 1 GPU total, setting 1.0 forces a single GPU actor at a time.
   num_gpus : 1.0
 
