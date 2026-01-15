@@ -17,7 +17,6 @@ def test(net, testloader, device: str, feature_key: str) -> Tuple[float, float, 
     total = 0
     all_labels = []
     all_preds = []
-    all_probs = []
     
     # Set the network to evaluation mode
     net.eval()
@@ -32,14 +31,12 @@ def test(net, testloader, device: str, feature_key: str) -> Tuple[float, float, 
                 outputs = net(input_ids, attention_mask=attention_mask, labels=labels)
                 loss += outputs.loss.item()
                 logits = outputs.logits
-                probs = F.softmax(logits, dim=1)  # probability per class
                 predicted = torch.argmax(logits, dim=1)
                 correct += (predicted == labels).sum().item()
                 total += labels.size(0)
                 #Collect for F1 score
                 all_labels.extend(labels.cpu().numpy())
                 all_preds.extend(predicted.cpu().numpy())
-                all_probs.extend(probs.cpu().numpy())
         accuracy = correct / total
         f1 = f1_score(all_labels, all_preds, average='weighted')
 
@@ -53,13 +50,11 @@ def test(net, testloader, device: str, feature_key: str) -> Tuple[float, float, 
                 images, labels = data[x_label].to(device), data[y_label].to(device)
                 outputs = net(images)
                 loss += criterion(outputs, labels).item()
-                probs = F.softmax(outputs, dim=1)  # probability per class
                 _, predicted = torch.max(outputs.data, 1)
                 correct += (predicted == labels).sum().item()
                 #Collect for F1 score
                 all_labels.extend(labels.cpu().numpy())
                 all_preds.extend(predicted.cpu().numpy())
-                all_probs.extend(probs.cpu().numpy())
         accuracy = correct / len(testloader.dataset)
         f1 = f1_score(all_labels, all_preds, average='weighted')
 
