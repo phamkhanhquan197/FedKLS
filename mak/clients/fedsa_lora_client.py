@@ -11,11 +11,11 @@ class FedSALoRAClient(BaseClient):
 
     def __init__(
         self, client_id, model, trainset, valset, config_sim, device, save_dir,
-        kl_norm=None, dataset=None, apply_transforms=None, data_scheduler=None, bias=None
+        kl_norm=None, dataset=None, apply_transforms=None, data_scheduler=None, bias=None, rank_policy_map=None
     ):
         super().__init__(
             client_id, model, trainset, valset, config_sim, device, save_dir,
-            dataset=dataset, apply_transforms=apply_transforms, data_scheduler=data_scheduler, bias=bias
+            dataset=dataset, apply_transforms=apply_transforms, data_scheduler=data_scheduler, bias=bias, rank_policy_map=rank_policy_map   
         )
 
     def __repr__(self) -> str:
@@ -37,7 +37,7 @@ class FedSALoRAClient(BaseClient):
             else:
                 params_to_send = {name: tensor for name, tensor in model_state.items() if name.endswith(".A")}
 
-        elif any(key.startswith(("bert.", "roberta.")) for key in model_state.keys()):
+        elif any(key.startswith("bert.") for key in model_state.keys()):
             if self.bias:
                 params_to_send = {
                     name: tensor for name, tensor in model_state.items()
