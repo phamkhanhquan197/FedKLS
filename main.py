@@ -3,17 +3,35 @@ from logging import INFO
 from flwr.common.logger import log
 from datasets.utils.logging import disable_progress_bar
 import os
-from mak.utils.helper import get_device_and_resources
-from mak.utils.helper import gen_dir_outfile_server, get_model, get_strategy, get_server, save_simulation_history,get_dataset, get_size_weights
-from mak.utils.pytorch_transformations import TransformationPipeline, TextTransformationPipeline, CLIPTransformationPipeline
+from mak.utils.helper import (
+    get_device_and_resources,
+    gen_dir_outfile_server,
+    get_model,
+    get_strategy,
+    get_server,
+    save_simulation_history,
+    get_dataset,
+    get_size_weights,
+    get_config, 
+    set_seed, 
+    parse_args, 
+    apply_svd_to_model,
+    compute_client_distributions,
+    compute_KL_divergence,
+)
+from mak.utils.pytorch_transformations import (
+    TransformationPipeline, 
+    TextTransformationPipeline, 
+    CLIPTransformationPipeline
+)
 from mak.clients import get_client_fn
 from mak.utils.dataset_info import dataset_info
-from mak.utils.helper import get_config, set_seed, parse_args, apply_svd_to_model
-from mak.utils.helper import compute_client_distributions, compute_KL_divergence
+from mak.utils.flex_lora_utils import build_client_rank_policy_map, build_client_type_map, log_flexlora_assignment
 import copy
 import ray
 import gc
 import torch
+import numpy as np
 
 def main():
     # Parse arguments and configs
@@ -52,7 +70,8 @@ def main():
         transformation_pipeline = CLIPTransformationPipeline(dataset_name=dataset_name, img_size=224)
 
     # Check if the dataset is a text dataset and use the appropriate transformation pipeline
-    if dataset_name in ['SetFit/20_newsgroups', 'legacy-datasets/banking77', 'fancyzhx/dbpedia_14', 'stanfordnlp/sst2'] or model_name in ['distilbert-base-uncased', 'microsoft/deberta-v3-base', 'llama2-7b']:
+    if dataset_name in ['SetFit/20_newsgroups', 'legacy-datasets/banking77', 'fancyzhx/dbpedia_14'] \
+        or model_name in ['distilbert-base-uncased', 'microsoft/deberta-v3-base', 'llama2-7b']:
         # For text datasets, we need to use a different transformation pipeline
         transformation_pipeline = TextTransformationPipeline(dataset_name=dataset_name, model_name=model_name)
     elif dataset_name in ['pranavmr/MM-IMDb']:
@@ -112,7 +131,8 @@ def main():
     #Prepare the server and client models based on the strategy and method
     lora_enabled = config_sim['peft']['enabled']
     peft_method =  config_sim['peft']['method']
-    
+
+
     #Apply SVD if LoRA is enabled
     if lora_enabled:
         #Decide the client model based on the LoRA method
@@ -151,14 +171,19 @@ def main():
             for name, tensor in svd_model.state_dict().items():
                 log(INFO, f"{name}: shape {tuple(tensor.shape)}")  
             log(INFO, f"=>>>>>>>>>>>>>>>>>Number of layers: {len(svd_model.state_dict())}")
-            #Server always needs the SVD-adapted model when LoRA is enabled
+            #Server always needs the SVD-adapted model when PEFT is enabled
             server_model = svd_model
-            
-        elif peft_method in ["pissa", "milora", "middle", "lora", "ffa_lora", "fedsa_lora"]:
+
+        elif peft_method in ["pissa", "milora", "middle", "lora", "ffa_lora", "fedsa_lora", "flex_lora"]:
             log(INFO, "Applying SVD to create svd model for server...")
             # Create a deep copy of base_model to avoid modifying it
             model_for_svd = copy.deepcopy(base_model)
-            svd_model = apply_svd_to_model(model=model_for_svd, config=config_sim)            
+            if peft_method == "flex_lora":
+                server_cfg = copy.deepcopy(config_sim)
+                server_cfg.setdefault("peft", {})["rank"] = 200
+                svd_model = apply_svd_to_model(model=model_for_svd, config=server_cfg)
+            else:
+                svd_model = apply_svd_to_model(model=model_for_svd, config=config_sim)            
             log(INFO, f"Model after SVD: {svd_model}")
             for name, tensor in svd_model.state_dict().items():
                 log(INFO, f"{name}: shape {tuple(tensor.shape)}")  
@@ -173,7 +198,7 @@ def main():
             import sys
             sys.exit(0)  # Exit if an unknown PEFT method is specified
     else: # If LoRA is not enabled, use the base model for both server and clients (Full fine-tuning)
-        log(INFO, "=>>>>> LoRA is not enabled: Using base_model for both server and clients.")
+        log(INFO, "=>>>>> PEFT methods are not enabled: Using base_model for both server and clients.")
         log(INFO, "=>>>>> Full fine-tuning training!!!")
         _ = compute_client_distributions(config = config_sim, dataset=fds,num_clients=config_sim['server']['num_clients'])
         server_model = base_model
@@ -183,6 +208,27 @@ def main():
         dir_alpha = fds._partitioners['train']._alpha[0]
     except (AttributeError):
         dir_alpha = "NA"
+
+    #############################################################################
+    # FlexLoRA: build client type map + per-layer rank policy map (paper Table 1)
+    if config_sim.get("server", {}).get("strategy") == "FlexLoRA":
+        num_clients = int(config_sim["server"]["num_clients"])
+
+        # Enforce global_rank = max rank (paper: 200)
+        config_sim.setdefault("flex_lora_config", {}).setdefault("global_rank", 200)
+        global_rank = int(config_sim["flex_lora_config"]["global_rank"])
+
+        client_type_map = build_client_type_map(config_sim, num_clients=num_clients)
+        rank_policy_map = build_client_rank_policy_map(config_sim, client_type_map=client_type_map)
+
+        config_sim["flex_lora_config"]["client_type_map"] = client_type_map
+        config_sim["flex_lora_config"]["client_rank_policy_map"] = rank_policy_map
+
+        log_flexlora_assignment(
+        client_type_map=client_type_map,
+        rank_policy_map=rank_policy_map,
+        config=config_sim,
+        )
 
     log(INFO,f" =>>>>> Dataset : {dataset_name}") 
     log(INFO,f" =>>>>> Model : {base_model._get_name()} Device : {device}")
@@ -236,9 +282,14 @@ def main():
             model = torch.load(model_path, map_location=device, weights_only = False)  # Load model from file
             model = model.to(device)  # Move model to the correct device
             kl_norm = kl_normalized_per_client[cid]  # Get the KL norm for this client
+        elif peft_method == "flex_lora":
+            model = copy.deepcopy(client_model)
         else:
             model = client_model
             kl_norm = None
+
+        rank_policy_map = config_sim.get("flex_lora_config", {}).get("client_rank_policy_map", None)
+        
         return get_client_fn(
             config_sim=config_sim,
             dataset=fds,
@@ -248,6 +299,7 @@ def main():
             save_dir=saved_models_path,
             kl_norm_dict=kl_normalized_per_client if peft_method == "fedkls" else None,  # Pass precomputed kl_norms
             data_scheduler=data_scheduler,  # NEW: Pass data scheduler for dynamic data allocation
+            rank_policy_map=rank_policy_map,
         )(cid)
 
     

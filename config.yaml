@@ -2,20 +2,23 @@
 
 common:
   data_type : dirichlet_niid # data_type = data distribution one among ['iid','dirichlet_niid']
-  dataset : stanfordnlp/sst2 # data_set = data set used one among ['kkim0451/UPMC-Food101', 'pranavmr/MM-IMDb','SetFit/20_newsgroups', 'legacy-datasets/banking77', 'fancyzhx/dbpedia_14', 'cifar10', 'cifar100', 'mnist', 'fashion_mnist', 'sasha/dog-food', 'zh-plus/tiny-imagenet', 'Mike0307/MNIST-M', 'flwrlabs/usps']
-  # dataset: SetFit/20_newsgroups
+  # dataset : cifar100 # data_set = data set used one among ['kkim0451/UPMC-Food101', 'pranavmr/MM-IMDb','SetFit/20_newsgroups', 'legacy-datasets/banking77', 'fancyzhx/dbpedia_14', 'cifar10', 'cifar100', 'mnist', 'fashion_mnist', 'sasha/dog-food', 'zh-plus/tiny-imagenet', 'Mike0307/MNIST-M', 'flwrlabs/usps']
+  dataset: SetFit/20_newsgroups
   # dataset: legacy-datasets/banking77
-  dirichlet_alpha : 0.5 #dirichlet concentration parameter (only used if data_type is dirchlet-niid)
+  # dataset: zh-plus/tiny-imagenet
+  dirichlet_alpha : 0.05 #dirichlet concentration parameter (only used if data_type is dirchlet-niid)
   target_acc : 0.99
   # model : Qwen/Qwen1.5-0.5B # one among [distilbert-base-uncased, bert-base-uncased, meta-llama/Llama-2-7b-hf, Qwen/Qwen1.5-0.5B, Net, CifarNet, SimpleCNN, KerasExpCNN, MNISTCNN, SimpleDNN, FMCNNModel,FedAVGCNN,Resnet18, Resnet34,ResNet18Pretrained, ResNet34Pretrained,ResNet18Small, ResNet20Small,MobileNetV2,EfficientNetB0,LSTMModel]
-  model: roberta-large
+  model: distilbert-base-uncased
+  # model: Clip
+  # model: ResNet18Pretrained
   optimizer : sgd # one among [sgd,adam]
   sgd_momentum : 0.9
   seed : 123  #123 456 789
   multi_node : False
   save_log : True
-  num_train_thread: 1 #Save the most memory when setting to 1
-  num_test_thread: 1
+  num_train_thread: 10 #Save the most memory when setting to 1
+  num_test_thread: 10
 
 server:
   num_rounds : 5
@@ -24,15 +27,15 @@ server:
   min_fit_clients : 3 # minimum number of clients to be selected for training
   num_clients : 3 # total number of clients participating in training
   fraction_evaluate : 1 # fraction of clients to be selected for evaluation
-  min_evaluate_clients : 3 # minimum number of clients to be selected for evaluation
-  strategy : FedSALoRA  #[FedAWA, FedKLSVD, FedAvg, FFALoRA, PFedMoAP, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova]
+  min_evaluate_clients : 10 # minimum number of clients to be selected for evaluation
+  strategy : FlexLoRA  #[FedAWA, FedKLSVD, FedAvg, FFALoRA, FlexLoRA, FedSALoRA, PFedMoAP, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova]
 
 client:
   loss: FocalLoss # [CrossEntropyLoss, FocalLoss]
   epochs : 1
   batch_size : 32
-  test_batch_size : 32
-  lr: 0.001  #  [0.00002, 0.0001,0.001, 0.005, 0.01, 0.1, 0.2] 0.005->distilbert-base-uncased, 0.001->bert-base-uncased, 0.0001->Qwen/Qwen1.5-0.5B
+  test_batch_size : 32    
+  lr: 0.005 #  [0.00002, 0.0001,0.001, 0.005, 0.01, 0.1, 0.2] 0.005->distilbert-base-uncased, 0.001->bert-base-uncased, 0.0001->Qwen/Qwen1.5-0.5B
   save_train_res : True
   total_cpus : 4 # no. of CPU cores that are assigned for all simulation
   total_gpus : 1 # no. of GPU's assigned for whole simulation
@@ -42,23 +45,27 @@ client:
 
 peft:
   enabled: True #False = FFT, do not set method = fedkls when running FFT, pfedmoap do not run with peft=True
-  rank: 8
-  alpha: 16 #Equal to the rank, but, FedSA-LoRA requires double
-  method: fedsa_lora # ['pissa', 'milora', 'middle', 'fedkls', 'lora', 'ffa_lora']
+  rank: 32
+  alpha: 32 #Equal to the rank
+  method: flex_lora # ['pissa', 'milora', 'middle', 'fedkls', 'lora', 'ffa_lora', 'fedsa_lora ','pfedmoap', 'flex_lora']
   bias: True #To send the bias layer(after A/B) to server for aggregation or not
   selective_attention_qv_only: True #Select only qv layers in attention for Low Rank
 
 # NEW: Dynamic Data Updates Configuration
 dynamic_data:
   enabled: False  # Enable/disable dynamic data updates
-  mode: "reset"  # "reset" or "incremental"
-  round_step: 2  # Dataset update frequency (trigger reload every N rounds)
+  mode: "incremental"  # "reset" or "incremental"
+  round_step: 100  # Dataset update frequency (trigger reload every N rounds)
   start_fraction: 0.3  # For incremental: initial data fraction per client (e.g., 0.3 = 30%)
 
 # FFA-LoRA baseline config
 ffa_lora_config:
   # Options: kaiming | gaussian | orthogonal | svd
-  init_method: "gaussian"
+  init_method: "svd"
+
+# FedSA-LoRA baseline config
+fedsa_lora_config:
+  init_method: kaiming   # kaiming | gaussian | orthogonal | svd
 
 pfedmoap_config:
   prompt_len: 16        # number of learnable prompt tokens; the prompt is the ONLY parameter trained and exchanged each round
@@ -67,7 +74,16 @@ pfedmoap_config:
   heads: 8              # number of attention heads for multi-head attention when combining local and expert prompts
   lambda_local: 1.0     # regularization weight for the local prompt; higher favors personalization, lower relies more on experts
 
-fedawa_config:
+flex_lora_config:
+  global_rank: 200
+  # Type 1: r=8 on all layers
+  # Type 2: r=30 on all layers
+  # Type 3: r=30 on attention layers, r=200 on FFN layers
+  # Type 4: r=200 on all layers
+  #Options: uniform | heavy_tail_light | heavy_tail_strong | normal
+  distribution: normal 
+
+  fedawa_config:
   server_valid_ratio: 0.2 
   server_epochs: 1       
   server_optimizer: adam   

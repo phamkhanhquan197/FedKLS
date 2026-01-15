@@ -9,3 +9,4 @@ from mak.strategies.fedawa_strategy import FedAWAStrategy as FedAWA
 from mak.strategies.ffa_lora_strategy import FFALoRAStrategy as FFALoRA
 from mak.strategies.pfedmoap_strategy import PFedMoAPStrategy as PFedMoAP
 from mak.strategies.fedsa_lora_strategy import FedSALoRAStrategy as FedSALoRA
+from mak.strategies.flex_lora_strategy import FlexLoRAStrategy as FlexLoRA
