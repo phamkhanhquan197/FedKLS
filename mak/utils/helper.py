@@ -409,17 +409,17 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
                 if init_method == "svd":
                     U, S, Vt = torch.linalg.svd(W_flat, full_matrices=False)
                     max_possible_rank = S.size(0)
-                    rr = rank
-                    if rr > max_possible_rank:
-                        log(INFO, f"Warning: Requested rank {rr} for layer {name} > max possible rank {max_possible_rank}.")
-                        rr = max_possible_rank
-                    U_select = U[:, :rr]
-                    S_select = S[:rr]
-                    Vt_select = Vt[:rr, :]
+
+                    if rank > max_possible_rank:
+                        log(INFO, f"Warning: Requested rank {rank} for layer {name} > max possible rank {max_possible_rank}.")
+                        rank = max_possible_rank
+                    U_select = U[:, :rank]
+                    S_select = S[:rank]
+                    Vt_select = Vt[:rank, :]
 
                     A = U_select @ torch.diag(torch.sqrt(S_select))  # [c_out, r]
                     # FedSA default: B zero, do not preload low-rank recon into adapter
-                    B = torch.zeros(rr, d_in, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    B = torch.zeros(rank, d_in, device=weight_matrix.device, dtype=weight_matrix.dtype)
                     W_res = weight_matrix
                 else:
                     A = torch.empty(c_out, rank, device=weight_matrix.device, dtype=weight_matrix.dtype)
@@ -441,15 +441,15 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
                 if init_method == "svd":
                     U, S, Vt = torch.linalg.svd(weight_matrix, full_matrices=False)
                     max_possible_rank = S.size(0)
-                    rr = rank
-                    if rr > max_possible_rank:
-                        log(INFO, f"Warning: Requested rank {rr} for layer {name} > max possible rank {max_possible_rank}.")
-                        rr = max_possible_rank
-                    U_select = U[:, :rr]
-                    S_select = S[:rr]
+
+                    if rank > max_possible_rank:
+                        log(INFO, f"Warning: Requested rank {rank} for layer {name} > max possible rank {max_possible_rank}.")
+                        rank = max_possible_rank
+                    U_select = U[:, :rank]
+                    S_select = S[:rank]
                     # A from SVD, B zero
                     A = U_select @ torch.diag(torch.sqrt(S_select))  # [d_out, r]
-                    B = torch.zeros(rr, d_in, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    B = torch.zeros(rank, d_in, device=weight_matrix.device, dtype=weight_matrix.dtype)
                     W_res = weight_matrix
                 else:
                     A = torch.empty(d_out, rank, device=weight_matrix.device, dtype=weight_matrix.dtype)
