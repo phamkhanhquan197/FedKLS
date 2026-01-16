@@ -237,16 +237,34 @@ class FedPOEClient(BaseClient):
         # print("id client : ", self.client_id)
         # print(id(self))
 
-        # Pool snapshot logic: save snapshot mỗi period round
-        self.round += 1
-        # print("self.round : ", self.round)
-        if self.round % self.period == 0:
+        # Pool snapshot logic: align `period` with global/server round if available
+        # (closer to 3rd-party where `period` is based on time step t).
+        server_round = None
+        try:
+            server_round = int(config.get("round")) if isinstance(config, dict) and "round" in config else None
+        except Exception:
+            server_round = None
+
+        if server_round is None:
+            # Fallback: count local fit calls
+            self.round += 1
+            round_for_snapshot = self.round
+        else:
+            round_for_snapshot = server_round
+
+        if round_for_snapshot % self.period == 0:
             # Save a deep copy of current model state_dict
             import copy
             self.dic.append(copy.deepcopy(self.model.state_dict()))
             # Khởi tạo trọng số Hedge cho snapshot mới
             self.w.append(1.0)
             # print("self.w in fit : " , self.w)
+
+        # Track last seen round (for persistence/debug)
+        try:
+            self.round = int(round_for_snapshot)
+        except Exception:
+            pass
 
         # Persist state after each fit so stateless simulations keep progress
         self._save_fedpoe_state()
@@ -277,8 +295,6 @@ class FedPOEClient(BaseClient):
         We return `loss_fed` as the primary loss (so standard aggregation still
         makes sense) and include both losses in metrics.
         """
-
-        print("evaluate client model")
         
         import torch
         import numpy as np
