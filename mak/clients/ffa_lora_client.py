@@ -5,7 +5,6 @@ class FFALoRAClient(BaseClient):
 
     Standards:
     - Communication is based on model.state_dict().
-    - Client uplink ALWAYS returns PARTIAL tensors using get_target_keys(model).
     - Round 1 downlink is FULL state_dict values (handled via BaseClient super().set_parameters).
     - Round >1 downlink is PARTIAL tensors aligned with the same sorted keys.
     """
