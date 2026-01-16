@@ -6,7 +6,7 @@ import numpy as np
 
 from mak.clients.base_client import BaseClient
 from mak.utils.general import set_params
-from mak.utils.helper import get_ffa_target_keys
+from mak.utils.helper import get_target_keys
 from mak.utils.flex_lora_utils import ensure_local_rank_adapters, slice_and_load_params
 
 
@@ -14,7 +14,7 @@ class FlexLoRAClient(BaseClient):
     """FlexLoRA client (heterogeneous LoRA ranks).
 
     - Round 1: receives full model and adapts A/B shapes to local rank.
-    - Round >1: exchanges partial payload defined by `get_ffa_target_keys`.
+    - Round >1: exchanges partial payload defined by `get_target_keys`.
     """
 
     def __init__(
@@ -55,7 +55,8 @@ class FlexLoRAClient(BaseClient):
     def get_parameters(self, config: Any | None = None) -> List[np.ndarray]:
         """Return FlexLoRA uplink payload: all trainable parameters in deterministic order."""
         sd = self.model.state_dict()
-        target_keys = get_ffa_target_keys(self.model)
+        bias = self.config_sim.get("peft", {}).get("bias", True)
+        target_keys = get_target_keys(self.model, bias)
 
         params_to_send = {k: v for k, v in sd.items() if k in target_keys}
 
