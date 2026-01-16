@@ -195,7 +195,6 @@ def gen_dir_outfile_server(config):
             f.close()
     return out_file_path, final_dir_path
 
-
 def get_partitioner(config_sim):
     num_clients = config_sim["server"]["num_clients"]
     if config_sim["common"]["data_type"] == "dirichlet_niid":
@@ -243,72 +242,26 @@ def get_dataset(config_sim):
 
         return fds, centralized_testset, classnames
     
-def extract_linear_layers(model):
+def extract_linear_layers(model, config):
     """Return a dict of {layer_name: layer_module} for all linear layers in the model.
+    Optionally skips layers specified in layers_to_skip.
     """
     linear_layers = {}
-
-    # Read model name from config if provided
-    model_name = None
-    method = None
-    selective_attention_qv_only = False
-
-    if config is not None:
-        model_name = config.get("common", {}).get("model", None)
-        method = config.get("peft", {}).get("method", None)
-
-        # Allow config to override the param if you want
-        if "peft" in config and "selective_attention_qv_only" in config["peft"]:
-            selective_attention_qv_only = bool(config["peft"]["selective_attention_qv_only"])
+    skip_layer_names = {"pre_classifier", "classifier", "model.norm", "score"}
+    attenion_layer_names = {"self_attn", "attn", "attention"}
 
     for name, module in model.named_modules():
-        if not isinstance(module, torch.nn.Linear):
-            continue
-
-        # Keep your existing skips
-        if name in ["pre_classifier", "classifier", "model.norm", "score"]:
-            continue
-
-        # Selective apply for LoRA-family only
-        if selective_attention_qv_only and method in {"lora", "ffa_lora", "fedsa_lora"}:
-            n = name.lower()
-
-            # Default: cover common HF naming
-            # BERT/RoBERTa: attention.self.query / attention.self.value
-            # LLaMA/Qwen: self_attn.q_proj / self_attn.v_proj
-            # Some libs: q_proj / v_proj without extra tokens
-            is_q = ("query" in n) or ("q_proj" in n) or n.endswith(".q")
-            is_v = ("value" in n) or ("v_proj" in n) or n.endswith(".v")
-
-            is_attn = ("attention" in n) or ("attn" in n) or ("self_attn" in n)
-
-            # If model_name is known, you can be stricter or looser per family
-            if model_name is not None:
-                mn = str(model_name).lower()
-
-                # Transformer NLP models: keep only attention q/v
-                if ("bert" in mn) or ("roberta" in mn) or ("distilbert" in mn):
-                    if not (("attention" in n) and (is_q or is_v)):
-                        continue
-
-                # LLaMA/Qwen style
-                elif ("llama" in mn) or ("qwen" in mn):
-                    if not ((("self_attn" in n) or ("attn" in n)) and (is_q or is_v)):
-                        continue
-
-                # Vision backbones (ViT, Swin, etc.) naming varies, so fallback to general rule
-                else:
-                    if not (is_attn and (is_q or is_v)):
-                        continue
+        # Check if the module is a Linear layer
+        if isinstance(module, torch.nn.Linear):
+            if name in skip_layer_names: # Check if any part of the layer_to_skip is in the current layer's name
+                continue
+            if config["peft"]["layer"] == "attention_only":
+                if any(att_name in name for att_name in attenion_layer_names):
+                    linear_layers[name] = module
             else:
-                # No model_name: generic rule
-                if not (is_attn and (is_q or is_v)):
-                    continue
-
-        linear_layers[name] = module
+                linear_layers[name] = module
 
     return linear_layers
-
 
 def extract_conv2_layers(model):
     conv2_layers = {}
@@ -335,7 +288,7 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
         layers_to_svd = extract_conv2_layers(model) 
         log(INFO, f"Found {len(layers_to_svd)} conv2 layers to adapt with SVD.")
     else:
-        layers_to_svd = extract_linear_layers(model=model, config=config) 
+        layers_to_svd = extract_linear_layers(model, config) 
         log(INFO, f"Found {len(layers_to_svd)} linear layers to adapt with SVD.")
 
     rank = config["peft"]["rank"]
@@ -728,12 +681,14 @@ def get_model(config, shape, classnames=None):
         return model
     # check if model is from huggingface
     elif model_name in [
-        "distilbert-base-uncased",
+        "distilbert-base-uncased", 
+        "bert-base-uncased", 
         "roberta-base",
         "roberta-large",
-        "Qwen/Qwen1.5-0.5B",
+        "Qwen/Qwen1.5-0.5B", 
+        "meta-llama/Llama-2-7b-hf",
         "openai/clip-vit-base-patch32",
-    ]: # Add more as needed
+        ]:  # Add more as needed
         from transformers import AutoModelForSequenceClassification, BitsAndBytesConfig, CLIPModel
         if model_name == "Qwen/Qwen1.5-0.5B": #Need to check again when applying the quantization -> still error
             quantization_8_bit_config = BitsAndBytesConfig(
@@ -1076,9 +1031,6 @@ def get_strategy(
         },
         "PowD": {
             "candidate_client_set": config["powd_config"]["candidate_client_set"],
-        },
-        "FedSALoRA": {
-            "config": config,
         },
     } 
 
