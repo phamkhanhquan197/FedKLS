@@ -48,7 +48,7 @@ from collections import Counter
 import torch.nn.init as init
 from datasets import load_dataset
 
-def get_ffa_target_keys(model, bias=True) -> List[str]:
+def get_target_keys(model, bias=True) -> List[str]:
     """Return deterministic sorted list of target parameter names for FFA/Flex LoRA.
 
     Includes:
@@ -64,7 +64,11 @@ def get_ffa_target_keys(model, bias=True) -> List[str]:
             lora_keys = [k for k in model_state.keys() if ("lin" in k)]
         else:
             lora_keys = [k for k in model_state.keys() if k.endswith(".B") or k.endswith(".A")]
-            
+    elif any(key.startswith("roberta.") for key in model_state.keys()):
+        if bias:
+            lora_keys = [k for k in model_state.keys() if ("self" in k or ("dense" in k and "classifier" not in k))]
+        else:
+            lora_keys = [k for k in model_state.keys() if k.endswith(".B") or k.endswith(".A")]
     elif any(key.startswith("bert.") for key in model_state.keys()):
         if bias:
             lora_keys = [k for k in model_state.keys() if ("self" in k or "dense" in k)]
@@ -247,8 +251,8 @@ def extract_linear_layers(model, config):
     Optionally skips layers specified in layers_to_skip.
     """
     linear_layers = {}
-    skip_layer_names = {"pre_classifier", "classifier", "model.norm", "score"}
-    attenion_layer_names = {"self_attn", "attn", "attention"}
+    skip_layer_names = ["pre_classifier", "classifier", "model.norm", "score", "classifier.dense", "classifier.out_proj"]
+    attenion_layer_names = ["self_attn", "attn", "attention"]
 
     for name, module in model.named_modules():
         # Check if the module is a Linear layer
@@ -685,6 +689,7 @@ def get_model(config, shape, classnames=None):
         "bert-base-uncased", 
         "roberta-base",
         "roberta-large",
+        "microsoft/deberta-v3-base",
         "Qwen/Qwen1.5-0.5B", 
         "meta-llama/Llama-2-7b-hf",
         "openai/clip-vit-base-patch32",
