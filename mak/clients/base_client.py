@@ -63,6 +63,11 @@ class BaseClient(fl.client.NumPyClient):
                     params_to_send = {name: tensor for name, tensor in self.model.state_dict().items() if "lin" in name}
                 else:
                     params_to_send = {name: tensor for name, tensor in self.model.state_dict().items() if name.endswith(".B") or name.endswith(".A")}
+            elif any(key.startswith("roberta.") for key in self.model.state_dict().keys()):
+                if self.bias:
+                    params_to_send = {name: tensor for name, tensor in self.model.state_dict().items() if "self" in name or ("dense" in name and "classifier" not in name)}
+                else:
+                    params_to_send = {name: tensor for name, tensor in self.model.state_dict().items() if name.endswith(".B") or name.endswith(".A")}
             elif any(key.startswith("bert.") for key in self.model.state_dict().keys()):
                 if self.bias:
                     params_to_send = {name: tensor for name, tensor in self.model.state_dict().items() if "self" in name or "dense" in name}
