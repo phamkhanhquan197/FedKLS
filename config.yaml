@@ -21,14 +21,14 @@ common:
   num_test_thread: 10
 
 server:
-  num_rounds : 5
+  num_rounds : 1000
   address : 127.0.0.1
-  fraction_fit : 1 # fraction of clients to be selected for training
+  fraction_fit : 0.3 # fraction of clients to be selected for training
   min_fit_clients : 3 # minimum number of clients to be selected for training
-  num_clients : 3 # total number of clients participating in training
+  num_clients : 10 # total number of clients participating in training
   fraction_evaluate : 1 # fraction of clients to be selected for evaluation
   min_evaluate_clients : 10 # minimum number of clients to be selected for evaluation
-  strategy : FlexLoRA  #[FedAWA, FedKLSVD, FedAvg, FFALoRA, FlexLoRA, FedSALoRA, PFedMoAP, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova]
+  strategy : FedSALoRA  #[FedAWA, FedKLSVD, FedAvg, FFALoRA, FlexLoRA, FedSALoRA, PFedMoAP, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova]
 
 client:
   loss: FocalLoss # [CrossEntropyLoss, FocalLoss]
@@ -37,25 +37,25 @@ client:
   test_batch_size : 32    
   lr: 0.005 #  [0.00002, 0.0001,0.001, 0.005, 0.01, 0.1, 0.2] 0.005->distilbert-base-uncased, 0.001->bert-base-uncased, 0.0001->Qwen/Qwen1.5-0.5B
   save_train_res : True
-  total_cpus : 4 # no. of CPU cores that are assigned for all simulation
+  total_cpus : 70 # no. of CPU cores that are assigned for all simulation
   total_gpus : 1 # no. of GPU's assigned for whole simulation
   gpu : True  # True or Faslse, Use GPU for training or not.
   num_cpus : 4  # no. of CPU cores that are assigned for each actor
-  num_gpus : 1 #  no. of GPU that are assigned for each actor (it can be fraction value as well)
+  num_gpus : 0.05 #  no. of GPU that are assigned for each actor (it can be fraction value as well)
 
 peft:
   enabled: True #False = FFT, do not set method = fedkls when running FFT, pfedmoap do not run with peft=True
   rank: 32
   alpha: 32 #Equal to the rank
-  method: flex_lora # ['pissa', 'milora', 'middle', 'fedkls', 'lora', 'ffa_lora', 'fedsa_lora ','pfedmoap', 'flex_lora']
+  method: fedsa_lora # ['pissa', 'milora', 'middle', 'fedkls', 'lora', 'ffa_lora', 'fedsa_lora ','pfedmoap', 'flex_lora']
   bias: True #To send the bias layer(after A/B) to server for aggregation or not
-  selective_attention_qv_only: True #Select only qv layers in attention for Low Rank
+  layer: attention_only #['all_linear','attention_only']
 
 # NEW: Dynamic Data Updates Configuration
 dynamic_data:
   enabled: False  # Enable/disable dynamic data updates
   mode: "incremental"  # "reset" or "incremental"
-  round_step: 100  # Dataset update frequency (trigger reload every N rounds)
+  round_step: 10  # Dataset update frequency (trigger reload every N rounds)
   start_fraction: 0.3  # For incremental: initial data fraction per client (e.g., 0.3 = 30%)
 
 # FFA-LoRA baseline config
@@ -102,7 +102,3 @@ fedprox:
 
 powd_config:
   candidate_client_set: 20 # the d parameter (client fraction ≤ d ≤ total clients)
-
-fedsa_lora_config:
-  init_method: kaiming   # kaiming | gaussian | orthogonal | svd
-
