@@ -17,12 +17,11 @@ def test(net, testloader, device: str, feature_key: str) -> Tuple[float, float, 
     total = 0
     all_labels = []
     all_preds = []
-    all_probs = []
     
     # Set the network to evaluation mode
     net.eval()
 
-    if feature_key == "text" or feature_key == "content":
+    if feature_key in ["text", "content", "sentence"]:
         #for text datasets, we need to use a different loss function
         with torch.no_grad():
             for batch in testloader:
@@ -32,14 +31,12 @@ def test(net, testloader, device: str, feature_key: str) -> Tuple[float, float, 
                 outputs = net(input_ids, attention_mask=attention_mask, labels=labels)
                 loss += outputs.loss.item()
                 logits = outputs.logits
-                probs = F.softmax(logits, dim=1)  # probability per class
                 predicted = torch.argmax(logits, dim=1)
                 correct += (predicted == labels).sum().item()
                 total += labels.size(0)
                 #Collect for F1 score
                 all_labels.extend(labels.cpu().numpy())
                 all_preds.extend(predicted.cpu().numpy())
-                all_probs.extend(probs.cpu().numpy())
         accuracy = correct / total
         f1 = f1_score(all_labels, all_preds, average='weighted')
 
@@ -53,13 +50,11 @@ def test(net, testloader, device: str, feature_key: str) -> Tuple[float, float, 
                 images, labels = data[x_label].to(device), data[y_label].to(device)
                 outputs = net(images)
                 loss += criterion(outputs, labels).item()
-                probs = F.softmax(outputs, dim=1)  # probability per class
                 _, predicted = torch.max(outputs.data, 1)
                 correct += (predicted == labels).sum().item()
                 #Collect for F1 score
                 all_labels.extend(labels.cpu().numpy())
                 all_preds.extend(predicted.cpu().numpy())
-                all_probs.extend(probs.cpu().numpy())
         accuracy = correct / len(testloader.dataset)
         f1 = f1_score(all_labels, all_preds, average='weighted')
 
@@ -129,6 +124,16 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays],
                     ]
                 else:
                     lora_keys = [k for k in model_state.keys() if k.endswith(".B")]
+            elif any(k.startswith("roberta.") for k in model_state.keys()):
+                if bias:
+                    lora_keys = [
+                        k for k in model_state.keys()
+                        if k.endswith(".B")
+                        or (k.endswith(".bias") and "self" in k)
+                        or (k.endswith(".bias") and "dense" in k and "classifier" not in k)
+                    ]
+                else:
+                    lora_keys = [k for k in model_state.keys() if k.endswith(".B")]
             elif any(k.startswith("bert.") for k in model_state.keys()):
                 if bias:
                     lora_keys = [
@@ -163,7 +168,16 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays],
                     ]
                 else:
                     lora_keys = [k for k in model_state.keys() if k.endswith(".A")]
-
+            elif any(k.startswith("roberta.") for k in model_state.keys()):
+                if bias:
+                    lora_keys = [
+                        k for k in model_state.keys()
+                        if k.endswith(".A")
+                        or (k.endswith(".bias") and "self" in k)
+                        or (k.endswith(".bias") and "dense" in k and "classifier" not in k)
+                    ]
+                else:
+                    lora_keys = [k for k in model_state.keys() if k.endswith(".A")]
             elif any(k.startswith("bert.") for k in model_state.keys()):
                 if bias:
                     lora_keys = [
@@ -193,10 +207,10 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays],
         # FlexLoRA partial update (Round > 1)
         elif method == "flex_lora":
             # Lazy import to avoid circular dependency (helper imports general)
-            from mak.utils.helper import get_ffa_target_keys
+            from mak.utils.helper import get_target_keys
             from mak.utils.flex_lora_utils import get_rank_for_base
 
-            target_keys = get_ffa_target_keys(model, bias)
+            target_keys = get_target_keys(model, bias)
             if len(params) != len(target_keys):
                 raise ValueError(
                     f"FlexLoRA set_params expects {len(target_keys)} params (target keys), got {len(params)}"
@@ -239,7 +253,11 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays],
                     lora_keys = [k for k in model_state.keys() if ("lin" in k)]
                 else:
                     lora_keys = [k for k in model_state.keys() if k.endswith(".B") or k.endswith(".A")]
-                    
+            elif any(key.startswith("roberta.") for key in model_state.keys()):
+                if bias:
+                    lora_keys = [k for k in model_state.keys() if ("self" in k or ("dense" in k and "classifier" not in k))]
+                else:
+                    lora_keys = [k for k in model_state.keys() if k.endswith(".B") or k.endswith(".A")]
             elif any(key.startswith("bert.") for key in model_state.keys()):
                 if bias:
                     lora_keys = [k for k in model_state.keys() if ("self" in k or "dense" in k)]

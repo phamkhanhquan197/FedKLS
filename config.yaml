@@ -28,7 +28,7 @@ server:
   num_clients : 10 # total number of clients participating in training
   fraction_evaluate : 1 # fraction of clients to be selected for evaluation
   min_evaluate_clients : 10 # minimum number of clients to be selected for evaluation
-  strategy : FlexLoRA  #[FedAWA, FedKLSVD, FedAvg, FFALoRA, FlexLoRA, FedSALoRA, PFedMoAP, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova]
+  strategy : FedSALoRA  #[FedAWA, FedKLSVD, FedAvg, FFALoRA, FlexLoRA, FedSALoRA, PFedMoAP, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova]
 
 client:
   loss: FocalLoss # [CrossEntropyLoss, FocalLoss]
@@ -47,14 +47,15 @@ peft:
   enabled: True #False = FFT, do not set method = fedkls when running FFT, pfedmoap do not run with peft=True
   rank: 32
   alpha: 32 #Equal to the rank
-  method: flex_lora # ['pissa', 'milora', 'middle', 'fedkls', 'lora', 'ffa_lora', 'fedsa_lora ','pfedmoap', 'flex_lora']
+  method: fedsa_lora # ['pissa', 'milora', 'middle', 'fedkls', 'lora', 'ffa_lora', 'fedsa_lora ','pfedmoap', 'flex_lora']
   bias: True #To send the bias layer(after A/B) to server for aggregation or not
+  layer: attention_only #['all_linear','attention_only']
 
 # NEW: Dynamic Data Updates Configuration
 dynamic_data:
   enabled: False  # Enable/disable dynamic data updates
   mode: "incremental"  # "reset" or "incremental"
-  round_step: 100  # Dataset update frequency (trigger reload every N rounds)
+  round_step: 10  # Dataset update frequency (trigger reload every N rounds)
   start_fraction: 0.3  # For incremental: initial data fraction per client (e.g., 0.3 = 30%)
 
 # FFA-LoRA baseline config
@@ -101,4 +102,3 @@ fedprox:
 
 powd_config:
   candidate_client_set: 20 # the d parameter (client fraction ≤ d ≤ total clients)
-

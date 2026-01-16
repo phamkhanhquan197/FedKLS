@@ -48,7 +48,7 @@ from collections import Counter
 import torch.nn.init as init
 from datasets import load_dataset
 
-def get_ffa_target_keys(model, bias=True) -> List[str]:
+def get_target_keys(model, bias=True) -> List[str]:
     """Return deterministic sorted list of target parameter names for FFA/Flex LoRA.
 
     Includes:
@@ -64,7 +64,11 @@ def get_ffa_target_keys(model, bias=True) -> List[str]:
             lora_keys = [k for k in model_state.keys() if ("lin" in k)]
         else:
             lora_keys = [k for k in model_state.keys() if k.endswith(".B") or k.endswith(".A")]
-            
+    elif any(key.startswith("roberta.") for key in model_state.keys()):
+        if bias:
+            lora_keys = [k for k in model_state.keys() if ("self" in k or ("dense" in k and "classifier" not in k))]
+        else:
+            lora_keys = [k for k in model_state.keys() if k.endswith(".B") or k.endswith(".A")]
     elif any(key.startswith("bert.") for key in model_state.keys()):
         if bias:
             lora_keys = [k for k in model_state.keys() if ("self" in k or "dense" in k)]
@@ -195,7 +199,6 @@ def gen_dir_outfile_server(config):
             f.close()
     return out_file_path, final_dir_path
 
-
 def get_partitioner(config_sim):
     num_clients = config_sim["server"]["num_clients"]
     if config_sim["common"]["data_type"] == "dirichlet_niid":
@@ -243,18 +246,24 @@ def get_dataset(config_sim):
 
         return fds, centralized_testset, classnames
     
-def extract_linear_layers(model):
+def extract_linear_layers(model, config):
     """Return a dict of {layer_name: layer_module} for all linear layers in the model.
     Optionally skips layers specified in layers_to_skip.
     """
     linear_layers = {}
+    skip_layer_names = ["pre_classifier", "classifier", "model.norm", "score", "classifier.dense", "classifier.out_proj"]
+    attenion_layer_names = ["self_attn", "attn", "attention"]
 
     for name, module in model.named_modules():
         # Check if the module is a Linear layer
         if isinstance(module, torch.nn.Linear):
-            if name in ["pre_classifier","classifier", "model.norm", "score"]: # Check if any part of the layer_to_skip is in the current layer's name
+            if name in skip_layer_names: # Check if any part of the layer_to_skip is in the current layer's name
                 continue
-            linear_layers[name] = module
+            if config["peft"]["layer"] == "attention_only":
+                if any(att_name in name for att_name in attenion_layer_names):
+                    linear_layers[name] = module
+            else:
+                linear_layers[name] = module
 
     return linear_layers
 
@@ -283,7 +292,7 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
         layers_to_svd = extract_conv2_layers(model) 
         log(INFO, f"Found {len(layers_to_svd)} conv2 layers to adapt with SVD.")
     else:
-        layers_to_svd = extract_linear_layers(model) 
+        layers_to_svd = extract_linear_layers(model, config) 
         log(INFO, f"Found {len(layers_to_svd)} linear layers to adapt with SVD.")
 
     rank = config["peft"]["rank"]
@@ -404,17 +413,17 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
                 if init_method == "svd":
                     U, S, Vt = torch.linalg.svd(W_flat, full_matrices=False)
                     max_possible_rank = S.size(0)
-                    rr = rank
-                    if rr > max_possible_rank:
-                        log(INFO, f"Warning: Requested rank {rr} for layer {name} > max possible rank {max_possible_rank}.")
-                        rr = max_possible_rank
-                    U_select = U[:, :rr]
-                    S_select = S[:rr]
-                    Vt_select = Vt[:rr, :]
+
+                    if rank > max_possible_rank:
+                        log(INFO, f"Warning: Requested rank {rank} for layer {name} > max possible rank {max_possible_rank}.")
+                        rank = max_possible_rank
+                    U_select = U[:, :rank]
+                    S_select = S[:rank]
+                    Vt_select = Vt[:rank, :]
 
                     A = U_select @ torch.diag(torch.sqrt(S_select))  # [c_out, r]
                     # FedSA default: B zero, do not preload low-rank recon into adapter
-                    B = torch.zeros(rr, d_in, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    B = torch.zeros(rank, d_in, device=weight_matrix.device, dtype=weight_matrix.dtype)
                     W_res = weight_matrix
                 else:
                     A = torch.empty(c_out, rank, device=weight_matrix.device, dtype=weight_matrix.dtype)
@@ -436,15 +445,15 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
                 if init_method == "svd":
                     U, S, Vt = torch.linalg.svd(weight_matrix, full_matrices=False)
                     max_possible_rank = S.size(0)
-                    rr = rank
-                    if rr > max_possible_rank:
-                        log(INFO, f"Warning: Requested rank {rr} for layer {name} > max possible rank {max_possible_rank}.")
-                        rr = max_possible_rank
-                    U_select = U[:, :rr]
-                    S_select = S[:rr]
+
+                    if rank > max_possible_rank:
+                        log(INFO, f"Warning: Requested rank {rank} for layer {name} > max possible rank {max_possible_rank}.")
+                        rank = max_possible_rank
+                    U_select = U[:, :rank]
+                    S_select = S[:rank]
                     # A from SVD, B zero
                     A = U_select @ torch.diag(torch.sqrt(S_select))  # [d_out, r]
-                    B = torch.zeros(rr, d_in, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    B = torch.zeros(rank, d_in, device=weight_matrix.device, dtype=weight_matrix.dtype)
                     W_res = weight_matrix
                 else:
                     A = torch.empty(d_out, rank, device=weight_matrix.device, dtype=weight_matrix.dtype)
@@ -675,7 +684,16 @@ def get_model(config, shape, classnames=None):
         )
         return model
     # check if model is from huggingface
-    elif model_name in ["distilbert-base-uncased", "Qwen/Qwen1.5-0.5B", "openai/clip-vit-base-patch32"""]:  # Add more as needed
+    elif model_name in [
+        "distilbert-base-uncased", 
+        "bert-base-uncased", 
+        "roberta-base",
+        "roberta-large",
+        "microsoft/deberta-v3-base",
+        "Qwen/Qwen1.5-0.5B", 
+        "meta-llama/Llama-2-7b-hf",
+        "openai/clip-vit-base-patch32",
+        ]:  # Add more as needed
         from transformers import AutoModelForSequenceClassification, BitsAndBytesConfig, CLIPModel
         if model_name == "Qwen/Qwen1.5-0.5B": #Need to check again when applying the quantization -> still error
             quantization_8_bit_config = BitsAndBytesConfig(
