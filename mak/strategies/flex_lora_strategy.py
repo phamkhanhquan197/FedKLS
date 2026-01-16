@@ -14,7 +14,7 @@ class FlexLoRAStrategy(FedAvg):
     """FlexLoRA FedAvg strategy.
 
     Round 1: send full model.
-    Round >1: aggregate partial payload defined by `get_ffa_target_keys(model)`.
+    Round >1: aggregate partial payload defined by `get_target_keys(model)`.
 
     LoRA aggregation is done in ΔW-space: ΔW_i = A_i @ B_i, then SVD(ΔW_agg) on server.
     """
@@ -64,11 +64,11 @@ class FlexLoRAStrategy(FedAvg):
             aggregated, metrics = super().aggregate_fit(server_round, results, failures)
             return aggregated, metrics
 
-        # Round > 1: partial payload aligned with get_ffa_target_keys(self.model)
+        # Round > 1: partial payload aligned with get_target_keys(self.model)
         # Lazy import to avoid circular imports (helper -> server -> strategy -> helper).
-        from mak.utils.helper import get_ffa_target_keys
+        from mak.utils.helper import get_target_keys
 
-        target_keys = get_ffa_target_keys(self.model)
+        target_keys = get_target_keys(self.model, bias=self.cfg.get("peft", {}).get("bias", True))
 
         # Total examples for weighting
         n_total = sum(fit_res.num_examples for _, fit_res in results)
@@ -183,4 +183,3 @@ class FlexLoRAStrategy(FedAvg):
                 out_nds.append(standard_agg[k])
 
         return ndarrays_to_parameters(out_nds), {}
-
