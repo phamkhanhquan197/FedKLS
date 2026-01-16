@@ -177,6 +177,8 @@ class FedPOEClient(BaseClient):
         self.w = []    # List of floats, same length as dic
         # Period for saving snapshot
         self.period = int(config_sim.get('fedpoe_config', {}).get('period', 20))
+        # Fixed number of snapshot models to sample per Hedge step (like 3rd-party self.M)
+        self.M = int(config_sim.get('fedpoe_config', {}).get('M', 3))
         self.round = 0
 
         # IMPORTANT: Flower simulation may recreate client objects each round.
@@ -184,20 +186,38 @@ class FedPOEClient(BaseClient):
         self._load_fedpoe_state()
         # print("init client fedpoe")
         
-    def model_selection(self, M=1):
-        """Weighted sampling không hoàn lại M snapshot index theo Hedge weights w."""
+    def model_selection(self, M: int | None = None):
+        """Model selection matching the 3rd-party Fed-POE implementation.
+
+        This samples M times from the categorical distribution induced by w
+        (via prefix sums + binary search). If a sampled index is duplicated,
+        it is skipped (no resampling), so the returned list can be shorter
+        than M.
+        """
         import numpy as np
+
         if not self.w:
             return []
+
+        m = int(self.M if M is None else M)
+        if m <= 0:
+            return []
+
         total = []
         s = 0
         for weight in self.w:
             s += weight
             total.append(s)
+
+        # If all weights are zero (or negative), total[-1] can be 0 => no sampling
+        if not total or total[-1] <= 0:
+            return []
+
         indices = []
-        for _ in range(M):
+        for _ in range(m):
             n = np.random.rand() * total[-1]
-            l, r = 0, len(self.w)
+            l = 0
+            r = len(self.w)
             while l < r:
                 mid = (l + r) // 2
                 if n > total[mid]:
@@ -206,6 +226,7 @@ class FedPOEClient(BaseClient):
                     r = mid
             if l not in indices:
                 indices.append(l)
+
         return indices
 
     def fit(self, parameters, config):
@@ -307,7 +328,8 @@ class FedPOEClient(BaseClient):
                     y = y.cpu().numpy()
                 # Gọi ensemble_predict_and_update_hedge
                 # print("x : {}, y :{}".format(x, y))
-                probs, losses = self.ensemble_predict_and_update_hedge(x, y, M=min(len(self.dic), 3), eta=0.1)
+                # Use fixed M like 3rd-party; ensemble will naturally use <=M if pool is smaller
+                probs, losses = self.ensemble_predict_and_update_hedge(x, y, M=self.M, eta=0.1)
                 # print("probs : {}, losses : {}".format(probs, losses))
                 if losses:
                     loss_loc = float(np.mean(losses))

@@ -80,6 +80,7 @@ fedsvd_config:
 fedpoe_config:
   eta: 0.1  # set >0 to enable a,b updates: a*=exp(-eta*loss_fed), b*=exp(-eta*loss_loc)
   period : 1 # number update model server, default if POE is 20
+  M : 4   # number of local epochs per POE update
 
 # FedPOERegressionText: regression-style POE over text embeddings using an RFF head
 fedpoe_regression_text_config:
