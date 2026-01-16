@@ -337,7 +337,7 @@ def load_server_eval_params_flex_lora(
 ) -> None:
     """Load parameters for SERVER-side centralized evaluation for FlexLoRA."""
     # Lazy import to avoid circular dependency
-    from mak.utils.helper import get_ffa_target_keys, get_config, parse_args
+    from mak.utils.helper import get_target_keys, get_config, parse_args
 
     dev = torch.device(device) if isinstance(device, str) else device
     config = get_config(parse_args().config)
@@ -352,7 +352,7 @@ def load_server_eval_params_flex_lora(
         return
 
     # PARTIAL payload
-    target_keys = get_ffa_target_keys(model, bias=config.get("peft", {}).get("bias", True))
+    target_keys = get_target_keys(model, bias=config.get("peft", {}).get("bias", True))
     if len(parameters) != len(target_keys):
         raise ValueError(
             f"FlexLoRA server eval payload length mismatch: expected {len(target_keys)} got {len(parameters)}"
