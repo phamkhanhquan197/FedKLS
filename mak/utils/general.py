@@ -124,6 +124,16 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays],
                     ]
                 else:
                     lora_keys = [k for k in model_state.keys() if k.endswith(".B")]
+            elif any(k.startswith("roberta.") for k in model_state.keys()):
+                if bias:
+                    lora_keys = [
+                        k for k in model_state.keys()
+                        if k.endswith(".B")
+                        or (k.endswith(".bias") and "self" in k)
+                        or (k.endswith(".bias") and "dense" in k and "classifier" not in k)
+                    ]
+                else:
+                    lora_keys = [k for k in model_state.keys() if k.endswith(".B")]
             elif any(k.startswith("bert.") for k in model_state.keys()):
                 if bias:
                     lora_keys = [
@@ -158,7 +168,16 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays],
                     ]
                 else:
                     lora_keys = [k for k in model_state.keys() if k.endswith(".A")]
-
+            elif any(k.startswith("roberta.") for k in model_state.keys()):
+                if bias:
+                    lora_keys = [
+                        k for k in model_state.keys()
+                        if k.endswith(".A")
+                        or (k.endswith(".bias") and "self" in k)
+                        or (k.endswith(".bias") and "dense" in k and "classifier" not in k)
+                    ]
+                else:
+                    lora_keys = [k for k in model_state.keys() if k.endswith(".A")]
             elif any(k.startswith("bert.") for k in model_state.keys()):
                 if bias:
                     lora_keys = [
@@ -188,10 +207,10 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays],
         # FlexLoRA partial update (Round > 1)
         elif method == "flex_lora":
             # Lazy import to avoid circular dependency (helper imports general)
-            from mak.utils.helper import get_ffa_target_keys
+            from mak.utils.helper import get_target_keys
             from mak.utils.flex_lora_utils import get_rank_for_base
 
-            target_keys = get_ffa_target_keys(model, bias)
+            target_keys = get_target_keys(model, bias)
             if len(params) != len(target_keys):
                 raise ValueError(
                     f"FlexLoRA set_params expects {len(target_keys)} params (target keys), got {len(params)}"
@@ -234,7 +253,11 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays],
                     lora_keys = [k for k in model_state.keys() if ("lin" in k)]
                 else:
                     lora_keys = [k for k in model_state.keys() if k.endswith(".B") or k.endswith(".A")]
-                    
+            elif any(key.startswith("roberta.") for key in model_state.keys()):
+                if bias:
+                    lora_keys = [k for k in model_state.keys() if ("self" in k or ("dense" in k and "classifier" not in k))]
+                else:
+                    lora_keys = [k for k in model_state.keys() if k.endswith(".B") or k.endswith(".A")]
             elif any(key.startswith("bert.") for key in model_state.keys()):
                 if bias:
                     lora_keys = [k for k in model_state.keys() if ("self" in k or "dense" in k)]
