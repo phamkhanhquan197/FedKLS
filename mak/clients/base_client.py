@@ -288,6 +288,87 @@ class BaseClient(fl.client.NumPyClient):
         net.train()
         valloader = DataLoader(self.valset, batch_size=self.test_batch_size)
 
+        # Optional DP-SGD for FedSVD (Opacus). This is best-effort and depends on
+        # model/layer compatibility with Opacus.
+        dp_cfg = (self.config_sim.get("fedsvd_config", {}) or {}).get("dp", {}) or {}
+        dp_enabled = bool(dp_cfg.get("enabled", False)) and config.get("strategy") == "FedSVD"
+        if dp_enabled:
+            try:
+                from opacus import PrivacyEngine  # type: ignore
+            except Exception as e:
+                raise RuntimeError(
+                    "DP is enabled (fedsvd_config.dp.enabled=true) but 'opacus' is not installed. "
+                    "Install it (e.g., pip install opacus) or disable DP."
+                ) from e
+
+            # Compute / use noise multiplier
+            noise_multiplier = dp_cfg.get("noise_multiplier", None)
+            if noise_multiplier is None:
+                try:
+                    from opacus.accountants.utils import get_noise_multiplier  # type: ignore
+                except Exception as e:
+                    raise RuntimeError(
+                        "fedsvd_config.dp.noise_multiplier is null, but this Opacus version does not "
+                        "provide get_noise_multiplier(). Please set fedsvd_config.dp.noise_multiplier explicitly."
+                    ) from e
+
+                dataset_size = max(1, len(trainloader.dataset))
+                sample_rate = float(trainloader.batch_size) / float(dataset_size)
+                noise_multiplier = float(
+                    get_noise_multiplier(
+                        target_epsilon=float(dp_cfg.get("eps", 8.0)),
+                        target_delta=float(dp_cfg.get("delta", 1e-5)),
+                        sample_rate=sample_rate,
+                        epochs=float(epochs),
+                    )
+                )
+
+            max_grad_norm = float(dp_cfg.get("max_grad_norm", 1.0))
+            secure_rng = bool(dp_cfg.get("secure_rng", False))
+            grad_sample_mode = str(dp_cfg.get("grad_sample_mode", "hooks"))
+
+            # Create PrivacyEngine with compatibility across Opacus versions
+            try:
+                privacy_engine = PrivacyEngine(accountant="rdp", secure_mode=secure_rng)
+            except TypeError:
+                privacy_engine = PrivacyEngine(accountant="rdp", secure_rng=secure_rng)
+
+            # Make private.
+            # NOTE: "ghost" enables fast gradient clipping but can raise
+            # `AssertionError: loss_reduction ...` depending on Opacus version/model.
+            # Default to "hooks" for broader compatibility.
+            try:
+                res = privacy_engine.make_private(
+                    module=net,
+                    optimizer=optim,
+                    data_loader=trainloader,
+                    noise_multiplier=float(noise_multiplier),
+                    max_grad_norm=max_grad_norm,
+                    grad_sample_mode=grad_sample_mode,
+                )
+            except TypeError:
+                res = privacy_engine.make_private(
+                    module=net,
+                    optimizer=optim,
+                    data_loader=trainloader,
+                    noise_multiplier=float(noise_multiplier),
+                    max_grad_norm=max_grad_norm,
+                )
+
+            # Opacus versions differ in return signature.
+            # Common: (module, optimizer, data_loader)
+            # Some:   (module, optimizer, data_loader, privacy_engine)
+            if not isinstance(res, tuple):
+                raise RuntimeError(f"Unexpected PrivacyEngine.make_private() return type: {type(res)}")
+            if len(res) == 3:
+                net, optim, trainloader = res
+            elif len(res) == 4:
+                net, optim, trainloader, _privacy_engine = res
+            elif len(res) == 5:
+                net, optim, trainloader, _privacy_engine, _criterion = res
+            else:
+                raise RuntimeError(f"Unexpected PrivacyEngine.make_private() return arity: {len(res)}")
+
         for _ in range(epochs):
             for batch in trainloader:
                 if self.feature_key in ["text", "content", "sentence"]:

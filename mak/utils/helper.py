@@ -5,7 +5,7 @@ import os
 import random
 from datetime import date, datetime
 from logging import INFO
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import flwr as fl
 import numpy as np
@@ -88,6 +88,21 @@ def get_target_keys(model, bias=True) -> List[str]:
     # Unique + deterministic order
     return sorted(set(lora_keys))
 
+def _resolve_ray_tmp_dir(config_sim: dict) -> Optional[str]:
+    common_cfg = (config_sim or {}).get("common", {})
+    candidate = (
+        common_cfg.get("ray_tmp_dir")
+        or os.environ.get("FEDKLS_RAY_TMPDIR")
+        or os.environ.get("RAY_TMPDIR")
+        or os.environ.get("TMPDIR")
+    )
+    if not candidate:
+        return None
+    ray_tmp_dir = os.path.abspath(os.path.expanduser(str(candidate)))
+    os.makedirs(ray_tmp_dir, exist_ok=True)
+    return ray_tmp_dir
+
+
 def get_device_and_resources(config_sim):
     # Check if GPU is available
     device = torch.device(
@@ -116,6 +131,31 @@ def get_device_and_resources(config_sim):
         "num_cpus": config_sim["client"]["num_cpus"],
         "num_gpus": config_sim["client"]["num_gpus"] if device.type == "cuda" else 0.0,
     }
+
+    # Ray writes session + spill data under /tmp by default. Allow redirecting this
+    # to a larger disk to avoid GCS/raylet crashes when /tmp is full.
+    if not config_sim["common"].get("multi_node", False):
+        ray_tmp_dir = _resolve_ray_tmp_dir(config_sim)
+        if ray_tmp_dir:
+            ray_init_args["_temp_dir"] = ray_tmp_dir
+            # Only set spilling config if the installed Ray supports it.
+            # Some Ray versions reject unknown kwargs (RuntimeError: Unknown keyword argument(s)).
+            try:
+                import inspect
+                import ray
+
+                if "object_spilling_config" in inspect.signature(ray.init).parameters:
+                    spill_dir = os.path.join(ray_tmp_dir, "spill")
+                    os.makedirs(spill_dir, exist_ok=True)
+                    ray_init_args.setdefault(
+                        "object_spilling_config",
+                        json.dumps(
+                            {"type": "filesystem", "params": {"directory_path": spill_dir}}
+                        ),
+                    )
+            except Exception:
+                pass
+
     if config_sim["common"]["multi_node"]:
         ray_init_args = {}
         ray_init_args["address"] = "auto"
@@ -710,7 +750,6 @@ def get_model(config, shape, classnames=None):
                 model_name,
                 num_labels=num_classes,
                 # quantization_config=quantization_8_bit_config,
-                device_map="auto",
             )
             # Set pad_token_id to eos_token_id
             if base_model.config.pad_token_id is None:
@@ -737,7 +776,7 @@ def get_model(config, shape, classnames=None):
                     return logits
             base_model = CustomCLIP()
         else:
-            base_model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=num_classes, device_map="auto")
+            base_model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=num_classes)
 
         return base_model
 
@@ -1038,6 +1077,24 @@ def get_strategy(
             "candidate_client_set": config["powd_config"]["candidate_client_set"],
         },
     } 
+
+    # FedSVD configuration (matches config.yaml:fedsvd_config)
+    # NOTE: The strategy can aggregate subsets (LoRA A/B) only if it can map
+    # incoming ndarrays to parameter names. For standard PyTorch models we can
+    # derive names from `model.state_dict()`. For other protocols, the strategy
+    # falls back to aggregating all arrays.
+    if STRATEGY == "FedSVD":
+        fedsvd_cfg = config.get("fedsvd_config", {}) or {}
+        kwargs["FedSVD"] = {
+            "mode": fedsvd_cfg.get("mode", "fedavg"),
+            "send_deltas": bool(fedsvd_cfg.get("send_deltas", False)),
+            "agg_flora": bool(fedsvd_cfg.get("agg_flora", False)),
+            "agg_fedex": bool(fedsvd_cfg.get("agg_fedex", False)),
+            "recalculate_svd_period": int(fedsvd_cfg.get("recalculate_svd_period", 0) or 0),
+            "svd_warmup_steps": int(fedsvd_cfg.get("svd_warmup_steps", 0) or 0),
+            # Provide parameter names so the strategy can select LoRA A/B.
+            "param_name_fn": (lambda: list(model.state_dict().keys())) if model is not None else None,
+        }
 
     if STRATEGY == "PFedMoAP":
         prompt_len = config["pfedmoap_config"]["prompt_len"]

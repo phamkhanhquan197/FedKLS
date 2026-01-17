@@ -8,6 +8,8 @@ common:
   # dataset: zh-plus/tiny-imagenet
   dirichlet_alpha : 0.05 #dirichlet concentration parameter (only used if data_type is dirchlet-niid)
   target_acc : 0.99
+  # Optional: redirect Ray session/spill files off /tmp (useful when /tmp is nearly full)
+  ray_tmp_dir: /tmp # /home/ai/tmp, /tmp
   # model : Qwen/Qwen1.5-0.5B # one among [distilbert-base-uncased, bert-base-uncased, meta-llama/Llama-2-7b-hf, Qwen/Qwen1.5-0.5B, Net, CifarNet, SimpleCNN, KerasExpCNN, MNISTCNN, SimpleDNN, FMCNNModel,FedAVGCNN,Resnet18, Resnet34,ResNet18Pretrained, ResNet34Pretrained,ResNet18Small, ResNet20Small,MobileNetV2,EfficientNetB0,LSTMModel]
   model: distilbert-base-uncased
   # model: Clip
@@ -21,14 +23,14 @@ common:
   num_test_thread: 10
 
 server:
-  num_rounds : 1000
+  num_rounds : 1000 # default 1000
   address : 127.0.0.1
   fraction_fit : 0.3 # fraction of clients to be selected for training
   min_fit_clients : 3 # minimum number of clients to be selected for training
   num_clients : 10 # total number of clients participating in training
   fraction_evaluate : 1 # fraction of clients to be selected for evaluation
   min_evaluate_clients : 10 # minimum number of clients to be selected for evaluation
-  strategy : FedSALoRA  #[FedAWA, FedKLSVD, FedAvg, FFALoRA, FlexLoRA, FedSALoRA, PFedMoAP, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova]
+  strategy : FedSALoRA  #[FedAWA, FedKLSVD, FedAvg, FedSVD, FFALoRA, FlexLoRA, FedSALoRA, PFedMoAP, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova]
 
 client:
   loss: FocalLoss # [CrossEntropyLoss, FocalLoss]
@@ -37,19 +39,41 @@ client:
   test_batch_size : 32    
   lr: 0.005 #  [0.00002, 0.0001,0.001, 0.005, 0.01, 0.1, 0.2] 0.005->distilbert-base-uncased, 0.001->bert-base-uncased, 0.0001->Qwen/Qwen1.5-0.5B
   save_train_res : True
-  total_cpus : 70 # no. of CPU cores that are assigned for all simulation
+  # Too many total_cpus lets Ray schedule many actors concurrently and can OOM host RAM.
+  # Keep this near your physical core count.
+  total_cpus : 12
   total_gpus : 1 # no. of GPU's assigned for whole simulation
   gpu : True  # True or Faslse, Use GPU for training or not.
-  num_cpus : 4  # no. of CPU cores that are assigned for each actor
-  num_gpus : 0.05 #  no. of GPU that are assigned for each actor (it can be fraction value as well)
+  # Request more resources per actor => fewer concurrent actors => less RAM/GPU contention.
+  num_cpus : 4
+  # With 1 GPU total, setting 1.0 forces a single GPU actor at a time.
+  num_gpus : 1.0
 
 peft:
   enabled: True #False = FFT, do not set method = fedkls when running FFT, pfedmoap do not run with peft=True
   rank: 32
   alpha: 32 #Equal to the rank
-  method: fedsa_lora # ['pissa', 'milora', 'middle', 'fedkls', 'lora', 'ffa_lora', 'fedsa_lora ','pfedmoap', 'flex_lora']
+  method: lora # ['pissa', 'milora', 'middle', 'fedkls', 'lora', 'ffa_lora', 'pfedmoap']
   bias: True #To send the bias layer(after A/B) to server for aggregation or not
   layer: attention_only #['all_linear','attention_only']
+
+# FedSVD (fed-svd-like) config
+fedsvd_config:
+  mode: "ffa"       # "fedavg" (aggregate A+B) | "ffa" (aggregate B only)
+  send_deltas: False   # True => clients send deltas; server applies deltas to round-start params
+  agg_flora: False     # (placeholder) requires delta semantics
+  agg_fedex: False     # (placeholder) requires delta semantics
+  # Optional: rerun SVD on LoRA (server-side) periodically, like 3rd-party/fed-svd
+  # 0 disables. 1 means rerun every round after warmup.
+  recalculate_svd_period: 1
+  svd_warmup_steps: 1
+  dp:
+    enabled: False        # True => enable DP-SGD (Opacus) during client training
+    eps: 8.0              # target epsilon (used to compute noise_multiplier if noise_multiplier is null)
+    delta: 1.0e-5         # target delta
+    max_grad_norm: 2.0    # per-sample grad clipping norm
+    noise_multiplier: null  # override if set; otherwise computed from (eps, delta, sample_rate, epochs)
+    secure_rng: False     # True => use secure RNG (slower)
 
 # NEW: Dynamic Data Updates Configuration
 dynamic_data:
