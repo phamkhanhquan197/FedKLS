@@ -5,7 +5,7 @@ import os
 import random
 from datetime import date, datetime
 from logging import INFO
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import flwr as fl
 import numpy as np
@@ -29,11 +29,17 @@ from mak.servers.ffa_lora_server import FFALoRAServer
 from mak.servers.fednova_server import FedNovaServer
 from mak.servers.scaffold_server import ScaffoldServer
 from mak.servers.pfedmoap_server import PFedMoAPServer
+from mak.servers.fedsa_lora_server import FedSALoRAServer
+from mak.servers.flex_lora_server import FlexLoRAServer
+
 from mak.strategies.fednova_strategy import FedNovaStrategy
 from mak.strategies.scaffold_strategy import ScaffoldStrategy
 from mak.strategies.fedklsvd_strategy import FedKLSVDStrategy
 from mak.strategies.ffa_lora_strategy import FFALoRAStrategy
 from mak.strategies.pfedmoap_strategy import PFedMoAPStrategy
+from mak.strategies.fedsa_lora_strategy import FedSALoRAStrategy
+from mak.strategies.flex_lora_strategy import FlexLoRAStrategy
+
 from mak.utils.dataset_info import dataset_info
 from mak.utils.general import set_params, test, weighted_average
 from mak.models.svd_model import SVDAdapter, ConvAdapter
@@ -42,6 +48,45 @@ from collections import Counter
 import torch.nn.init as init
 from datasets import load_dataset
 
+def get_target_keys(model, bias=True) -> List[str]:
+    """Return deterministic sorted list of target parameter names for FFA/Flex LoRA.
+
+    Includes:
+    1) Adapter matrices (.A, .B)
+    2) Biases after A and B, not all bias (.bias)
+
+    This function is intentionally model-agnostic and must remain deterministic.
+    """
+    model_state = model.state_dict()
+
+    if any(key.startswith("distilbert.") for key in model_state.keys()):
+        if bias:
+            lora_keys = [k for k in model_state.keys() if ("lin" in k)]
+        else:
+            lora_keys = [k for k in model_state.keys() if k.endswith(".B") or k.endswith(".A")]
+    elif any(key.startswith("roberta.") for key in model_state.keys()):
+        if bias:
+            lora_keys = [k for k in model_state.keys() if ("self" in k or ("dense" in k and "classifier" not in k))]
+        else:
+            lora_keys = [k for k in model_state.keys() if k.endswith(".B") or k.endswith(".A")]
+    elif any(key.startswith("bert.") for key in model_state.keys()):
+        if bias:
+            lora_keys = [k for k in model_state.keys() if ("self" in k or "dense" in k)]
+        else:
+            lora_keys = [k for k in model_state.keys() if k.endswith(".B") or k.endswith(".A")]
+    elif any(key.startswith("model.") for key in model_state.keys()):
+        if bias:
+            lora_keys = [k for k in model_state.keys() if ("self_attn" in k or "mlp" in k)]
+        else:
+            lora_keys = [k for k in model_state.keys() if k.endswith(".B") or k.endswith(".A")]
+    elif any(key.startswith("layer") for key in model_state.keys()): #RESNET models
+        if bias:
+            lora_keys = [k for k in model_state.keys() if ("conv" in k)]
+        else:
+            lora_keys = [k for k in model_state.keys() if k.endswith(".B") or k.endswith(".A")]
+
+    # Unique + deterministic order
+    return sorted(set(lora_keys))
 
 def _resolve_ray_tmp_dir(config_sim: dict) -> Optional[str]:
     common_cfg = (config_sim or {}).get("common", {})
@@ -194,7 +239,6 @@ def gen_dir_outfile_server(config):
             f.close()
     return out_file_path, final_dir_path
 
-
 def get_partitioner(config_sim):
     num_clients = config_sim["server"]["num_clients"]
     if config_sim["common"]["data_type"] == "dirichlet_niid":
@@ -242,73 +286,24 @@ def get_dataset(config_sim):
 
         return fds, centralized_testset, classnames
     
-
-
-# def get_dataset(config_sim):
-#     # partitioner = get_partitioner(config_sim=config_sim)
-#     dataset_name = config_sim["common"]["dataset"]
-#     if dataset_name not in dataset_info.keys():
-#         raise Exception(f"Dataset name should be among : {list(dataset_info.keys())}")
-
-#     # --- Step 1: Load the dataset from Hugging Face ---
-#     raw_dataset = load_dataset(dataset_name)
-
-#     # --- Step 2: Ensure train/test splits exist ---
-#     if "test" in raw_dataset.keys():
-#         log(INFO, f"Found test split in {dataset_name}.")
-#         train_data = raw_dataset["train"]
-#         test_data = raw_dataset["test"]
-#     else: 
-#         log(INFO, f"[INFO] '{dataset_name}' has no test split. Creating 80/20 train-test split...")
-#         full_data = raw_dataset["train"]
-#         label_col = dataset_info[dataset_name]["output_column"]
-
-#         train_indices, test_indices = train_test_split(
-#             range(len(full_data)),
-#             test_size=0.2,
-#             random_state=config_sim["common"]["seed"],
-#             stratify=full_data[label_col],
-#         )
-
-#         train_data = full_data.select(train_indices)
-#         test_data = full_data.select(test_indices)
-
-#     # --- Step 3: Partition the training data ---
-#     partitioner = get_partitioner(config_sim=config_sim)
-
-#     # --- Step 4: Build FederatedDataset only with the training subset ---
-#     fds = FederatedDataset(dataset=train_data, partitioners=partitioner)
-
-
-#     # else:
-#     #     fds = FederatedDataset(dataset=dataset_name, partitioners=partitioner)
-#     #     # get test column name
-#     #     test_set = dataset_info[dataset_name]["test_set"]
-#     #     # if test_set is None:
-#     #     #     log(INFO, f"[INFO] '{dataset_name}' has no test split. Creating 80/20 train-test split...")
-#     #     #     dataset = load_dataset(dataset_name)
-#     #     #     # If dataset is a dict with only 'train'
-#     #     #     if isinstance(dataset, dict) and "train" in dataset:
-#     #     #         dataset = dataset["train"]
-#     #     #     dataset = dataset.train_test_split(test_size=0.2, seed=config_sim["common"]["seed"])
-#     #     #     train_set = dataset["train"]
-#     #     #     test_set = dataset["test"]
-#     #     #     return {"train": train_set, "name": dataset_name}, test_set
-#     #     centralized_testset = fds.load_split(test_set)
-#     return fds, test_data
-
-def extract_linear_layers(model):
+def extract_linear_layers(model, config):
     """Return a dict of {layer_name: layer_module} for all linear layers in the model.
     Optionally skips layers specified in layers_to_skip.
     """
     linear_layers = {}
+    skip_layer_names = ["pre_classifier", "classifier", "model.norm", "score", "classifier.dense", "classifier.out_proj"]
+    attenion_layer_names = ["self_attn", "attn", "attention"]
 
     for name, module in model.named_modules():
         # Check if the module is a Linear layer
         if isinstance(module, torch.nn.Linear):
-            if name in ["pre_classifier","classifier", "model.norm", "score"]: # Check if any part of the layer_to_skip is in the current layer's name
+            if name in skip_layer_names: # Check if any part of the layer_to_skip is in the current layer's name
                 continue
-            linear_layers[name] = module
+            if config["peft"]["layer"] == "attention_only":
+                if any(att_name in name for att_name in attenion_layer_names):
+                    linear_layers[name] = module
+            else:
+                linear_layers[name] = module
 
     return linear_layers
 
@@ -337,7 +332,7 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
         layers_to_svd = extract_conv2_layers(model) 
         log(INFO, f"Found {len(layers_to_svd)} conv2 layers to adapt with SVD.")
     else:
-        layers_to_svd = extract_linear_layers(model) 
+        layers_to_svd = extract_linear_layers(model, config) 
         log(INFO, f"Found {len(layers_to_svd)} linear layers to adapt with SVD.")
 
     rank = config["peft"]["rank"]
@@ -365,13 +360,7 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
         elif method == 'ffa_lora':
             # FFA-LoRA: Initialize A (configurable), B = 0, freeze A forever (external control)
             ffa_cfg = config.get("ffa_lora_config", {})
-            seed = config["common"]["seed"]
             init_method = ffa_cfg.get("init_method", "kaiming")
-
-            if seed is not None:
-                torch.manual_seed(seed)
-                if torch.cuda.is_available():
-                    torch.cuda.manual_seed_all(seed)
 
             if init_method not in {"kaiming", "gaussian", "orthogonal", "svd"}:
                 raise ValueError(
@@ -442,7 +431,84 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
 
             log(INFO, f"Layer {name}: Applied FFA-LoRA with rank {rank} (A init={init_method}, B=zero, A frozen).")
 
-        else:
+        elif method == "fedsa_lora":
+            # FedSA-LoRA: Train both A and B locally, but only A is aggregated (handled in client/strategy)
+            # Init: A configurable (default kaiming), B = 0, W_res = W
+
+            init_method = config["fedsa_lora_config"]["init_method"]
+            
+            if init_method not in {"kaiming", "gaussian", "orthogonal", "svd"}:
+                raise ValueError(
+                    f"Unknown init_method: {init_method}. Options: kaiming | gaussian | orthogonal | svd"
+                )
+
+            # --------------------------
+            # Conv2d
+            # --------------------------
+            if isinstance(layer, torch.nn.Conv2d):
+                c_out, c_in, k1, k2 = weight_matrix.shape
+                d_in = c_in * k1 * k2
+                W_flat = weight_matrix.view(c_out, -1)
+
+                if init_method == "svd":
+                    U, S, Vt = torch.linalg.svd(W_flat, full_matrices=False)
+                    max_possible_rank = S.size(0)
+
+                    if rank > max_possible_rank:
+                        log(INFO, f"Warning: Requested rank {rank} for layer {name} > max possible rank {max_possible_rank}.")
+                        rank = max_possible_rank
+                    U_select = U[:, :rank]
+                    S_select = S[:rank]
+                    Vt_select = Vt[:rank, :]
+
+                    A = U_select @ torch.diag(torch.sqrt(S_select))  # [c_out, r]
+                    # FedSA default: B zero, do not preload low-rank recon into adapter
+                    B = torch.zeros(rank, d_in, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    W_res = weight_matrix
+                else:
+                    A = torch.empty(c_out, rank, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    if init_method == "kaiming":
+                        init.kaiming_normal_(A, mode="fan_out", nonlinearity="relu")
+                    elif init_method == "gaussian":
+                        init.normal_(A, mean=0.0, std=0.01)
+                    elif init_method == "orthogonal":
+                        init.orthogonal_(A)
+                    B = torch.zeros(rank, d_in, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    W_res = weight_matrix
+
+            # --------------------------
+            # Linear
+            # --------------------------
+            else:
+                d_out, d_in = weight_matrix.shape
+
+                if init_method == "svd":
+                    U, S, Vt = torch.linalg.svd(weight_matrix, full_matrices=False)
+                    max_possible_rank = S.size(0)
+
+                    if rank > max_possible_rank:
+                        log(INFO, f"Warning: Requested rank {rank} for layer {name} > max possible rank {max_possible_rank}.")
+                        rank = max_possible_rank
+                    U_select = U[:, :rank]
+                    S_select = S[:rank]
+                    # A from SVD, B zero
+                    A = U_select @ torch.diag(torch.sqrt(S_select))  # [d_out, r]
+                    B = torch.zeros(rank, d_in, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    W_res = weight_matrix
+                else:
+                    A = torch.empty(d_out, rank, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    if init_method == "kaiming":
+                        init.kaiming_normal_(A, mode="fan_out", nonlinearity="relu")
+                    elif init_method == "gaussian":
+                        init.normal_(A, mean=0.0, std=0.01)
+                    elif init_method == "orthogonal":
+                        init.orthogonal_(A)
+                    B = torch.zeros(rank, d_in, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                    W_res = weight_matrix
+
+            log(INFO, f"Layer {name}: Applied FedSA-LoRA with rank {rank} (A init={init_method}, B=zero).")
+
+        else: # Other SVD-based methods
             if isinstance(layer, torch.nn.Conv2d): #Conv2d layer SVD
                 # weight_matrix = weight_matrix.view(weight_matrix.size(0), -1)  # Flatten Conv2d weights
                 c_out, c_in, k1, k2 = weight_matrix.shape
@@ -456,7 +522,7 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
                     rank = max_possible_rank
                 
                 # Select components based on method
-                if method == 'pissa':
+                if method == 'pissa' or method == "flex_lora":
                     # Principal component as adapter (PiSSA)
                     U_select = U[:, :rank]
                     S_select = S[:rank]
@@ -504,7 +570,7 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
                     rank = max_possible_rank
 
                 # Select components based on method
-                if method == 'pissa':
+                if method == 'pissa' or method == "flex_lora":
                     # Principal component as adapter (PiSSA)
                     U_select = U[:, :rank]
                     S_select = S[:rank]
@@ -637,7 +703,7 @@ def get_model(config, shape, classnames=None):
 
     TEXT_ONLY_DATASETS = {"SetFit/20_newsgroups", "legacy-datasets/banking77", "fancyzhx/dbpedia_14"}
     # PFedMoAP CLIP guard
-    if model_name == "clip":
+    if model_name == "Clip":
         if dataset_name in TEXT_ONLY_DATASETS:
             raise ValueError(f"PFedMoAP CLIP requires image dataset, got text dataset: {dataset_name}")
 
@@ -658,7 +724,16 @@ def get_model(config, shape, classnames=None):
         )
         return model
     # check if model is from huggingface
-    elif model_name in ["distilbert-base-uncased", "Qwen/Qwen1.5-0.5B", "openai/clip-vit-base-patch32"""]:  # Add more as needed
+    elif model_name in [
+        "distilbert-base-uncased", 
+        "bert-base-uncased", 
+        "roberta-base",
+        "roberta-large",
+        "microsoft/deberta-v3-base",
+        "Qwen/Qwen1.5-0.5B", 
+        "meta-llama/Llama-2-7b-hf",
+        "openai/clip-vit-base-patch32",
+        ]:  # Add more as needed
         from transformers import AutoModelForSequenceClassification, BitsAndBytesConfig, CLIPModel
         if model_name == "Qwen/Qwen1.5-0.5B": #Need to check again when applying the quantization -> still error
             quantization_8_bit_config = BitsAndBytesConfig(
@@ -743,8 +818,15 @@ def get_evaluate_fn(
                 model.set_prompt(prompt)
             if hasattr(model, "clear_nonlocal"):
                 model.clear_nonlocal()
+        elif strategy == "FlexLoRA" or method == "flex_lora":
+            # Lazy import to avoid circular dependency
+            from mak.utils.flex_lora_utils import load_server_eval_params_flex_lora
+            load_server_eval_params_flex_lora(
+                model=model,
+                parameters=parameters,
+                device=device,
+            )
         else:
-            ## model = get_model(config=config_sim, shape=shape)
             set_params(model, parameters, method=method, bias=bias)
 
         model.to(device)
@@ -893,8 +975,8 @@ def get_server(strategy, client_manager, out_file_path, target_acc, num_train_th
             num_train_thread=num_train_thread,
             num_test_thread=num_test_thread,
         )
-    elif isinstance(strategy, PFedMoAPStrategy):
-        return PFedMoAPServer(
+    elif isinstance(strategy, FedSALoRAStrategy):
+        return FedSALoRAServer(
             strategy=strategy,
             client_manager=client_manager,
             out_file_path=out_file_path,
@@ -902,7 +984,16 @@ def get_server(strategy, client_manager, out_file_path, target_acc, num_train_th
             num_train_thread=num_train_thread,
             num_test_thread=num_test_thread,
         )
-    else:
+    elif isinstance(strategy, FlexLoRAStrategy):
+        return FlexLoRAServer(
+            strategy=strategy,
+            client_manager=client_manager,
+            out_file_path=out_file_path,
+            target_acc=target_acc,
+            num_train_thread=num_train_thread,
+            num_test_thread=num_test_thread,
+        )
+    else:           
         return ServerSaveData(
             strategy=strategy,
             client_manager=client_manager,
@@ -971,6 +1062,16 @@ def get_strategy(
         },
         "PFedMoAP": {
             "config": config,
+        },
+        "FedSALoRA": {
+            "config": config,
+        },
+        "FlexLoRA": {
+            "config": config,
+            "model": model,
+            "global_rank": config.get("flex_lora_config", {}).get(
+                "global_rank", config.get("peft", {}).get("rank", 32)
+            ),
         },
         "PowD": {
             "candidate_client_set": config["powd_config"]["candidate_client_set"],
@@ -1070,6 +1171,12 @@ def get_fit_config_fn(config_sim):
             "proximal_mu": config_sim["fedprox"]["proximal_mu"],
             "loss": config_sim["client"]["loss"],
         }
+        # P2 FIX: Add explicit payload kind for FlexLoRA
+        if config["strategy"] == "FlexLoRA":
+            if server_round == 1:
+                config["payload_kind"] = "full"
+            else:
+                config["payload_kind"] = "partial"
         return config
 
     return fit_config
@@ -1165,4 +1272,3 @@ def get_size_weights(federated_dataset, num_clients):
         sample_size.append(len(federated_dataset.load_partition(i)))
     size_weights = [i / sum(sample_size) for i in sample_size]
     return size_weights
-

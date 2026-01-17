@@ -83,6 +83,10 @@ class DynamicDataScheduler:
         # Track allocated indices per client to ensure disjoint
         self._allocated_indices: Dict[int, set] = defaultdict(set)
         
+        # Cache for validation indices: (client_id, round) -> val_indices
+        # This ensures consistency with train_test_split results
+        self._validation_cache: Dict[Tuple[int, int], List[int]] = {}
+        
         # Initialize partitions and create schedule
         self._initialize_partitions()
         self._create_schedule()
@@ -192,9 +196,14 @@ class DynamicDataScheduler:
         Returns:
             New FederatedDataset with repartitioned data
         """
-        # Create new config with modified seed for this round
-        # Large multiplier to ensure different seeds
-        repartition_seed = self.seed + round_num * 10000
+        # Round 1 should use the original seed to match the initial partition
+        # Round > 1 uses different seed to create different distribution
+        if round_num == 1:
+            repartition_seed = self.seed  # Use original seed for round 1
+        else:
+            # Large multiplier to ensure different seeds for subsequent rounds
+            repartition_seed = self.seed + round_num * 10000
+        
         config_copy = self.config_sim.copy()
         config_copy["common"] = self.config_sim["common"].copy()
         config_copy["common"]["seed"] = repartition_seed
@@ -279,6 +288,42 @@ class DynamicDataScheduler:
         
         return []
     
+    def _extract_validation_indices(
+        self,
+        partition: Dataset,
+        original_indices: List[int],
+        val_dataset: Dataset,
+        split_seed: int
+    ) -> List[int]:
+        """
+        Extract validation indices from train_test_split result.
+              
+        Args:
+            partition: Original partition dataset
+            original_indices: Original indices that were split
+            val_dataset: Validation dataset from train_test_split
+            split_seed: Seed used for the split (not used, kept for compatibility)
+            
+        Returns:
+            List of validation indices from original_indices
+        """
+        # This ensures consistency with train_test_split() which may round differently
+        
+        # Get actual validation size from val_dataset
+        actual_val_size = len(val_dataset)
+        
+        # Use the same seed to reconstruct the shuffle order
+        # This matches train_test_split() behavior
+        np_rng = np.random.RandomState(split_seed)
+        shuffled_indices = original_indices.copy()
+        np_rng.shuffle(shuffled_indices)
+        
+        # Get validation indices (first actual_val_size after shuffle)
+        # This matches what train_test_split() actually created
+        val_indices = sorted(shuffled_indices[:actual_val_size])
+        
+        return val_indices
+    
     def get_client_round_datasets(
         self, 
         client_id: int, 
@@ -317,28 +362,174 @@ class DynamicDataScheduler:
             # Load partition from repartitioned dataset
             repartitioned_fds = self._repartitioned_datasets[milestone]
             partition = repartitioned_fds.load_partition(partition_id=client_id)
+            
+            # In reset mode, use standard train/val split
+            trainset_full = partition
+            split_seed = self.seed + client_id * 1000 + round_num
+            splits = trainset_full.train_test_split(
+                test_size=self.val_ratio,
+                seed=split_seed
+            )
+            trainset = splits["train"]
+            valset = splits["test"]
         else:
             # For incremental mode, use original partition
             partition = self._client_partitions[client_id]
-        
-        # Select subset based on indices (for incremental) or use all (for reset)
-        if self.mode == "reset":
-            # In reset mode, train_indices contains all indices (100% allocation)
-            trainset_full = partition
-        else:
-            # In incremental mode, select subset
-            trainset_full = partition.select(train_indices)
-        
-        # Split into train and validation
-        # Use deterministic split based on seed + client_id + round
-        split_seed = self.seed + client_id * 1000 + round_num
-        splits = trainset_full.train_test_split(
-            test_size=self.val_ratio,
-            seed=split_seed
-        )
-        
-        trainset = splits["train"]
-        valset = splits["test"]
+            
+            # Use train_test_split for all rounds (consistent approach)
+            # But ensure data already trained in previous rounds is NOT in validation set (prevent data leakage)
+            if round_num == 1:
+                # Round 1: Standard train/val split using train_test_split
+                trainset_full = partition.select(train_indices)
+                split_seed = self.seed + client_id * 1000 + round_num
+                splits = trainset_full.train_test_split(
+                    test_size=self.val_ratio,
+                    seed=split_seed
+                )
+                trainset = splits["train"]
+                valset = splits["test"]
+                
+                # Cache validation indices for round 1
+                # Extract validation indices by comparing original and split datasets
+                val_indices_round1 = self._extract_validation_indices(
+                    partition, train_indices, splits["test"], split_seed
+                )
+                self._validation_cache[(client_id, round_num)] = val_indices_round1
+            else:
+                # Round N > 1: Only use new data for validation to prevent data leakage
+                prev_train_indices = self.get_client_round_indices(client_id, round_num - 1)
+                
+                # Calculate new indices (data not seen in previous rounds)
+                train_indices_set = set(train_indices)
+                prev_train_indices_set = set(prev_train_indices)
+                new_indices = sorted(list(train_indices_set - prev_train_indices_set))
+                
+                if len(new_indices) > 0:
+                    # Use train_test_split on new indices (consistent with round 1)
+                    new_indices_dataset = partition.select(new_indices)
+                    split_seed = self.seed + client_id * 1000 + round_num
+                    splits_new = new_indices_dataset.train_test_split(
+                        test_size=self.val_ratio,
+                        seed=split_seed
+                    )
+                    
+                    # Extract validation indices from new data split
+                    val_indices_new = self._extract_validation_indices(
+                        partition, new_indices, splits_new["test"], split_seed
+                    )
+                    
+                    # Get validation indices from all previous rounds (from cache or compute)
+                    all_val_indices = set()
+                    
+                    # Round 1 validation (from cache or compute)
+                    if (client_id, 1) in self._validation_cache:
+                        round1_val_indices = self._validation_cache[(client_id, 1)]
+                    else:
+                        round1_train_indices = self.get_client_round_indices(client_id, 1)
+                        round1_dataset = partition.select(round1_train_indices)
+                        round1_split_seed = self.seed + client_id * 1000 + 1
+                        round1_splits = round1_dataset.train_test_split(
+                            test_size=self.val_ratio,
+                            seed=round1_split_seed
+                        )
+                        round1_val_indices = self._extract_validation_indices(
+                            partition, round1_train_indices, round1_splits["test"], round1_split_seed
+                        )
+                        self._validation_cache[(client_id, 1)] = round1_val_indices
+                    all_val_indices.update(round1_val_indices)
+                    
+                    # Accumulate validation from all previous rounds (round 2 to round_num-1)
+                    for prev_round in range(2, round_num):
+                        prev_prev_train = self.get_client_round_indices(client_id, prev_round - 1)
+                        prev_curr_train = self.get_client_round_indices(client_id, prev_round)
+                        prev_prev_set = set(prev_prev_train)
+                        prev_curr_set = set(prev_curr_train)
+                        prev_new = sorted(list(prev_curr_set - prev_prev_set))
+                        
+                        if len(prev_new) > 0:
+                            # Get from cache or compute
+                            if (client_id, prev_round) in self._validation_cache:
+                                prev_val_indices = self._validation_cache[(client_id, prev_round)]
+                            else:
+                                prev_new_dataset = partition.select(prev_new)
+                                prev_split_seed = self.seed + client_id * 1000 + prev_round
+                                prev_splits = prev_new_dataset.train_test_split(
+                                    test_size=self.val_ratio,
+                                    seed=prev_split_seed
+                                )
+                                prev_val_indices = self._extract_validation_indices(
+                                    partition, prev_new, prev_splits["test"], prev_split_seed
+                                )
+                                self._validation_cache[(client_id, prev_round)] = prev_val_indices
+                            all_val_indices.update(prev_val_indices)
+                    
+                    # Add new validation indices for current round
+                    all_val_indices.update(val_indices_new)
+                    self._validation_cache[(client_id, round_num)] = val_indices_new
+                    
+                    # Training set: all train_indices EXCEPT validation indices
+                    train_indices_final = sorted(list(train_indices_set - all_val_indices))
+                    
+                    # Validation set: accumulated from all rounds (round 1 to round_num)
+                    val_indices_final = sorted(list(all_val_indices))
+                    
+                    trainset = partition.select(train_indices_final)
+                    valset = partition.select(val_indices_final)
+                else:
+                    # No new data: keep validation set from previous rounds
+                    # Get accumulated validation indices from all previous rounds (round 1 to round_num-1)
+                    all_val_indices = set()
+                    
+                    # Round 1 validation (from cache or compute)
+                    if (client_id, 1) in self._validation_cache:
+                        round1_val_indices = self._validation_cache[(client_id, 1)]
+                    else:
+                        round1_train_indices = self.get_client_round_indices(client_id, 1)
+                        round1_dataset = partition.select(round1_train_indices)
+                        round1_split_seed = self.seed + client_id * 1000 + 1
+                        round1_splits = round1_dataset.train_test_split(
+                            test_size=self.val_ratio,
+                            seed=round1_split_seed
+                        )
+                        round1_val_indices = self._extract_validation_indices(
+                            partition, round1_train_indices, round1_splits["test"], round1_split_seed
+                        )
+                        self._validation_cache[(client_id, 1)] = round1_val_indices
+                    all_val_indices.update(round1_val_indices)
+                    
+                    # Accumulate validation from all previous rounds
+                    for prev_round in range(2, round_num):
+                        prev_prev_train = self.get_client_round_indices(client_id, prev_round - 1)
+                        prev_curr_train = self.get_client_round_indices(client_id, prev_round)
+                        prev_prev_set = set(prev_prev_train)
+                        prev_curr_set = set(prev_curr_train)
+                        prev_new = sorted(list(prev_curr_set - prev_prev_set))
+                        
+                        if len(prev_new) > 0:
+                            # Get from cache or compute
+                            if (client_id, prev_round) in self._validation_cache:
+                                prev_val_indices = self._validation_cache[(client_id, prev_round)]
+                            else:
+                                prev_new_dataset = partition.select(prev_new)
+                                prev_split_seed = self.seed + client_id * 1000 + prev_round
+                                prev_splits = prev_new_dataset.train_test_split(
+                                    test_size=self.val_ratio,
+                                    seed=prev_split_seed
+                                )
+                                prev_val_indices = self._extract_validation_indices(
+                                    partition, prev_new, prev_splits["test"], prev_split_seed
+                                )
+                                self._validation_cache[(client_id, prev_round)] = prev_val_indices
+                            all_val_indices.update(prev_val_indices)
+                    
+                    # Training set: all train_indices EXCEPT validation indices
+                    train_indices_final = sorted(list(train_indices_set - all_val_indices))
+                    
+                    # Validation set: accumulated from all previous rounds (round 1 to round_num-1, no new data this round)
+                    val_indices_final = sorted(list(all_val_indices))
+                    
+                    trainset = partition.select(train_indices_final)
+                    valset = partition.select(val_indices_final)
         
         if apply_transforms:
             trainset = trainset.with_transform(apply_transforms)
