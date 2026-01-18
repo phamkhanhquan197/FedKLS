@@ -531,9 +531,14 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
                 log(INFO, f"Warning: Could not freeze A for layer {name}: {e}")
 
         # Split layer name and replace the original layer
-        parent_name, child_name = name.rsplit(".", 1)
-        parent = model.get_submodule(parent_name)
-        setattr(parent, child_name, new_layer)  
+        # Handle top-level modules (no '.' in name) like 'classifier', 'visual_projection'
+        if "." in name:
+            parent_name, child_name = name.rsplit(".", 1)
+            parent = model.get_submodule(parent_name)
+            setattr(parent, child_name, new_layer)
+        else:
+            # Top-level module - set directly on model
+            setattr(model, name, new_layer)  
     
     return model
 
