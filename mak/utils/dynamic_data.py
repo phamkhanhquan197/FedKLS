@@ -538,38 +538,3 @@ class DynamicDataScheduler:
             valset = valset.with_transform(apply_transforms)
         
         return trainset, valset
-    
-    def get_client_dataset_size(self, client_id: int, round_num: int) -> Tuple[int, int]:
-        """
-        Get train and validation sizes for a client at a specific round.
-        
-        Args:
-            client_id: Client ID
-            round_num: Current round number
-            
-        Returns:
-            Tuple of (train_size, val_size)
-        """
-        train_indices = self.get_client_round_indices(client_id, round_num)
-        total_size = len(train_indices)
-        train_size = int(total_size * (1 - self.val_ratio))
-        val_size = total_size - train_size
-        return train_size, val_size
-    
-    def verify_disjoint(self, round_num: int) -> bool:
-        """
-        Verify that clients have disjoint indices at a specific round.
-        
-        Args:
-            round_num: Round number to check
-            
-        Returns:
-            True if all clients have disjoint indices
-        """
-        all_indices = []
-        for cid in range(self.num_clients):
-            indices = set(self.get_client_round_indices(cid, round_num))
-            if indices & set(all_indices):
-                return False
-            all_indices.extend(indices)
-        return True
