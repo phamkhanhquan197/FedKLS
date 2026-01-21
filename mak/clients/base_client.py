@@ -42,8 +42,6 @@ class BaseClient(fl.client.NumPyClient):
         self.feature_key = dataset_info[self.dataset_name]["feature_key"]
         self.output_column = dataset_info[self.dataset_name]["output_column"]
         self.bias = self.config_sim.get("peft", {}).get("bias", True)
-        # Track last reloaded round to avoid redundant reloads in the same round
-        self._last_reloaded_round = None
         #NEW: Store dataset reference and transform function for dynamic reload
         self.dataset = dataset
         self.apply_transforms = apply_transforms
@@ -127,7 +125,6 @@ class BaseClient(fl.client.NumPyClient):
             )
             self.trainset = trainset
             self.valset = valset
-            self._last_reloaded_round = round_num  # Cache reloaded round
             return
         
         # Fallback to old approach if scheduler not available
@@ -152,8 +149,6 @@ class BaseClient(fl.client.NumPyClient):
         else:
             self.trainset = new_trainset
             self.valset = new_valset
-        
-        self._last_reloaded_round = round_num  # Cache reloaded round
 
     def set_parameters(self, parameters):
         method = self.config_sim["peft"]["method"] if self.config_sim["peft"]["enabled"] else None
@@ -352,3 +347,4 @@ class BaseClient(fl.client.NumPyClient):
     #         self.scheduler.load_state_dict(state['scheduler'])
     #         self.previous_val_loss = state['best_loss']
     #         print(f"Client {self.client_id}, Loaded optimizer and scheduler state")
+
