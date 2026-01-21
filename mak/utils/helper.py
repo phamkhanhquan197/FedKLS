@@ -679,7 +679,7 @@ def get_model(config, shape, classnames=None):
             if base_model.config.pad_token_id is None:
                 base_model.config.pad_token_id = base_model.config.eos_token_id
         elif model_name in ["openai/clip-vit-base-patch32", "openai/clip-vit-large-patch14"]: #For multimodal datasets MM-IMDb and UPMC-Food101
-            clip_model = CLIPModel.from_pretrained(model_name)
+            clip_model = CLIPModel.from_pretrained(model_name, use_safetensors=True)
             class CustomCLIP(torch.nn.Module):
                 def __init__(self):
                     super().__init__()

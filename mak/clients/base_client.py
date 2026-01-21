@@ -112,11 +112,6 @@ class BaseClient(fl.client.NumPyClient):
                 - "append": For incremental mode, dataset size increases monotonically
             round_num: Current round number for schedule lookup
         """
-        # Optimize: Skip reload if already reloaded for this round
-        # This avoids redundant reloads when evaluate() is called after fit() in the same round
-        if hasattr(self, '_last_reloaded_round') and self._last_reloaded_round == round_num:
-            return
-        
         # Use scheduler if available (new approach)
         if self.data_scheduler is not None:
             trainset, valset = self.data_scheduler.get_client_round_datasets(
