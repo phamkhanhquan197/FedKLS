@@ -85,6 +85,16 @@ dataset_info = {  # Image datasets
         "input_shape": (128,), #Placeholder for text sequence length
         "max_sequence_length": 128, #For transformer models
     },
+
+    "stanfordnlp/sst2": {
+        "num_classes": 2,
+        "feature_key": "sentence",
+        "output_column": "label",
+        "test_set": "test",
+        "input_shape": (128,),  # Placeholder for text sequence length
+        "max_sequence_length": 128,
+    },
+
     ########################################################################
     #Multimodal datasets
     "pranavmr/MM-IMDb": {
