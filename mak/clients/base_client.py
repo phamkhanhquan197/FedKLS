@@ -27,6 +27,7 @@ class BaseClient(fl.client.NumPyClient):
         apply_transforms=None, # NEW: transform function
         data_scheduler=None, # NEW: DynamicDataScheduler for round-aware allocation
         bias=None,
+        rank_policy_map: dict | None = None,
     ):
         self.client_id = client_id
         self.config_sim = config_sim
@@ -64,6 +65,11 @@ class BaseClient(fl.client.NumPyClient):
                     params_to_send = {name: tensor for name, tensor in self.model.state_dict().items() if "lin" in name}
                 else:
                     params_to_send = {name: tensor for name, tensor in self.model.state_dict().items() if name.endswith(".B") or name.endswith(".A")}
+            elif any(key.startswith("roberta.") for key in self.model.state_dict().keys()):
+                if self.bias:
+                    params_to_send = {name: tensor for name, tensor in self.model.state_dict().items() if "self" in name or ("dense" in name and "classifier" not in name)}
+                else:
+                    params_to_send = {name: tensor for name, tensor in self.model.state_dict().items() if name.endswith(".B") or name.endswith(".A")}
             elif any(key.startswith("bert.") for key in self.model.state_dict().keys()):
                 if self.bias:
                     params_to_send = {name: tensor for name, tensor in self.model.state_dict().items() if "self" in name or "dense" in name}
@@ -74,11 +80,17 @@ class BaseClient(fl.client.NumPyClient):
                     params_to_send = {name: tensor for name, tensor in self.model.state_dict().items() if "self_attn" in name or "mlp" in name}
                 else:
                     params_to_send = {name: tensor for name, tensor in self.model.state_dict().items() if name.endswith(".B") or name.endswith(".A")}
+            elif self.config_sim["common"]["model"] in ["Resnet18", "Resnet34","ResNet18Pretrained", "ResNet34Pretrained"]:
+                if self.bias:
+                    params_to_send = {name: tensor for name, tensor in self.model.state_dict().items() if "conv" in name}
+                else:
+                    params_to_send = {name: tensor for name, tensor in self.model.state_dict().items() if name.endswith(".B") or name.endswith(".A")}
             else:
                 #Need to revise
                 # For other models (e.g., ResNet, CNN), send all parameters if PEFT is enabled
                 # This handles cases where the model doesn't match the above patterns
-                params_to_send = {name: tensor for name, tensor in self.model.state_dict().items()}
+                # params_to_send = {name: tensor for name, tensor in self.model.state_dict().items()}
+                raise ValueError("PEFT parameter extraction not defined for this model architecture.")
 
             # Print parameter names and shapes
             # print("\n=== Parameters Sent to Server ===")
@@ -91,12 +103,6 @@ class BaseClient(fl.client.NumPyClient):
         else: 
             # Send full model parameters to server
             return [val.cpu().numpy() for _, val in self.model.state_dict().items()]
-
-    # def _load_full_partition_once(self):
-    #     if self.full_partition is None:
-    #         self.full_partition = self.dataset.load_partition(
-    #             partition_id=self.partition_id
-    #         )
 
     def reload_dataset(self, mode: str, round_num: int=1):
         """
@@ -163,7 +169,7 @@ class BaseClient(fl.client.NumPyClient):
         """Count the class distribution in the dataset."""
         class_counts = {}
         for batch_data in dataset:
-            if self.feature_key == "text" or self.feature_key == "content":  
+            if self.feature_key in ["text", "content", "sentence"]:
                 labels = batch_data["labels"].to(self.device)
             else:
                 labels = batch_data[self.output_column].to(self.device)
@@ -304,7 +310,7 @@ class BaseClient(fl.client.NumPyClient):
                     optim.zero_grad()
                     logits = net(pixel_values=pixel_values, input_ids=input_ids, attention_mask=attention_mask)
                     loss = criterion(logits, labels)
-                elif self.feature_key == "text" or self.feature_key == "content":
+                elif self.feature_key in ["text", "content", "sentence"]:
                     # Text-specific forward pass
                     input_ids = batch["input_ids"].to(device)
                     attention_mask = batch["attention_mask"].to(device)
