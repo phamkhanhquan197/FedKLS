@@ -153,6 +153,7 @@ class FedPOEClient(BaseClient):
         apply_transforms=None,
         data_scheduler=None,
         bias=None,
+        rank_policy_map : dict | None = None,
     ):
         super().__init__(
             client_id,

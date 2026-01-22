@@ -153,6 +153,15 @@ class BaseClient(fl.client.NumPyClient):
     def set_parameters(self, parameters):
         method = self.config_sim["peft"]["method"] if self.config_sim["peft"]["enabled"] else None
         bias = self.config_sim["peft"]["bias"] if self.config_sim["peft"]["enabled"] else None
+        
+        # Override method for FedSVD strategy based on mode
+        if self.config_sim["server"]["strategy"] == "FedSVD":
+            fedsvd_mode = self.config_sim.get("fedsvd_config", {}).get("mode", "fedavg")
+            if fedsvd_mode == "ffa":
+                method = "ffa_lora"  # Only load B matrices
+            else:
+                method = "lora"  # Load both A and B
+        
         set_params(self.model, parameters, method=method, bias=bias)
 
     def count_class_distribution(self, dataset):

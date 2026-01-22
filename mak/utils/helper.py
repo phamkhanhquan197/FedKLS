@@ -5,7 +5,7 @@ import os
 import random
 from datetime import date, datetime
 from logging import INFO
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import flwr as fl
 import numpy as np
@@ -820,6 +820,14 @@ def get_evaluate_fn(
         method = config_sim.get("peft", {}).get("method", "")
         bias = config_sim.get("peft", {}).get("bias", "")
 
+        # Handle FedSVD strategy - need special handling for parameter mapping
+        if strategy == "FedSVD":
+            fedsvd_mode = config_sim.get("fedsvd_config", {}).get("mode", "fedavg")
+            if fedsvd_mode == "ffa":
+                method = "ffa_lora"  # Treat as FFA-LoRA (only B matrices)
+            else:
+                method = "lora"  # FedAvg mode: both A and B
+
         if strategy == "PFedMoAP" or method == "pfedmoap":
             if len(parameters) != 1:
                 raise ValueError(f"PFedMoAP centralized eval expects 1 prompt, got {len(parameters)}")
@@ -1213,8 +1221,10 @@ def get_strategy(
         # The theta shape is derived client-side from embedding dim, so we start empty.
         init_params = fl.common.ndarrays_to_parameters([])
     else:
+        # Sort keys for deterministic order (critical for proper parameter loading)
+        sorted_state_dict = sorted(model.state_dict().items())
         init_params = fl.common.ndarrays_to_parameters(
-            [val.cpu().numpy() for _, val in model.state_dict().items()]
+            [val.cpu().numpy() for _, val in sorted_state_dict]
         )
 
     return getattr(__import__("mak.strategies", fromlist=[STRATEGY]), STRATEGY)(

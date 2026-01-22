@@ -11,6 +11,7 @@ from mak.clients.flex_lora_client import FlexLoRAClient
 from mak.clients.pfedmoap_client import PFedMoAPClient
 from mak.clients.fedsa_lora_client import FedSALoRAClient
 from mak.clients.fedpoe_client import FedPOEClient, FedPOERegressionTextClient
+from mak.clients.fedsvd_client import FedSVDClient
 
 from logging import INFO
 from flwr.common.logger import log
@@ -29,6 +30,7 @@ def get_client_fn(
 ):
     strategy = config_sim["server"]["strategy"]
     client_class = get_client_class(strategy)
+    
     num_clients = config_sim["server"]["num_clients"]
     method = config_sim["peft"]["method"]
     
@@ -107,6 +109,8 @@ def get_client_class(strategy: str):
         return FedAWAClient
     elif strategy == "FFALoRA":
         return FFALoRAClient
+    elif strategy == "FedSVD":
+        return FedSVDClient
     elif strategy == "PFedMoAP":
         return PFedMoAPClient
     elif strategy == "FedSALoRA":

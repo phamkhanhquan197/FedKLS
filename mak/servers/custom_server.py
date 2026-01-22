@@ -336,22 +336,22 @@ class ServerSaveData:
             num_threads=self.num_train_thread,
         )
 
-        # # ------------------- START: Print client weight shapes -------------------
-        # log(INFO, "--- Client Weight Shapes Received (Round %s) ---", server_round)
-        # for client_proxy, fit_res in results:
-        #     # fit_res is of type FitRes
-        #     # fit_res.parameters is of type Parameters
-        #     client_cid = client_proxy.cid # Get client ID for logging
-        #     if fit_res.parameters and fit_res.parameters.tensors:
-        #          # Convert Parameters (bytes) to a list of NumPy ndarrays
-        #         client_weights_ndarrays = parameters_to_ndarrays(fit_res.parameters)
-        #         log(INFO, f"Client {client_cid} (Num examples: {fit_res.num_examples}) sent {len(client_weights_ndarrays)} parameter layers/tensors:")
-        #         for i, layer_weights in enumerate(client_weights_ndarrays):
-        #             log(INFO, f"  Client {client_cid} - Layer {i}: shape {layer_weights.shape}, dtype {layer_weights.dtype}")
+        # ------------------- START: Print client weight shapes -------------------
+        log(INFO, "--- Client Weight Shapes Received (Round %s) ---", server_round)
+        for client_proxy, fit_res in results:
+            # fit_res is of type FitRes
+            # fit_res.parameters is of type Parameters
+            client_cid = client_proxy.cid # Get client ID for logging
+            if fit_res.parameters and fit_res.parameters.tensors:
+                 # Convert Parameters (bytes) to a list of NumPy ndarrays
+                client_weights_ndarrays = parameters_to_ndarrays(fit_res.parameters)
+                log(INFO, f"Client {client_cid} (Num examples: {fit_res.num_examples}) sent {len(client_weights_ndarrays)} parameter layers/tensors:")
+                for i, layer_weights in enumerate(client_weights_ndarrays):
+                    log(INFO, f"  Client {client_cid} - Layer {i}: shape {layer_weights.shape}, dtype {layer_weights.dtype}")
 
-        #     else:
-        #         log(INFO, f"Client {client_cid} did not return parameters or parameters.tensors was empty.")
-        # # -------------------- END: Print client weight shapes --------------------
+            else:
+                log(INFO, f"Client {client_cid} did not return parameters or parameters.tensors was empty.")
+        # -------------------- END: Print client weight shapes --------------------
 
 
         # Track upload size (clients -> server)
