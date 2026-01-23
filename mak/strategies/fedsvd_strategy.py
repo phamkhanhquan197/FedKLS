@@ -39,6 +39,59 @@ def _is_classifier(name: str) -> bool:
     return "classifier" in name
 
 
+def _infer_ffa_uplink_names(full_names: List[str], *, bias: bool) -> List[str]:
+    """Infer the ordered list of parameter names a FedSVD FFA client uploads.
+
+    This repo's clients historically use architecture-specific filters.
+    We replicate those string-based rules here so the server can map the
+    returned ndarray list back into the full parameter vector.
+    """
+
+    # Base rule: always include LoRA-B (or B matrices for SVDAdapter/ConvAdapter)
+    def is_b(nm: str) -> bool:
+        return _is_lora_b(nm)
+
+    # Optional: include certain bias terms for transformer backbones.
+    # These heuristics match existing client-side selection logic.
+    def is_bias(nm: str) -> bool:
+        return nm.endswith(".bias")
+
+    has_distilbert = any(nm.startswith("distilbert.") for nm in full_names)
+    has_roberta = any(nm.startswith("roberta.") for nm in full_names)
+    has_bert = any(nm.startswith("bert.") for nm in full_names)
+    has_model = any(nm.startswith("model.") for nm in full_names)
+    has_resnet_style = any(nm.startswith("layer") for nm in full_names)
+
+    selected: List[str] = []
+    for nm in full_names:
+        if is_b(nm):
+            selected.append(nm)
+            continue
+
+        if not bias or not is_bias(nm):
+            continue
+
+        if has_distilbert:
+            if "lin" in nm:
+                selected.append(nm)
+        elif has_roberta:
+            if ("self" in nm) or ("dense" in nm and "classifier" not in nm):
+                selected.append(nm)
+        elif has_bert:
+            if ("self" in nm) or ("dense" in nm):
+                selected.append(nm)
+        elif has_model:
+            if ("self_attn" in nm) or ("mlp" in nm):
+                selected.append(nm)
+        elif has_resnet_style:
+            # Conv backbones: best-effort match prior client filter.
+            if "conv" in nm:
+                selected.append(nm)
+
+    # Deterministic ordering must match client-side `sorted(params_to_send.items())`
+    return sorted(set(selected))
+
+
 class FedSVDStrategy(FedAvg):
     """FedSVD aggregation over LoRA parameters.
 
@@ -64,6 +117,7 @@ class FedSVDStrategy(FedAvg):
         recalculate_svd_period: int = 0,
         svd_warmup_steps: int = 0,
         include_classifier: bool = True,
+        bias: bool = True,
         param_name_fn: Optional[Callable[[], List[str]]] = None,
         **kwargs,
     ):
@@ -75,6 +129,7 @@ class FedSVDStrategy(FedAvg):
         self.recalculate_svd_period = int(recalculate_svd_period or 0)
         self.svd_warmup_steps = int(svd_warmup_steps or 0)
         self.include_classifier = include_classifier
+        self.bias = bool(bias)
         self.param_name_fn = param_name_fn
 
         self._round_start: Optional[List[np.ndarray]] = None
@@ -138,24 +193,69 @@ class FedSVDStrategy(FedAvg):
                 continue
             if A.ndim != 2 or B.ndim != 2:
                 continue
-            if B.shape[1] != A.shape[0]:
-                # Expected shapes: A (r, in), B (out, r)
+
+            # Support both conventions:
+            # 1) This repo's adapters: A (out, r), B (r, in)
+            #    prod = A @ B -> (out, in)
+            # 2) PEFT LoRA:        A (r, in),  B (out, r)
+            #    prod = B @ A -> (out, in)
+            is_repo_adapter = A.shape[1] == B.shape[0]
+            is_peft_lora = A.shape[0] == B.shape[1]
+            if not (is_repo_adapter or is_peft_lora):
                 continue
 
-            prod = B @ A  # (out, in)
             try:
-                U, S, Vt = np.linalg.svd(prod, full_matrices=False)
+                if is_repo_adapter:
+                    # A: (out, r), B: (r, in)
+                    prod = A @ B
+                    U, S, Vt = np.linalg.svd(prod, full_matrices=False)
+
+                    r = int(A.shape[1])
+                    k = int(S.shape[0])
+                    r_eff = min(r, k)
+
+                    Ur = U[:, :r_eff]
+                    Sr = S[:r_eff]
+                    Vtr = Vt[:r_eff, :]
+
+                    # Re-factorize prod into A(out,r) and B(r,in)
+                    # A <- U * sqrt(S), B <- sqrt(S) * Vt
+                    sqrtS = np.sqrt(Sr).astype(A.dtype, copy=False)
+                    A_new = Ur * sqrtS[None, :]
+                    B_new = (sqrtS[:, None] * Vtr).astype(B.dtype, copy=False)
+
+                    # If rank shrank due to numerical limits, pad back to r
+                    if r_eff < r:
+                        A_pad = np.zeros((A.shape[0], r - r_eff), dtype=A_new.dtype)
+                        B_pad = np.zeros((r - r_eff, B.shape[1]), dtype=B_new.dtype)
+                        A_new = np.concatenate([A_new, A_pad], axis=1)
+                        B_new = np.concatenate([B_new, B_pad], axis=0)
+
+                else:
+                    # PEFT LoRA: A (r, in), B (out, r)
+                    prod = B @ A
+                    U, S, Vt = np.linalg.svd(prod, full_matrices=False)
+
+                    r = int(A.shape[0])
+                    k = int(S.shape[0])
+                    r_eff = min(r, k)
+
+                    Ur = U[:, :r_eff]
+                    Sr = S[:r_eff]
+                    Vtr = Vt[:r_eff, :]
+
+                    # Match upstream 3rd-party behavior:
+                    # A <- Vt[:r], B <- U[:,:r] diag(S[:r])
+                    A_new = Vtr.astype(A.dtype, copy=False)
+                    B_new = (Ur @ np.diag(Sr)).astype(B.dtype, copy=False)
+
+                    if r_eff < r:
+                        A_pad = np.zeros((r - r_eff, A.shape[1]), dtype=A_new.dtype)
+                        B_pad = np.zeros((B.shape[0], r - r_eff), dtype=B_new.dtype)
+                        A_new = np.concatenate([A_new, A_pad], axis=0)
+                        B_new = np.concatenate([B_new, B_pad], axis=1)
             except Exception:
                 continue
-
-            r = A.shape[0]
-            # U: (out, k), S: (k,), Vt: (k, in)
-            Ur = U[:, :r]
-            Sr = S[:r]
-            Vtr = Vt[:r, :]
-
-            A_new = Vtr
-            B_new = Ur @ (np.diag(Sr).astype(B.dtype, copy=False))
 
             out[ia] = A_new.astype(A.dtype, copy=False)
             out[ib] = B_new.astype(B.dtype, copy=False)
@@ -189,6 +289,48 @@ class FedSVDStrategy(FedAvg):
         num_examples = [r.num_examples for _, r in results]
 
         names = self.param_name_fn() if self.param_name_fn else None
+
+        # FFA design: downlink full (A+B), uplink only B.
+        # If clients upload a partial vector, merge aggregated updates into the
+        # full round-start weights and return a full parameter vector.
+        if (
+            self.mode == "ffa"
+            and names is not None
+            and self._round_start is not None
+            and len(self._round_start) == len(names)
+        ):
+            min_len = min(len(w) for w in weights) if weights else 0
+            if 0 < min_len < len(names):
+                uplink_names = _infer_ffa_uplink_names(names, bias=self.bias)
+                # If inference doesn't match payload length, fall back to the
+                # simplest assumption: client sent only LoRA-B tensors.
+                if len(uplink_names) != min_len:
+                    uplink_names = sorted([nm for nm in names if _is_lora_b(nm)])
+                uplink_names = uplink_names[:min_len]
+
+                # Weighted average over the uploaded payload
+                total = float(sum(num_examples))
+                ratios = [n / total for n in num_examples]
+                agg_payload = [
+                    sum(ratios[i] * weights[i][j] for i in range(len(weights)))
+                    for j in range(min_len)
+                ]
+
+                updated_full = list(self._round_start)
+                name_to_idx = {nm: idx for idx, nm in enumerate(names)}
+                for nm, arr in zip(uplink_names, agg_payload):
+                    idx = name_to_idx.get(nm)
+                    if idx is None:
+                        continue
+                    if self.send_deltas:
+                        updated_full[idx] = updated_full[idx] + arr
+                    else:
+                        updated_full[idx] = arr
+
+                updated_full = self._reinit_svd(server_round, updated_full, names)
+                return ndarrays_to_parameters(updated_full), {}
+
+        # Default path: aggregate based on name selection (full vectors)
         aggregated = self._aggregate_selected(weights, num_examples, names, delta_mode=self.send_deltas)
 
         if self.send_deltas and self._round_start is not None and len(self._round_start) == len(aggregated):
@@ -197,7 +339,6 @@ class FedSVDStrategy(FedAvg):
             return ndarrays_to_parameters(updated), {}
 
         aggregated = self._reinit_svd(server_round, aggregated, names)
-
         return ndarrays_to_parameters(aggregated), {}
 
     def _aggregate_selected(
@@ -223,6 +364,13 @@ class FedSVDStrategy(FedAvg):
         # then, this keeps the simulation running and preserves semantics when clients
         # return identical partial vectors.
         min_len = min(len(w) for w in weights) if weights else 0
+
+        # If clients are sending partial vectors (common when PEFT is enabled), we
+        # cannot safely align `names` (which typically come from the full model)
+        # with received ndarray positions. In that case, fall back to aggregating
+        # all received arrays (equivalent to FedAvg over the transmitted payload).
+        if names is not None and min_len > 0 and min_len < len(names):
+            names = None
 
         # Fall back to plain FedAvg if we don't have parameter names.
         # (Without names we can't reliably select LoRA A/B subsets.)

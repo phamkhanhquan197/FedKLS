@@ -173,7 +173,7 @@ def main():
             #Server always needs the SVD-adapted model when PEFT is enabled
             server_model = svd_model
 
-        elif peft_method in ["pissa", "milora", "middle", "lora", "ffa_lora", "fedsa_lora", "flex_lora"]:
+        elif peft_method in ["pissa", "milora", "middle", "lora", "ffa_lora", "fedsa_lora", "flex_lora", "fedsvd_lora"]:
             log(INFO, "Applying SVD to create svd model for server...")
             # Create a deep copy of base_model to avoid modifying it
             model_for_svd = copy.deepcopy(base_model)

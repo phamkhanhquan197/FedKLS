@@ -164,6 +164,13 @@ class BaseClient(fl.client.NumPyClient):
                 method = "ffa_lora"  # Only load B matrices
             else:
                 method = "lora"  # Load both A and B
+
+        # if self.config_sim["server"]["strategy"] == "FedSVD":
+        #     fedsvd_mode = self.config_sim.get("fedsvd_config", {}).get("mode", "fedavg")
+        #     if fedsvd_mode == "ffa":
+        #         method = "ffa_lora"  # Only load B matrices
+        #     else:
+        #         method = "lora"  # Load both A and B
         
         set_params(self.model, parameters, method=method, bias=bias)
 

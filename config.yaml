@@ -29,13 +29,13 @@ server:
   num_clients : 10 # total number of clients participating in training
   fraction_evaluate : 1 # fraction of clients to be selected for evaluation
   min_evaluate_clients : 10 # minimum number of clients to be selected for evaluation
-  strategy : FedPOE  #[FedAWA, FedKLSVD, FedAvg, FFALoRA, PFedMoAP, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova, FedSVD, FedPOE]
+  strategy : FedSVD  #[FedAWA, FedKLSVD, FedAvg, FFALoRA, PFedMoAP, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova, FedSVD, FedPOE]
 
 client:
   loss: FocalLoss # [CrossEntropyLoss, FocalLoss]
   epochs : 1
-  batch_size : 8
-  test_batch_size : 8
+  batch_size : 4
+  test_batch_size : 4
   lr: 0.005 #  [0.00002, 0.0001,0.001, 0.005, 0.01, 0.1, 0.2] 0.005->distilbert-base-uncased, 0.001->bert-base-uncased, 0.0001->Qwen/Qwen1.5-0.5B
   save_train_res : True
   # Too many total_cpus lets Ray schedule many actors concurrently and can OOM host RAM.
@@ -49,46 +49,12 @@ client:
   num_gpus : 0.1
 
 peft:
-  enabled: False #False = FFT, do not set method = fedkls when running FFT, pfedmoap do not run with peft=True
+  enabled: True #False = FFT, do not set method = fedkls when running FFT, pfedmoap do not run with peft=True
   rank: 32
   alpha: 32 #Equal to the rank
-  method: lora # ['pissa', 'milora', 'middle', 'fedkls', 'lora', 'ffa_lora', 'fedsa_lora ','pfedmoap', 'flex_lora']
-  bias: True #To send the bias layer(after A/B) to server for aggregation or not
+  method: fedsvd_lora # ['pissa', 'milora', 'middle', 'fedkls', 'lora', 'ffa_lora', 'fedsa_lora ','pfedmoap', 'flex_lora']
+  bias: False #To send the bias layer(after A/B) to server for aggregation or not
   layer: attention_only #['all_linear','attention_only']
-
-# FedSVD (fed-svd-like) config
-fedsvd_config:
-  mode: "ffa"       # "fedavg" (aggregate A+B) | "ffa" (aggregate B only)
-  send_deltas: False   # True => clients send deltas; server applies deltas to round-start params
-  agg_flora: False     # (placeholder) requires delta semantics
-  agg_fedex: False     # (placeholder) requires delta semantics
-  # Optional: rerun SVD on LoRA (server-side) periodically, like 3rd-party/fed-svd
-  # 0 disables. 1 means rerun every round after warmup.
-  recalculate_svd_period: 1
-  svd_warmup_steps: 1
-  dp:
-    enabled: False        # True => enable DP-SGD (Opacus) during client training
-    eps: 8.0              # target epsilon (used to compute noise_multiplier if noise_multiplier is null)
-    delta: 1.0e-5         # target delta
-    max_grad_norm: 2.0    # per-sample grad clipping norm
-    noise_multiplier: null  # override if set; otherwise computed from (eps, delta, sample_rate, epochs)
-    secure_rng: False     # True => use secure RNG (slower)
-
-# FedPOE (Hedge mixture) config
-# Mirrors the 3rd-party Fed-POE idea of updating per-client weights (a,b)
-# via exponentiated losses.
-fedpoe_config:
-  eta: 0.1  # set >0 to enable a,b updates: a*=exp(-eta*loss_fed), b*=exp(-eta*loss_loc)
-  period : 1 # number update model server, default if POE is 20
-  M : 4   # number of local epochs per POE update
-
-# FedPOERegressionText: regression-style POE over text embeddings using an RFF head
-fedpoe_regression_text_config:
-  eta: 0.1
-  lam: 0.0
-  num_kernels: 4
-  n_components: 256
-  pooling: auto
 
 # FedSVD (fed-svd-like) config
 fedsvd_config:

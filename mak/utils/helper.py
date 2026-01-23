@@ -354,7 +354,7 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
         weight_matrix = layer.weight.data
         original_bias = layer.bias.data if layer.bias is not None else None
 
-        if method == 'lora':
+        if method == 'lora' or method == 'fedsvd_lora':
             # Original LoRA: Random initialization without SVD
             if isinstance(layer, torch.nn.Conv2d):
                 c_out, c_in, k1, k2 = weight_matrix.shape
@@ -1203,8 +1203,10 @@ def get_strategy(
             "agg_fedex": bool(fedsvd_cfg.get("agg_fedex", False)),
             "recalculate_svd_period": int(fedsvd_cfg.get("recalculate_svd_period", 0) or 0),
             "svd_warmup_steps": int(fedsvd_cfg.get("svd_warmup_steps", 0) or 0),
+            "bias": bool((config.get("peft", {}) or {}).get("bias", True)),
             # Provide parameter names so the strategy can select LoRA A/B.
-            "param_name_fn": (lambda: list(model.state_dict().keys())) if model is not None else None,
+            # IMPORTANT: must match the same deterministic order used by `initial_parameters` below.
+            "param_name_fn": (lambda: [k for k, _ in sorted(model.state_dict().items())]) if model is not None else None,
         }
 
     if STRATEGY == "PFedMoAP":
