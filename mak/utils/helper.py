@@ -209,10 +209,7 @@ def get_partitioner(config_sim):
     num_clients = config_sim["server"]["num_clients"]
     dataset_name = config_sim["common"]["dataset"]
     
-    # Check if dataset is multi-label
-    is_multi_label = dataset_info.get(dataset_name, {}).get("multi_label", False)
-    
-    if config_sim["common"]["data_type"] == "dirichlet_niid" and not is_multi_label:
+    if config_sim["common"]["data_type"] == "dirichlet_niid":
         # alpha value
         dirichlet_alpha = config_sim["common"]["dirichlet_alpha"]
         # dataset's label column
@@ -228,11 +225,6 @@ def get_partitioner(config_sim):
             seed=config_sim["common"]["seed"],
         )
     else:
-        # Use IID partitioning for:
-        # 1. data_type != "dirichlet_niid"
-        # 2. Multi-label datasets (DirichletPartitioner doesn't support list-type labels)
-        if is_multi_label and config_sim["common"]["data_type"] == "dirichlet_niid":
-            log(INFO, f"Dataset {dataset_name} is multi-label. Using IID partitioning instead of Dirichlet (DirichletPartitioner doesn't support list-type labels).")
         partitioner = IidPartitioner(num_partitions=num_clients)
     # return train data
     return {"train": partitioner}
@@ -608,16 +600,12 @@ def add_text_to_dataset(dataset, text_data, split: str = "train"):
 def get_dataset(config_sim):
     partitioner = get_partitioner(config_sim=config_sim)
     dataset_name = config_sim["common"]["dataset"]
-    
-    log(INFO, f"Dataset name: {dataset_name}")
-    
     if dataset_name not in dataset_info.keys():
         raise Exception(f"Dataset name should be among : {list(dataset_info.keys())}")
     
     # Load from HuggingFace Hub
     log(INFO, f"Loading dataset from HuggingFace Hub: {dataset_name}")
     fds = FederatedDataset(dataset=dataset_name, partitioners=partitioner)
-    
     # get test column name
     test_set = dataset_info[dataset_name]["test_set"]
     if test_set is None:
@@ -631,6 +619,11 @@ def get_dataset(config_sim):
     
     # For UPMC-Food101, download zip and load text from CSV
     if dataset_name == "kkim0451/UPMC-Food101":
+        max_test_samples = 200
+        n = min(max_test_samples, len(centralized_testset))
+        centralized_testset = centralized_testset.select(range(len(centralized_testset) - n, len(centralized_testset)))
+        log(INFO, f"UPMC-Food101 test set truncated to {n} samples")
+        
         log(INFO, "Loading text data from zip file for UPMC-Food101")
         
         # Download zip and extract CSV files
@@ -1670,3 +1663,4 @@ def get_size_weights(federated_dataset, num_clients):
         sample_size.append(len(federated_dataset.load_partition(i)))
     size_weights = [i / sum(sample_size) for i in sample_size]
     return size_weights
+
