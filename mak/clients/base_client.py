@@ -96,11 +96,14 @@ class BaseClient(fl.client.NumPyClient):
             #     print(f"{name}: {tuple(tensor.shape)}")
             # print("=================================\n")
 
-            # Convert to numpy arrays (preserving order)
-            return [tensor.cpu().numpy() for tensor in params_to_send.values()]
+            # Convert to numpy arrays (deterministic order)
+            # IMPORTANT: server initializes/sends parameters in sorted state_dict key order
+            # and `set_params` expects the same order.
+            return [tensor.cpu().numpy() for _, tensor in sorted(params_to_send.items())]
         else: 
             # Send full model parameters to server
-            return [val.cpu().numpy() for _, val in self.model.state_dict().items()]
+            sorted_state = sorted(self.model.state_dict().items())
+            return [val.cpu().numpy() for _, val in sorted_state]
 
     def reload_dataset(self, mode: str, round_num: int=1):
         """

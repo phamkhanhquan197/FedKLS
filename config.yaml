@@ -12,44 +12,44 @@ common:
   model: distilbert-base-uncased
   # model: Resnet18
   # Optional: redirect Ray session/spill files off /tmp (useful when /tmp is nearly full)
-  ray_tmp_dir: /tmp # /home/ai/tmp, /tmp
+  ray_tmp_dir: /home/ai/tmp # /home/ai/tmp, /tmp
   optimizer : sgd # one among [sgd,adam]
   sgd_momentum : 0.9
   seed : 123  #123 456 789
   multi_node : False
   save_log : True
-  num_train_thread: 8 #Save the most memory when setting to 1
-  num_test_thread: 8
+  num_train_thread: 10 #Save the most memory when setting to 1
+  num_test_thread: 10
 
 server:
   num_rounds : 1000 # default 1000
   address : 127.0.0.1
-  fraction_fit : 1 # fraction of clients to be selected for training
+  fraction_fit : 0.3 # fraction of clients to be selected for training
   min_fit_clients : 3 # minimum number of clients to be selected for training
   num_clients : 10 # total number of clients participating in training
   fraction_evaluate : 1 # fraction of clients to be selected for evaluation
   min_evaluate_clients : 10 # minimum number of clients to be selected for evaluation
-  strategy : FedSVD  #[FedAWA, FedKLSVD, FedAvg, FFALoRA, PFedMoAP, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova, FedSVD, FedPOE]
+  strategy : FedPOE  #[FedAWA, FedKLSVD, FedAvg, FFALoRA, PFedMoAP, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova, FedSVD, FedPOE]
 
 client:
   loss: FocalLoss # [CrossEntropyLoss, FocalLoss]
   epochs : 1
-  batch_size : 4
-  test_batch_size : 4
+  batch_size : 8
+  test_batch_size : 8
   lr: 0.005 #  [0.00002, 0.0001,0.001, 0.005, 0.01, 0.1, 0.2] 0.005->distilbert-base-uncased, 0.001->bert-base-uncased, 0.0001->Qwen/Qwen1.5-0.5B
   save_train_res : True
   # Too many total_cpus lets Ray schedule many actors concurrently and can OOM host RAM.
   # Keep this near your physical core count.
-  total_cpus : 10
+  total_cpus : 40
   total_gpus : 1 # no. of GPU's assigned for whole simulation
   gpu : True  # True or Faslse, Use GPU for training or not.
   # Request more resources per actor => fewer concurrent actors => less RAM/GPU contention.
-  num_cpus : 1
+  num_cpus : 4
   # With 1 GPU total, setting 1.0 forces a single GPU actor at a time.
-  num_gpus : 1
+  num_gpus : 0.1
 
 peft:
-  enabled: True #False = FFT, do not set method = fedkls when running FFT, pfedmoap do not run with peft=True
+  enabled: False #False = FFT, do not set method = fedkls when running FFT, pfedmoap do not run with peft=True
   rank: 32
   alpha: 32 #Equal to the rank
   method: lora # ['pissa', 'milora', 'middle', 'fedkls', 'lora', 'ffa_lora', 'fedsa_lora ','pfedmoap', 'flex_lora']

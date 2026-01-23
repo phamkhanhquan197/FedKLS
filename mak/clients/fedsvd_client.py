@@ -34,7 +34,7 @@ class FedSVDClient(BaseClient):
         """
         if not self.config_sim["peft"]["enabled"]:
             # If PEFT is disabled, send full model parameters
-            return [val.cpu().numpy() for _, val in self.model.state_dict().items()]
+            return [val.cpu().numpy() for _, val in sorted(self.model.state_dict().items())]
         
         model_state = self.model.state_dict()
         
