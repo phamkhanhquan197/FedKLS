@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import torch
 import yaml
-from datasets import Dataset
+from datasets import Dataset, Features, Value, Image as HFImage
 from datasets.utils.logging import disable_progress_bar
 from flwr.common import Scalar
 from flwr.common.logger import log
@@ -21,6 +21,8 @@ from flwr_datasets import FederatedDataset
 from flwr_datasets.partitioner import DirichletPartitioner, IidPartitioner
 from torch.utils.data import DataLoader
 from sklearn.model_selection import train_test_split
+from PIL import Image
+from pathlib import Path
 
 import mak
 from mak.servers.custom_server import ServerSaveData
@@ -47,6 +49,10 @@ import math
 from collections import Counter
 import torch.nn.init as init
 from datasets import load_dataset
+from huggingface_hub import hf_hub_download
+import tempfile
+import zipfile
+import shutil
 
 def get_target_keys(model, bias=True) -> List[str]:
     """Return deterministic sorted list of target parameter names for FFA/Flex LoRA.
@@ -231,34 +237,444 @@ def get_partitioner(config_sim):
     # return train data
     return {"train": partitioner}
 
+def load_upmc_food101_local(dataset_path: str):
+    """
+    Load UPMC-Food101 dataset from local files.
+    
+    Expected structure:
+    dataset_path/
+        images/
+            train/
+                apple_ipe/
+                    *.jpg
+                baby_back_ribs/
+                    *.jpg
+                ...
+            test/
+                apple_ipe/
+                    *.jpg
+                ...
+        texts/
+            train_titles.csv (columns: filename, title)
+            test_titles.csv (columns: filename, title)
+        train.csv (columns: filename, label or class_id)
+        test.csv (columns: filename, label or class_id)
+    
+    Returns:
+        train_dataset, test_dataset: HuggingFace Dataset objects with 'image', 'text', 'label' columns
+    """
+    dataset_path = Path(dataset_path)
+    images_train_dir = dataset_path / "images" / "train"
+    images_test_dir = dataset_path / "images" / "test"
+    texts_train_file = dataset_path / "texts" / "train_titles.csv"
+    texts_test_file = dataset_path / "texts" / "test_titles.csv"
+    train_csv = dataset_path / "train.csv"
+    test_csv = dataset_path / "test.csv"
+    
+    # Verify paths exist
+    if not images_train_dir.exists():
+        raise FileNotFoundError(f"Train images directory not found: {images_train_dir}")
+    if not images_test_dir.exists():
+        raise FileNotFoundError(f"Test images directory not found: {images_test_dir}")
+    if not train_csv.exists():
+        raise FileNotFoundError(f"Train CSV not found: {train_csv}")
+    if not test_csv.exists():
+        raise FileNotFoundError(f"Test CSV not found: {test_csv}")
+    
+    # Load CSV files
+    train_df = pd.read_csv(train_csv)
+    test_df = pd.read_csv(test_csv)
+    train_texts_df = pd.read_csv(texts_train_file) if texts_train_file.exists() else pd.DataFrame()
+    test_texts_df = pd.read_csv(texts_test_file) if texts_test_file.exists() else pd.DataFrame()
+    
+    # Create text lookup dictionary (filename -> text)
+    train_text_dict = {}
+    if not train_texts_df.empty:
+        # Assume first column is filename, second is text
+        text_col = train_texts_df.columns[1] if len(train_texts_df.columns) > 1 else train_texts_df.columns[0]
+        filename_col = train_texts_df.columns[0]
+        train_text_dict = dict(zip(train_texts_df[filename_col], train_texts_df[text_col]))
+    
+    test_text_dict = {}
+    if not test_texts_df.empty:
+        text_col = test_texts_df.columns[1] if len(test_texts_df.columns) > 1 else test_texts_df.columns[0]
+        filename_col = test_texts_df.columns[0]
+        test_text_dict = dict(zip(test_texts_df[filename_col], test_texts_df[text_col]))
+    
+    train_data = []
+    test_data = []
+    
+    # Process train data
+    for idx, row in train_df.iterrows():
+        # Get filename and label from CSV
+        # Try common column names
+        filename = row.get('filename', row.get('image', row.get('image_path', '')))
+        if pd.isna(filename) or filename == '':
+            continue
+            
+        label = row.get('label', row.get('class', row.get('class_id', row.get('class_name', 0))))
+        
+        # Get text from text dictionary
+        text = train_text_dict.get(filename, train_text_dict.get(Path(filename).name, ""))
+        
+        # Find image file - check if filename includes class name or just filename
+        filename_path = Path(filename)
+        if filename_path.parent.name:  # Has directory in filename
+            class_name = filename_path.parent.name
+            img_filename = filename_path.name
+        else:
+            # Extract class name from filename (format: class_name_xxxxx.jpg)
+            img_filename = filename_path.name
+            class_name = img_filename.split('_')[0] if '_' in img_filename else filename_path.stem
+        
+        # Try to find image in class directory
+        img_path = images_train_dir / class_name / img_filename
+        if not img_path.exists():
+            # Try direct filename match
+            img_path = images_train_dir / img_filename
+        if not img_path.exists():
+            # Try searching in all class directories
+            found = False
+            for class_dir in images_train_dir.iterdir():
+                if class_dir.is_dir():
+                    potential_path = class_dir / img_filename
+                    if potential_path.exists():
+                        img_path = potential_path
+                        found = True
+                        break
+            if not found:
+                continue
+        
+        train_data.append({
+            'image': Image.open(img_path).convert('RGB'),
+            'text': str(text) if text else "",
+            'label': int(label)
+        })
+    
+    # Process test data
+    for idx, row in test_df.iterrows():
+        filename = row.get('filename', row.get('image', row.get('image_path', '')))
+        if pd.isna(filename) or filename == '':
+            continue
+            
+        label = row.get('label', row.get('class', row.get('class_id', row.get('class_name', 0))))
+        text = test_text_dict.get(filename, test_text_dict.get(Path(filename).name, ""))
+        
+        filename_path = Path(filename)
+        if filename_path.parent.name:
+            class_name = filename_path.parent.name
+            img_filename = filename_path.name
+        else:
+            img_filename = filename_path.name
+            class_name = img_filename.split('_')[0] if '_' in img_filename else filename_path.stem
+        
+        img_path = images_test_dir / class_name / img_filename
+        if not img_path.exists():
+            img_path = images_test_dir / img_filename
+        if not img_path.exists():
+            found = False
+            for class_dir in images_test_dir.iterdir():
+                if class_dir.is_dir():
+                    potential_path = class_dir / img_filename
+                    if potential_path.exists():
+                        img_path = potential_path
+                        found = True
+                        break
+            if not found:
+                continue
+        
+        test_data.append({
+            'image': Image.open(img_path).convert('RGB'),
+            'text': str(text) if text else "",
+            'label': int(label)
+        })
+    
+    # Create HuggingFace Dataset
+    features = Features({
+        'image': HFImage(),
+        'text': Value('string'),
+        'label': Value('int64')
+    })
+    
+    train_dataset = Dataset.from_list(train_data, features=features)
+    test_dataset = Dataset.from_list(test_data, features=features)
+    
+    log(INFO, f"Loaded {len(train_data)} train samples and {len(test_data)} test samples from local dataset")
+    
+    return train_dataset, test_dataset
+
+
+def load_text_from_zip(repo_id: str):
+    """
+    Download zip file from HuggingFace Hub to project data directory, extract, and load text CSV files.
+    
+    Args:
+        repo_id: HuggingFace repository ID (e.g., "kkim0451/UPMC-Food101")
+    
+    Returns:
+        dict: {"train": list of texts, "test": list of texts} or None if failed
+    """
+    try:
+        # Get project root directory (assuming helper.py is in mak/utils/)
+        project_root = Path(__file__).parent.parent.parent
+        data_dir = project_root / "data"
+        data_dir.mkdir(exist_ok=True)
+        
+        # Create dataset-specific directory
+        dataset_name = repo_id.replace("/", "_")
+        dataset_dir = data_dir / dataset_name
+        dataset_dir.mkdir(exist_ok=True)
+        
+        extract_dir = dataset_dir / "extracted"
+        zip_path = dataset_dir / "UPMC-Food-101.zip"
+        
+        # Download zip file if not exists
+        if not zip_path.exists():
+            log(INFO, f"Downloading zip file from HuggingFace Hub: {repo_id}")
+            downloaded_path = hf_hub_download(
+                repo_id=repo_id,
+                filename="UPMC-Food-101.zip",
+                repo_type="dataset"
+            )
+            # Copy to project data directory
+            shutil.copy2(downloaded_path, zip_path)
+            log(INFO, f"Downloaded zip to: {zip_path}")
+        else:
+            log(INFO, f"Using existing zip file: {zip_path}")
+        
+        # Extract zip if not already extracted
+        if not extract_dir.exists() or not (extract_dir / "texts").exists():
+            log(INFO, f"Extracting zip to: {extract_dir}")
+            extract_dir.mkdir(exist_ok=True)
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_dir)
+            log(INFO, f"Extracted zip to: {extract_dir}")
+        else:
+            log(INFO, f"Using existing extracted files in: {extract_dir}")
+        
+        # Find CSV files
+        texts_dir = extract_dir / "texts"
+        if not texts_dir.exists():
+            # Try to find texts directory in extracted files
+            for root, dirs, files in os.walk(extract_dir):
+                if "texts" in dirs:
+                    texts_dir = Path(root) / "texts"
+                    break
+        
+        train_csv = texts_dir / "train_titles.csv"
+        test_csv = texts_dir / "test_titles.csv"
+        
+        result = {}
+        
+        # Load train CSV
+        if train_csv.exists():
+            log(INFO, f"Loading train CSV from: {train_csv}")
+            train_df = pd.read_csv(train_csv)
+            # Find text column (usually 'title' or second column)
+            text_col = None
+            for col in train_df.columns:
+                if 'title' in col.lower() or 'text' in col.lower():
+                    text_col = col
+                    break
+            if text_col is None and len(train_df.columns) > 1:
+                text_col = train_df.columns[1]  # Assume second column is text
+            elif text_col is None:
+                text_col = train_df.columns[0]  # Fallback to first column
+            
+            result["train"] = [str(row[text_col]).strip() for _, row in train_df.iterrows()]
+            log(INFO, f"Loaded {len(result['train'])} train text entries")
+        else:
+            log(INFO, f"Train CSV not found at: {train_csv}")
+            result["train"] = None
+        
+        # Load test CSV
+        if test_csv.exists():
+            log(INFO, f"Loading test CSV from: {test_csv}")
+            test_df = pd.read_csv(test_csv)
+            # Find text column
+            text_col = None
+            for col in test_df.columns:
+                if 'title' in col.lower() or 'text' in col.lower():
+                    text_col = col
+                    break
+            if text_col is None and len(test_df.columns) > 1:
+                text_col = test_df.columns[1]
+            elif text_col is None:
+                text_col = test_df.columns[0]
+            
+            result["test"] = [str(row[text_col]).strip() for _, row in test_df.iterrows()]
+            log(INFO, f"Loaded {len(result['test'])} test text entries")
+        else:
+            log(INFO, f"Test CSV not found at: {test_csv}")
+            result["test"] = None
+        
+        return result if (result.get("train") or result.get("test")) else None
+        
+    except Exception as e:
+        log(INFO, f"Failed to load text from zip: {e}")
+        import traceback
+        log(INFO, f"Traceback: {traceback.format_exc()}")
+        return None
+
+
+def add_text_to_dataset(dataset, text_data, split: str = "train"):
+    """
+    Add text field to HuggingFace dataset.
+    
+    Args:
+        dataset: HuggingFace Dataset object
+        text_data: Dictionary or list from load_text_from_hf_hub
+        split: Dataset split name
+    
+    Returns:
+        Dataset with 'text' field added
+    """
+    if text_data is None:
+        # If no text data, add empty strings
+        def add_empty_text(example, idx):
+            return {"text": ""}
+        return dataset.map(add_empty_text, with_indices=True)
+    
+    text_type = text_data.get("type")
+    text_content = text_data.get("data")
+    
+    if text_type == "dict":
+        # Map by filename or index
+        def add_text_from_dict(example, idx):
+            # Try to get filename from example
+            filename = None
+            
+            # Check common filename fields
+            for key in ["filename", "file_name", "image_path", "path", "image"]:
+                if key in example:
+                    value = example[key]
+                    if isinstance(value, str):
+                        filename = value
+                        break
+                    elif hasattr(value, "filename"):
+                        filename = value.filename
+                        break
+                    elif isinstance(value, dict) and "path" in value:
+                        filename = value["path"]
+                        break
+            
+            text = ""
+            if filename:
+                # Try full filename, then just name, then path parts
+                filename_str = str(filename)
+                text = text_content.get(filename_str, "")
+                if not text:
+                    # Try with just the filename (without path)
+                    filename_name = Path(filename_str).name
+                    text = text_content.get(filename_name, "")
+                if not text:
+                    # Try with different path separators
+                    for sep in ['/', '\\']:
+                        if sep in filename_str:
+                            parts = filename_str.split(sep)
+                            if parts:
+                                text = text_content.get(parts[-1], "")
+                                if text:
+                                    break
+            
+            # If still no text found and we have a list-like dict, try index
+            if not text and idx < len(text_content):
+                # Convert dict to list if possible (assuming ordered dict)
+                text_list = list(text_content.values())
+                if idx < len(text_list):
+                    text = text_list[idx]
+            
+            return {"text": text if text else ""}
+        
+        return dataset.map(add_text_from_dict, with_indices=True)
+    
+    elif text_type == "list":
+        # Map by index
+        def add_text_from_list(example, idx):
+            if idx < len(text_content):
+                return {"text": text_content[idx]}
+            else:
+                return {"text": ""}
+        
+        return dataset.map(add_text_from_list, with_indices=True)
+    
+    else:
+        # Fallback: empty text
+        def add_empty_text(example, idx):
+            return {"text": ""}
+        return dataset.map(add_empty_text, with_indices=True)
+
+
 def get_dataset(config_sim):
     partitioner = get_partitioner(config_sim=config_sim)
     dataset_name = config_sim["common"]["dataset"]
+    
+    log(INFO, f"Dataset name: {dataset_name}")
+    
     if dataset_name not in dataset_info.keys():
         raise Exception(f"Dataset name should be among : {list(dataset_info.keys())}")
+    
+    # Load from HuggingFace Hub
+    log(INFO, f"Loading dataset from HuggingFace Hub: {dataset_name}")
+    fds = FederatedDataset(dataset=dataset_name, partitioners=partitioner)
+    
+    # get test column name
+    test_set = dataset_info[dataset_name]["test_set"]
+    if test_set is None:
+        # If no test set, use train split and create validation split
+        train_data = fds.load_split("train")
+        # Split train into train/val (80/20)
+        train_data = train_data.train_test_split(test_size=0.2, seed=config_sim["common"]["seed"])
+        centralized_testset = train_data["test"]
     else:
-        fds = FederatedDataset(dataset=dataset_name, partitioners=partitioner)
-        # get test column name
-        test_set = dataset_info[dataset_name]["test_set"]
-        if test_set is None:
-            # If no test set, use train split and create validation split
-            train_data = fds.load_split("train")
-            # Split train into train/val (80/20)
-            train_data = train_data.train_test_split(test_size=0.2, seed=config_sim["common"]["seed"])
-            centralized_testset = train_data["test"]
+        centralized_testset = fds.load_split(test_set)
+    
+    # For UPMC-Food101, download zip and load text from CSV
+    if dataset_name == "kkim0451/UPMC-Food101":
+        log(INFO, "Loading text data from zip file for UPMC-Food101")
+        
+        # Download zip and extract CSV files
+        text_data = load_text_from_zip(dataset_name)
+        
+        if text_data:
+            # Add text to test dataset
+            if text_data.get("test"):
+                def add_text_test(example, idx):
+                    if idx < len(text_data["test"]):
+                        return {"text": text_data["test"][idx]}
+                    return {"text": ""}
+                centralized_testset = centralized_testset.map(add_text_test, with_indices=True)
+                log(INFO, f"Added {len(text_data['test'])} text entries to test dataset")
+            else:
+                def add_empty_text(example, idx):
+                    return {"text": ""}
+                centralized_testset = centralized_testset.map(add_empty_text, with_indices=True)
+                log(INFO, "Added empty text field to test dataset")
+            
+            # Note: Cannot add text to train and recreate FederatedDataset(DatasetDict)
+            # because flwr_datasets.FederatedDataset only supports dataset: str; it
+            # calls datasets.load_dataset(path=...) and fails when path is DatasetDict.
+            # Train partitions stay image-only; only test set has text for evaluation.
+            if text_data.get("train"):
+                log(INFO, "Train text data loaded from zip but not merged: FederatedDataset requires dataset name (str). Train partitions remain image-only.")
+            else:
+                log(INFO, "No train text data found")
         else:
-            centralized_testset = fds.load_split(test_set)
+            log(INFO, "Failed to load text from zip, adding empty text fields")
+            def add_empty_text(example, idx):
+                return {"text": ""}
+            centralized_testset = centralized_testset.map(add_empty_text, with_indices=True)
 
-        # get class names for pFedMoAP
-        out_col = dataset_info[dataset_name]["output_column"]
-        feat = centralized_testset.features.get(out_col, None)
-        if feat is not None and hasattr(feat, "names") and feat.names:
-            classnames = list(feat.names)
-        else:
-            num_classes = dataset_info[dataset_name]["num_classes"]
-            classnames = [f"class{i}" for i in range(num_classes)]
+    # get class names for pFedMoAP
+    out_col = dataset_info[dataset_name]["output_column"]
+    feat = centralized_testset.features.get(out_col, None)
+    if feat is not None and hasattr(feat, "names") and feat.names:
+        classnames = list(feat.names)
+    else:
+        num_classes = dataset_info[dataset_name]["num_classes"]
+        classnames = [f"class{i}" for i in range(num_classes)]
 
-        return fds, centralized_testset, classnames
+    return fds, centralized_testset, classnames
     
 def extract_linear_layers(model, config):
     """Return a dict of {layer_name: layer_module} for all linear layers in the model.

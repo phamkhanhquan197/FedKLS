@@ -97,18 +97,19 @@ dataset_info = {  # Image datasets
 
     ########################################################################
     #Multimodal datasets
-    "pranavmr/MM-IMDb": {
-        "num_classes": 10,
-        "feature_key": ["image", "text"],
-        "output_column": "labels",
-        "test_set": None,  # only 'train' split is provided
-        "input_shape": {
-            "image": (3, 224, 224),
-            "text": (77,)
-        },  
-        "max_sequence_length": 77,  # CLIP model max_position_embeddings is 77
-        "multi_label": True, # each movice can have multiple genres
-    },
+    # NOTE: MM-IMDb removed due to multi-label incompatibility with Dirichlet partitioning
+    # "pranavmr/MM-IMDb": {
+    #     "num_classes": 10,
+    #     "feature_key": ["image", "text"],
+    #     "output_column": "labels",
+    #     "test_set": None,  # only 'train' split is provided
+    #     "input_shape": {
+    #         "image": (3, 224, 224),
+    #         "text": (77,)
+    #     },  
+    #     "max_sequence_length": 77,  # CLIP model max_position_embeddings is 77
+    #     "multi_label": True, # each movice can have multiple genres
+    # },
     
     "kkim0451/UPMC-Food101":
     {

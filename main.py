@@ -118,7 +118,7 @@ def main():
             if is_batch:
                 # Process batch: DataLoader may call this with batch
                 transformed = {}
-                if "image" in features:
+                if "image" in features and "image" in example:
                     # Process each image in batch, filtering out any non-PIL Image items
                     processed_images = []
                     for idx, img in enumerate(example["image"]):
@@ -130,7 +130,7 @@ def main():
                                 continue
                         processed_images.append(clip_img_transform(img))
                     transformed["image"] = torch.stack(processed_images)
-                if "text" in features:
+                if "text" in features and "text" in example:
                     text_encodings = tokenizer(
                         example["text"],
                         padding="max_length",
@@ -165,9 +165,9 @@ def main():
             else:
                 # Process single example
                 transformed = {}
-                if "image" in features:
+                if "image" in features and "image" in example:
                     transformed["image"] = clip_img_transform(example["image"])
-                if "text" in features:
+                if "text" in features and "text" in example:
                     text_encodings = tokenizer(
                         example["text"],
                         padding="max_length",
@@ -205,7 +205,7 @@ def main():
             if is_batch:
                 # Process batch: DataLoader may call this with batch
                 transformed = {}
-                if "image" in features:
+                if "image" in features and "image" in example:
                     # Process each image in batch, filtering out any non-PIL Image items
                     processed_images = []
                     for idx, img in enumerate(example["image"]):
@@ -217,7 +217,7 @@ def main():
                                 continue
                         processed_images.append(clip_img_transform(img))
                     transformed["image"] = torch.stack(processed_images)
-                if "text" in features:
+                if "text" in features and "text" in example:
                     text_encodings = tokenizer(
                         example["text"],
                         padding="max_length",
@@ -252,9 +252,9 @@ def main():
             else:
                 # Process single example
                 transformed = {}
-                if "image" in features:
+                if "image" in features and "image" in example:
                     transformed["image"] = clip_img_transform(example["image"])
-                if "text" in features:
+                if "text" in features and "text" in example:
                     text_encodings = tokenizer(
                         example["text"],
                         padding="max_length",

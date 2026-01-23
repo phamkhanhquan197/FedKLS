@@ -169,3 +169,9 @@ dataset/
 *.sh
 ./config.yaml
 config.yaml
+
+# Test scripts và config test — không commit
+test_multimodal.py
+test_training_incremental.py
+test_training_reset.py
+config_test_multimodal.yaml

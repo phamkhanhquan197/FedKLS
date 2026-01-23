@@ -5,8 +5,12 @@ import numpy as np
 import flwr as fl
 import torch
 from flwr.common import Metrics
+from flwr.common.logger import log
+from logging import INFO
 import torch.nn.functional as F
 from sklearn.metrics import f1_score
+from tqdm import tqdm
+from mak.utils.dataset_info import dataset_info
 
 
 # Testing if the dataset is text or image
@@ -19,6 +23,7 @@ def test(net, testloader, device: str, feature_key, dataset_name: str = None) ->
     """
     correct, loss = 0, 0.0
     total = 0
+    num_batches = 0
     all_labels = []
     all_preds = []
     
@@ -41,33 +46,55 @@ def test(net, testloader, device: str, feature_key, dataset_name: str = None) ->
             criterion = torch.nn.CrossEntropyLoss()
         
         with torch.no_grad():
-            for batch in testloader:
+            pbar = tqdm(testloader, desc="Evaluating", unit="batch", leave=True)
+            for batch in pbar:
                 pixel_values = batch["image"].to(device)
-                input_ids = batch["input_ids"].to(device)
-                attention_mask = batch["attention_mask"].to(device)
+                # Check if input_ids and attention_mask exist (text might be missing from some examples)
+                if "input_ids" in batch and "attention_mask" in batch:
+                    input_ids = batch["input_ids"].to(device)
+                    attention_mask = batch["attention_mask"].to(device)
+                    logits = net(pixel_values=pixel_values, input_ids=input_ids, attention_mask=attention_mask)
+                else:
+                    # If text is missing, use image-only forward pass (if model supports it)
+                    # Otherwise, create dummy tensors
+                    batch_size = pixel_values.size(0)
+                    # Create dummy input_ids and attention_mask with padding tokens
+                    # Assuming max_seq_length is 77 (CLIP standard) - adjust if needed
+                    max_seq_length = 77
+                    input_ids = torch.zeros((batch_size, max_seq_length), dtype=torch.long, device=device)
+                    attention_mask = torch.zeros((batch_size, max_seq_length), dtype=torch.long, device=device)
+                    logits = net(pixel_values=pixel_values, input_ids=input_ids, attention_mask=attention_mask)
                 labels = batch[output_column].to(device)
-                logits = net(pixel_values=pixel_values, input_ids=input_ids, attention_mask=attention_mask)
                 
                 if is_multi_label:
                     # Multi-label: use sigmoid and threshold
-                    loss += criterion(logits, labels.float()).item()
+                    batch_loss = criterion(logits, labels.float()).item()
+                    loss += batch_loss
                     probs = torch.sigmoid(logits)
                     predicted = (probs > 0.5).int()
                     # For multi-label, accuracy is computed differently (exact match or hamming)
                     # Using exact match for now
-                    correct += (predicted == labels.int()).all(dim=1).sum().item()
+                    batch_correct = (predicted == labels.int()).all(dim=1).sum().item()
+                    correct += batch_correct
                 else:
                     # Single-label: use softmax and argmax
-                    loss += criterion(logits, labels).item()
+                    batch_loss = criterion(logits, labels).item()
+                    loss += batch_loss
                     probs = F.softmax(logits, dim=1)
                     predicted = torch.argmax(logits, dim=1)
-                    correct += (predicted == labels).sum().item()
+                    batch_correct = (predicted == labels).sum().item()
+                    correct += batch_correct
                 
                 total += labels.size(0)
+                num_batches += 1
                 # Collect for F1 score
                 all_labels.extend(labels.cpu().numpy())
                 all_preds.extend(predicted.cpu().numpy())
-                all_probs.extend(probs.cpu().numpy())
+                
+                # Update progress bar with current metrics
+                current_acc = correct / total if total > 0 else 0.0
+                current_loss = loss / num_batches if num_batches > 0 else 0.0
+                pbar.set_postfix({"loss": f"{current_loss:.4f}", "acc": f"{current_acc:.4f}", "samples": total})
         
         accuracy = correct / total if total > 0 else 0.0
         # For multi-label, use appropriate F1 metric
@@ -81,19 +108,28 @@ def test(net, testloader, device: str, feature_key, dataset_name: str = None) ->
     elif feature_key in ["text", "content", "sentence"]:
         #for text datasets, we need to use a different loss function
         with torch.no_grad():
-            for batch in testloader:
+            pbar = tqdm(testloader, desc="Evaluating", unit="batch", leave=True)
+            for batch in pbar:
                 input_ids = batch["input_ids"].to(device)
                 attention_mask = batch["attention_mask"].to(device)
                 labels = batch["labels"].to(device)
                 outputs = net(input_ids, attention_mask=attention_mask, labels=labels)
-                loss += outputs.loss.item()
+                batch_loss = outputs.loss.item()
+                loss += batch_loss
                 logits = outputs.logits
                 predicted = torch.argmax(logits, dim=1)
-                correct += (predicted == labels).sum().item()
+                batch_correct = (predicted == labels).sum().item()
+                correct += batch_correct
                 total += labels.size(0)
+                num_batches += 1
                 #Collect for F1 score
                 all_labels.extend(labels.cpu().numpy())
                 all_preds.extend(predicted.cpu().numpy())
+                
+                # Update progress bar with current metrics
+                current_acc = correct / total if total > 0 else 0.0
+                current_loss = loss / num_batches if num_batches > 0 else 0.0
+                pbar.set_postfix({"loss": f"{current_loss:.4f}", "acc": f"{current_acc:.4f}", "samples": total})
         accuracy = correct / total
         f1 = f1_score(all_labels, all_preds, average='weighted')
 
@@ -102,17 +138,27 @@ def test(net, testloader, device: str, feature_key, dataset_name: str = None) ->
     else:
         criterion = torch.nn.CrossEntropyLoss()
         with torch.no_grad():
-            for data in testloader:
+            pbar = tqdm(testloader, desc="Evaluating", unit="batch", leave=True)
+            for data in pbar:
                 keys = list(data.keys())
                 x_label, y_label = keys[0], keys[1]
                 images, labels = data[x_label].to(device), data[y_label].to(device)
                 outputs = net(images)
-                loss += criterion(outputs, labels).item()
+                batch_loss = criterion(outputs, labels).item()
+                loss += batch_loss
                 _, predicted = torch.max(outputs.data, 1)
-                correct += (predicted == labels).sum().item()
+                batch_correct = (predicted == labels).sum().item()
+                correct += batch_correct
+                total += labels.size(0)
+                num_batches += 1
                 #Collect for F1 score
                 all_labels.extend(labels.cpu().numpy())
                 all_preds.extend(predicted.cpu().numpy())
+                
+                # Update progress bar with current metrics
+                current_acc = correct / total if total > 0 else 0.0
+                current_loss = loss / num_batches if num_batches > 0 else 0.0
+                pbar.set_postfix({"loss": f"{current_loss:.4f}", "acc": f"{current_acc:.4f}", "samples": total})
         accuracy = correct / len(testloader.dataset)
         f1 = f1_score(all_labels, all_preds, average='weighted')
 
