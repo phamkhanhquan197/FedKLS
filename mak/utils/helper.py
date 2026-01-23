@@ -1013,42 +1013,6 @@ def get_server(strategy, client_manager, out_file_path, target_acc, num_train_th
             num_train_thread=num_train_thread,
             num_test_thread=num_test_thread,
         )
-    elif isinstance(strategy, PFedMoAPStrategy):
-        return PFedMoAPServer(
-            strategy=strategy,
-            client_manager=client_manager,
-            out_file_path=out_file_path,
-            target_acc=target_acc,
-            num_train_thread=num_train_thread,
-            num_test_thread=num_test_thread,
-        )
-    elif isinstance(strategy, FedPOEStrategy):
-        return FedPOEServer(
-            strategy=strategy,
-            client_manager=client_manager,
-            out_file_path=out_file_path,
-            target_acc=target_acc,
-            num_train_thread=num_train_thread,
-            num_test_thread=num_test_thread,
-        )
-    elif isinstance(strategy, FedPOERegressionTextStrategy):
-        return FedPOERegressionTextServer(
-            strategy=strategy,
-            client_manager=client_manager,
-            out_file_path=out_file_path,
-            target_acc=target_acc,
-            num_train_thread=num_train_thread,
-            num_test_thread=num_test_thread,
-        )
-    elif isinstance(strategy, PFedMoAPStrategy):
-        return PFedMoAPServer(
-            strategy=strategy,
-            client_manager=client_manager,
-            out_file_path=out_file_path,
-            target_acc=target_acc,
-            num_train_thread=num_train_thread,
-            num_test_thread=num_test_thread,
-        )
     elif isinstance(strategy, FedSALoRAStrategy):
         return FedSALoRAServer(
             strategy=strategy,
@@ -1381,3 +1345,4 @@ def get_size_weights(federated_dataset, num_clients):
         sample_size.append(len(federated_dataset.load_partition(i)))
     size_weights = [i / sum(sample_size) for i in sample_size]
     return size_weights
+
