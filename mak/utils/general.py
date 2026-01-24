@@ -4,6 +4,8 @@ from typing import List, Tuple
 import numpy as np
 import flwr as fl
 import torch
+import os
+import sys
 from flwr.common import Metrics
 import torch.nn.functional as F
 from sklearn.metrics import f1_score
@@ -11,12 +13,13 @@ from mak.utils.dataset_info import dataset_info
 from tqdm import tqdm
 
 # Testing if the dataset is text or image
-def test(net, testloader, device: str, feature_key: str, dataset_name: str = None) -> Tuple[float, float, float]:
+def test(net, testloader, device: str, feature_key: str, dataset_name: str = None, desc: str = "Evaluating") -> Tuple[float, float, float]:
     """Validate the network on the entire test set.
     
     Args:
         feature_key: Can be str (for text/image-only) or list (for multimodal)
         dataset_name: Dataset name to determine multi-label vs single-label
+        desc: Description for progress bar (default: "Evaluating")
     """
 
     correct = 0
@@ -33,15 +36,41 @@ def test(net, testloader, device: str, feature_key: str, dataset_name: str = Non
     # Determine if multi-label based on dataset_info
     output_column = dataset_info[dataset_name].get("output_column", "label")
 
+    # Avoid noisy progress bars in Ray workers / non-TTY outputs (they print one line per update)
+    in_ray_worker = os.environ.get("RAY_WORKER_ID") is not None
+    is_tty = False
+    try:
+        is_tty = sys.stdout.isatty()
+    except Exception:
+        is_tty = False
+    disable_pbar = in_ray_worker or (not is_tty)
+
     # =========================
     # Multimodal (image + text)
     # =========================
     if isinstance(feature_key, list) and "image" in feature_key and "text" in feature_key:
         with torch.no_grad():
-            pbar = tqdm(testloader, desc="Evaluating", unit="batch", leave=True)
+            pbar = tqdm(
+                testloader,
+                desc=desc,
+                unit="batch",
+                leave=False,
+                mininterval=1.0,
+                disable=disable_pbar,
+            )
             for batch in pbar:
-                pixel_values = batch["image"].to(device)
-                labels = batch[output_column].to(device)
+                # CLIPCollator outputs "pixel_values", not "image"
+                if "pixel_values" in batch:
+                    pixel_values = batch["pixel_values"].to(device)
+                else:
+                    # Fallback for old transform-based approach
+                    pixel_values = batch["image"].to(device)
+                
+                # CLIPCollator always outputs "labels"
+                if "labels" in batch:
+                    labels = batch["labels"].to(device)
+                else:
+                    labels = batch[output_column].to(device)
 
                 if "input_ids" in batch and "attention_mask" in batch:
                     input_ids = batch["input_ids"].to(device)
@@ -65,8 +94,16 @@ def test(net, testloader, device: str, feature_key: str, dataset_name: str = Non
                 batch_loss = criterion(logits, labels)
                 loss += batch_loss.item()
 
-                predicted = torch.argmax(logits, dim=1)
-                correct += (predicted == labels).sum().item()
+                # Handle multi-label vs single-label
+                is_multi_label = dataset_info.get(dataset_name, {}).get("multi_label", False)
+                if is_multi_label:
+                    # Multi-label: threshold-based prediction
+                    predicted = (torch.sigmoid(logits) > 0.5).float()
+                    correct += (predicted == labels).all(dim=1).sum().item()
+                else:
+                    # Single-label: argmax
+                    predicted = torch.argmax(logits, dim=1)
+                    correct += (predicted == labels).sum().item()
 
                 total += labels.size(0)
                 num_batches += 1
@@ -74,18 +111,29 @@ def test(net, testloader, device: str, feature_key: str, dataset_name: str = Non
                 all_labels.extend(labels.cpu().numpy())
                 all_preds.extend(predicted.cpu().numpy())
 
-                pbar.set_postfix({
-                    "loss": f"{loss / num_batches:.4f}",
-                    "acc": f"{correct / total:.4f}",
-                    "samples": total,
-                })
+                if (not disable_pbar) and (num_batches % 10 == 0):
+                    pbar.set_postfix(
+                        {
+                            "loss": f"{loss / num_batches:.4f}",
+                            "acc": f"{correct / total:.4f}",
+                            "samples": total,
+                        }
+                    )
 
     # =========================
     # Text-only
     # =========================
     elif feature_key in ["text", "content", "sentence"]:
         with torch.no_grad():
-            for batch in testloader:
+            pbar = tqdm(
+                testloader,
+                desc=desc,
+                unit="batch",
+                leave=False,
+                mininterval=1.0,
+                disable=disable_pbar,
+            )
+            for batch in pbar:
                 input_ids = batch["input_ids"].to(device)
                 attention_mask = batch["attention_mask"].to(device)
                 labels = batch["labels"].to(device)
@@ -102,16 +150,34 @@ def test(net, testloader, device: str, feature_key: str, dataset_name: str = Non
 
                 correct += (predicted == labels).sum().item()
                 total += labels.size(0)
+                num_batches += 1
 
                 all_labels.extend(labels.cpu().numpy())
                 all_preds.extend(predicted.cpu().numpy())
+                
+                if (not disable_pbar) and (num_batches % 10 == 0):
+                    pbar.set_postfix(
+                        {
+                            "loss": f"{loss / num_batches:.4f}",
+                            "acc": f"{correct / total:.4f}",
+                            "samples": total,
+                        }
+                    )
 
     # =========================
     # Image-only
     # =========================
     else:
         with torch.no_grad():
-            for data in testloader:
+            pbar = tqdm(
+                testloader,
+                desc=desc,
+                unit="batch",
+                leave=False,
+                mininterval=1.0,
+                disable=disable_pbar,
+            )
+            for data in pbar:
                 keys = list(data.keys())
                 x_label, y_label = keys[0], keys[1]
 
@@ -125,8 +191,18 @@ def test(net, testloader, device: str, feature_key: str, dataset_name: str = Non
                 correct += (predicted == labels).sum().item()
 
                 total += labels.size(0)
+                num_batches += 1
                 all_labels.extend(labels.cpu().numpy())
                 all_preds.extend(predicted.cpu().numpy())
+                
+                if (not disable_pbar) and (num_batches % 10 == 0):
+                    pbar.set_postfix(
+                        {
+                            "loss": f"{loss / num_batches:.4f}",
+                            "acc": f"{correct / total:.4f}",
+                            "samples": total,
+                        }
+                    )
 
     accuracy = correct / total if total > 0 else 0.0
     f1 = f1_score(all_labels, all_preds, average="weighted")
@@ -187,6 +263,29 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays],
             [p.__setattr__("requires_grad", False) for name, p in model.named_parameters() if name.endswith(".A")]
         return
     else:
+        # ------------------------------------------------------------
+        # Generic adapter-based partial update (SVDAdapter/ConvAdapter)
+        # Works for models like CustomCLIP where params are ".A/.B[/bias]"
+        # ------------------------------------------------------------
+        a_keys = [k for k in model_state.keys() if k.endswith(".A")]
+        b_keys = [k for k in model_state.keys() if k.endswith(".B")]
+        if a_keys or b_keys:
+            bases = {k[:-2] for k in (a_keys + b_keys)}  # strip ".A"/".B"
+            bias_keys = [f"{base}.bias" for base in bases if f"{base}.bias" in model_state] if bias else []
+            target_keys = sorted(set(a_keys + b_keys + bias_keys))
+            if len(params) != len(target_keys):
+                raise ValueError(
+                    f"Adapter set_params expects {len(target_keys)} params, got {len(params)}"
+                )
+
+            dev = torch.device(device) if isinstance(device, str) else device
+            update = OrderedDict()
+            for key, array in zip(target_keys, params):
+                update[key] = torch.from_numpy(np.asarray(array)).to(device=dev)
+            model_state.update(update)
+            model.load_state_dict(model_state, strict=False)
+            return
+
         if method == "ffa_lora": #Send and receive only LoRA B adapters
             if any(k.startswith("distilbert.") for k in model_state.keys()):
                 if bias:

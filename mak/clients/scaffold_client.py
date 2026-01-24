@@ -16,10 +16,10 @@ class ScaffoldClient(BaseClient):
     """
 
     def __init__(
-        self, client_id, model, trainset, valset, config_sim, device, save_dir, dataset=None, apply_transforms=None, data_scheduler=None, bias=None
+        self, client_id, model, trainset, valset, config_sim, device, save_dir, dataset=None, apply_transforms=None, data_scheduler=None, bias=None, **kwargs
     ):
         super().__init__(
-            client_id, model, trainset, valset, config_sim, device, save_dir, dataset=dataset, apply_transforms=apply_transforms, data_scheduler=data_scheduler, bias=bias
+            client_id, model, trainset, valset, config_sim, device, save_dir, dataset=dataset, apply_transforms=apply_transforms, data_scheduler=data_scheduler, bias=bias, **kwargs
         )
         # initialize client control variate with 0 and shape of the network parameters
         self.client_cv = []

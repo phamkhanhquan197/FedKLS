@@ -21,7 +21,7 @@ from flwr_datasets import FederatedDataset
 from flwr_datasets.partitioner import DirichletPartitioner, IidPartitioner
 from torch.utils.data import DataLoader
 from sklearn.model_selection import train_test_split
-from PIL import Image
+from PIL import Image, ImageOps
 from pathlib import Path
 
 import mak
@@ -64,6 +64,15 @@ def get_target_keys(model, bias=True) -> List[str]:
     This function is intentionally model-agnostic and must remain deterministic.
     """
     model_state = model.state_dict()
+
+    # Generic adapter-based models (incl. CustomCLIP + SVDAdapter)
+    # If adapters exist, prefer selecting adapter params directly (robust across architectures).
+    a_keys = [k for k in model_state.keys() if k.endswith(".A")]
+    b_keys = [k for k in model_state.keys() if k.endswith(".B")]
+    if a_keys or b_keys:
+        bases = {k[:-2] for k in (a_keys + b_keys)}  # strip ".A"/".B"
+        bias_keys = [f"{base}.bias" for base in bases if f"{base}.bias" in model_state] if bias else []
+        return sorted(set(a_keys + b_keys + bias_keys))
 
     if any(key.startswith("distilbert.") for key in model_state.keys()):
         if bias:
@@ -396,7 +405,119 @@ def load_upmc_food101_local(dataset_path: str):
     return train_dataset, test_dataset
 
 
-def load_text_from_zip(repo_id: str):
+def _find_upmc_root(extract_dir: Path) -> Path | None:
+    """Find extracted UPMC-Food-101 root directory under extract_dir."""
+    candidate = extract_dir / "UPMC-Food-101"
+    if candidate.exists():
+        return candidate
+    # Fallback: search for a directory containing train.csv and images/
+    for root, dirs, files in os.walk(extract_dir):
+        root_p = Path(root)
+        if (root_p / "train.csv").exists() and (root_p / "images").exists():
+            return root_p
+    return None
+
+
+def _ensure_upmc_images_resized(
+    upmc_root: Path,
+    resize_to: int,
+    jpeg_quality: int = 85,
+) -> Path | None:
+    """Create resized copy of UPMC images once, keep originals intact.
+
+    Returns the resized images root (e.g., upmc_root/images_224) if created/existed,
+    otherwise None.
+    """
+    if resize_to <= 0:
+        return None
+
+    src_images = upmc_root / "images"
+    if not src_images.exists():
+        return None
+
+    dst_images = upmc_root / f"images_{resize_to}"
+    done_flag = dst_images / ".done"
+    if done_flag.exists():
+        return dst_images
+
+    # Create resized tree
+    dst_images.mkdir(parents=True, exist_ok=True)
+    # Build worklist first (so we can show an accurate progress bar)
+    to_process: List[tuple[Path, Path]] = []
+    seen = 0
+    for split in ("train", "test"):
+        split_dir = src_images / split
+        if not split_dir.exists():
+            continue
+        for root, _, files in os.walk(split_dir):
+            root_p = Path(root)
+            rel = root_p.relative_to(src_images)
+            out_dir = dst_images / rel
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for fn in files:
+                if not fn.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+                    continue
+                seen += 1
+                src_path = root_p / fn
+                dst_path = out_dir / Path(fn).with_suffix(".jpg").name
+                if dst_path.exists():
+                    continue
+                to_process.append((src_path, dst_path))
+
+    total = len(to_process)
+    converted = 0
+    failed = 0
+    if total == 0:
+        log(INFO, f"Resized images already exist at: {dst_images} (seen={seen})")
+    else:
+        from tqdm import tqdm
+
+        log(INFO, f"Resizing {total} images to {resize_to}x{resize_to} (seen={seen}) ...")
+        pbar = tqdm(
+            to_process,
+            desc=f"Resizing images_{resize_to}",
+            unit="img",
+            leave=True,
+            mininterval=0.5,
+        )
+        converted = 0
+        for src_path, dst_path in pbar:
+            try:
+                with Image.open(src_path) as im:
+                    im = im.convert("RGB")
+                    # Center-crop square then resize (cheap + deterministic)
+                    im = ImageOps.fit(
+                        im,
+                        (resize_to, resize_to),
+                        method=Image.BICUBIC,
+                    )
+                    im.save(
+                        dst_path,
+                        format="JPEG",
+                        quality=int(jpeg_quality),
+                        optimize=True,
+                    )
+                converted += 1
+            except Exception as e:
+                log(INFO, f"Failed to resize {src_path}: {e}")
+                failed += 1
+            # Keep postfix lightweight (avoid slowing down)
+            if converted and converted % 500 == 0:
+                pbar.set_postfix_str(f"ok={converted}/{total}")
+
+    # Mark complete
+    try:
+        done_flag.write_text(
+            f"resize_to={resize_to}\nquality={jpeg_quality}\nseen={seen}\nconverted={converted}\nfailed={failed}\n",
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+    log(INFO, f"Resized images ready at: {dst_images} (to_process={total}, seen={seen})")
+    return dst_images
+
+
+def load_text_from_zip(repo_id: str, resize_images: bool = False, resize_to: int = 96):
     """
     Download zip file from HuggingFace Hub to project data directory, extract, and load text CSV files.
     
@@ -420,8 +541,21 @@ def load_text_from_zip(repo_id: str):
         extract_dir = dataset_dir / "extracted"
         zip_path = dataset_dir / "UPMC-Food-101.zip"
         
-        # Download zip file if not exists
-        if not zip_path.exists():
+        # Check if zip file exists and is valid
+        zip_exists_and_valid = False
+        if zip_path.exists():
+            try:
+                # Try to open zip file to verify it's valid
+                with zipfile.ZipFile(zip_path, 'r') as test_zip:
+                    test_zip.testzip()  # Test zip file integrity
+                zip_exists_and_valid = True
+                log(INFO, f"Using existing valid zip file: {zip_path}")
+            except (zipfile.BadZipFile, zipfile.LargeZipFile, Exception) as e:
+                log(INFO, f"Existing zip file is invalid or corrupted: {e}. Will re-download.")
+                zip_path.unlink()  # Remove corrupted zip file
+        
+        # Download zip file if not exists or invalid
+        if not zip_exists_and_valid:
             log(INFO, f"Downloading zip file from HuggingFace Hub: {repo_id}")
             downloaded_path = hf_hub_download(
                 repo_id=repo_id,
@@ -431,32 +565,70 @@ def load_text_from_zip(repo_id: str):
             # Copy to project data directory
             shutil.copy2(downloaded_path, zip_path)
             log(INFO, f"Downloaded zip to: {zip_path}")
-        else:
-            log(INFO, f"Using existing zip file: {zip_path}")
         
-        # Extract zip if not already extracted
-        if not extract_dir.exists() or not (extract_dir / "texts").exists():
-            log(INFO, f"Extracting zip to: {extract_dir}")
-            extract_dir.mkdir(exist_ok=True)
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(extract_dir)
-            log(INFO, f"Extracted zip to: {extract_dir}")
-        else:
-            log(INFO, f"Using existing extracted files in: {extract_dir}")
-        
-        # Find CSV files
+        # Check if extraction is needed
+        # Verify extracted files exist and are complete
         texts_dir = extract_dir / "texts"
+        train_csv = texts_dir / "train_titles.csv"
+        test_csv = texts_dir / "test_titles.csv"
+        
+        # Check if texts directory exists, if not try to find it
         if not texts_dir.exists():
-            # Try to find texts directory in extracted files
             for root, dirs, files in os.walk(extract_dir):
                 if "texts" in dirs:
                     texts_dir = Path(root) / "texts"
+                    train_csv = texts_dir / "train_titles.csv"
+                    test_csv = texts_dir / "test_titles.csv"
                     break
         
+        # Check if both CSV files exist
+        extraction_needed = False
+        if not extract_dir.exists():
+            extraction_needed = True
+            log(INFO, f"Extract directory does not exist: {extract_dir}")
+        elif not texts_dir.exists():
+            extraction_needed = True
+            log(INFO, f"Texts directory does not exist: {texts_dir}")
+        elif not train_csv.exists() or not test_csv.exists():
+            extraction_needed = True
+            log(INFO, f"CSV files incomplete. Train CSV exists: {train_csv.exists()}, Test CSV exists: {test_csv.exists()}")
+        
+        # Extract zip if needed
+        if extraction_needed:
+            log(INFO, f"Extracting zip to: {extract_dir}")
+            extract_dir.mkdir(exist_ok=True)
+            # Remove existing extraction if incomplete
+            if extract_dir.exists() and (not train_csv.exists() or not test_csv.exists()):
+                log(INFO, f"Removing incomplete extraction directory: {extract_dir}")
+                shutil.rmtree(extract_dir)
+                extract_dir.mkdir(exist_ok=True)
+            
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_dir)
+            log(INFO, f"Extracted zip to: {extract_dir}")
+            
+            # Re-find texts directory after extraction
+            texts_dir = extract_dir / "texts"
+            if not texts_dir.exists():
+                for root, dirs, files in os.walk(extract_dir):
+                    if "texts" in dirs:
+                        texts_dir = Path(root) / "texts"
+                        break
+        else:
+            log(INFO, f"Using existing extracted files in: {extract_dir}")
+        
+        # CSV files should already be located above, but ensure paths are correct
         train_csv = texts_dir / "train_titles.csv"
         test_csv = texts_dir / "test_titles.csv"
         
         result = {}
+
+        # If extracted dataset root exists, optionally create resized images once
+        upmc_root = _find_upmc_root(extract_dir)
+        if upmc_root is not None:
+            result["upmc_root"] = str(upmc_root)
+            if resize_images:
+                _ensure_upmc_images_resized(upmc_root=upmc_root, resize_to=int(resize_to))
         
         # Load train CSV
         if train_csv.exists():
@@ -597,13 +769,171 @@ def add_text_to_dataset(dataset, text_data, split: str = "train"):
         return dataset.map(add_empty_text, with_indices=True)
 
 
+class LocalFederatedDataset:
+    """Minimal FederatedDataset-like wrapper for local datasets (train partitions + splits)."""
+
+    def __init__(self, train_dataset: Dataset, test_dataset: Dataset, partitions: List[List[int]]):
+        self._train = train_dataset
+        self._test = test_dataset
+        self._partitions = partitions
+
+    def load_partition(self, partition_id: int) -> Dataset:
+        return self._train.select(self._partitions[int(partition_id)])
+
+    def load_split(self, split: str) -> Dataset:
+        if split in ("test", "validation", "val"):
+            return self._test
+        if split == "train":
+            return self._train
+        raise ValueError(f"Unknown split: {split}")
+
+
+def _iid_partitions(n: int, num_clients: int, seed: int) -> List[List[int]]:
+    rng = np.random.RandomState(seed)
+    idxs = np.arange(n)
+    rng.shuffle(idxs)
+    chunks = np.array_split(idxs, num_clients)
+    return [c.astype(int).tolist() for c in chunks]
+
+
+def _dirichlet_partitions(labels: List[int], num_clients: int, alpha: float, seed: int) -> List[List[int]]:
+    rng = np.random.RandomState(seed)
+    y = np.asarray(labels, dtype=np.int64)
+    client_idxs: List[List[int]] = [[] for _ in range(num_clients)]
+
+    classes = np.unique(y)
+    for c in classes:
+        cls_idxs = np.where(y == c)[0]
+        if cls_idxs.size == 0:
+            continue
+        rng.shuffle(cls_idxs)
+        props = rng.dirichlet(alpha * np.ones(num_clients))
+        counts = (props * cls_idxs.size).astype(int)
+        # Fix rounding to match total
+        while counts.sum() < cls_idxs.size:
+            counts[rng.randint(num_clients)] += 1
+        while counts.sum() > cls_idxs.size:
+            j = rng.randint(num_clients)
+            if counts[j] > 0:
+                counts[j] -= 1
+        splits = np.split(cls_idxs, np.cumsum(counts)[:-1])
+        for cid, part in enumerate(splits):
+            if part.size:
+                client_idxs[cid].extend(part.astype(int).tolist())
+
+    # Ensure no empty partitions (steal 1 sample from the largest partition)
+    for cid in range(num_clients):
+        if client_idxs[cid]:
+            continue
+        largest = max(range(num_clients), key=lambda k: len(client_idxs[k]))
+        if client_idxs[largest]:
+            client_idxs[cid].append(client_idxs[largest].pop())
+
+    for cid in range(num_clients):
+        rng.shuffle(client_idxs[cid])
+        client_idxs[cid] = sorted(client_idxs[cid])
+
+    return client_idxs
+
+
 def get_dataset(config_sim):
     partitioner = get_partitioner(config_sim=config_sim)
     dataset_name = config_sim["common"]["dataset"]
     if dataset_name not in dataset_info.keys():
         raise Exception(f"Dataset name should be among : {list(dataset_info.keys())}")
-    
-    # Load from HuggingFace Hub
+
+    # --------------------------------------------
+    # UPMC-Food101: prefer local extracted dataset
+    # --------------------------------------------
+    if dataset_name == "kkim0451/UPMC-Food101":
+        resize_to = int(config_sim.get("common", {}).get("upmc_resize_to", 96))
+        _ = load_text_from_zip(dataset_name, resize_images=True, resize_to=resize_to)
+
+        project_root = Path(__file__).parent.parent.parent
+        upmc_root = (
+            project_root
+            / "data"
+            / dataset_name.replace("/", "_")
+            / "extracted"
+            / "UPMC-Food-101"
+        )
+
+        train_csv = upmc_root / "train.csv"
+        test_csv = upmc_root / "test.csv"
+        images_dir = upmc_root / f"images_{resize_to}"
+        if not images_dir.exists():
+            images_dir = upmc_root / "images"
+
+        if train_csv.exists() and test_csv.exists() and images_dir.exists():
+            log(INFO, f"Loading UPMC-Food101 from local files: {upmc_root}")
+            train_df = pd.read_csv(train_csv)
+            test_df = pd.read_csv(test_csv)
+
+            # Build image paths (keep as plain strings, decode lazily via HFImage)
+            tr_paths = [
+                str(images_dir / "train" / str(ann) / str(img_id))
+                for ann, img_id in zip(train_df["annotation"], train_df["id"])
+            ]
+            te_paths = [
+                str(images_dir / "test" / str(ann) / str(img_id))
+                for ann, img_id in zip(test_df["annotation"], test_df["id"])
+            ]
+
+            # Create datasets (store paths; HFImage will decode lazily)
+            features = Features(
+                {"image": HFImage(), "text": Value("string"), "label": Value("int64")}
+            )
+            train_ds = Dataset.from_dict(
+                {
+                    "image": tr_paths,
+                    "text": train_df["text"].fillna("").astype(str).tolist(),
+                    "label": train_df["label"].astype(int).tolist(),
+                },
+                features=features,
+            )
+            test_ds = Dataset.from_dict(
+                {
+                    "image": te_paths,
+                    "text": test_df["text"].fillna("").astype(str).tolist(),
+                    "label": test_df["label"].astype(int).tolist(),
+                },
+                features=features,
+            )
+
+            # Partition train set for federated simulation
+            num_clients = int(config_sim["server"]["num_clients"])
+            if config_sim["common"]["data_type"] == "dirichlet_niid":
+                alpha = float(config_sim["common"]["dirichlet_alpha"])
+                parts = _dirichlet_partitions(
+                    labels=train_ds[dataset_info[dataset_name]["output_column"]],
+                    num_clients=num_clients,
+                    alpha=alpha,
+                    seed=int(config_sim["common"]["seed"]),
+                )
+            else:
+                parts = _iid_partitions(
+                    n=len(train_ds),
+                    num_clients=num_clients,
+                    seed=int(config_sim["common"]["seed"]),
+                )
+            fds = LocalFederatedDataset(train_dataset=train_ds, test_dataset=test_ds, partitions=parts)
+
+            # Centralized test set (keep existing truncation behavior)
+            centralized_testset = test_ds
+            max_test_samples = 200
+            n = min(max_test_samples, len(centralized_testset))
+            centralized_testset = centralized_testset.select(
+                range(len(centralized_testset) - n, len(centralized_testset))
+            )
+            log(INFO, f"UPMC-Food101 test set truncated to {n} samples")
+
+            num_classes = dataset_info[dataset_name]["num_classes"]
+            classnames = [f"class{i}" for i in range(num_classes)]
+            return fds, centralized_testset, classnames
+
+        log(INFO, f"Local UPMC-Food101 not ready at {upmc_root}, falling back to HuggingFace Hub")
+
+    # Load from HuggingFace Hub (default)
     log(INFO, f"Loading dataset from HuggingFace Hub: {dataset_name}")
     fds = FederatedDataset(dataset=dataset_name, partitioners=partitioner)
     # get test column name
@@ -1203,6 +1533,7 @@ def get_evaluate_fn(
     metrics_file,
     apply_transforms_test,
     model,
+    clip_collator=None,  # NEW: Use shared CLIPCollator from main.py
 ):
     """Return an evaluation function for centralized evaluation."""
     dataset_name = config_sim["common"]["dataset"]
@@ -1240,16 +1571,76 @@ def get_evaluate_fn(
 
         model.to(device)
 
-        # Apply transform to dataset
-        testset = centralized_testset.with_transform(apply_transforms_test)
+        # Handle multimodal datasets (no transform, use CLIPCollator)
+        is_multimodal = dataset_name in ['pranavmr/MM-IMDb', 'kkim0451/UPMC-Food101']
+        # NOTE: don't assign to `clip_collator` in this scope (would shadow outer var)
+        local_clip_collator = clip_collator
+        
+        # Use shared clip_collator if provided, otherwise create new one (fallback)
+        if local_clip_collator is None and is_multimodal and apply_transforms_test is None:
+            # Fallback: Create CLIPCollator if not provided (should not happen in normal flow)
+            from mak.utils.pytorch_transformations import CLIPCollator
+            from transformers import CLIPProcessor
+            
+            model_name = config_sim["common"]["model"]
+            clip_processor = CLIPProcessor.from_pretrained(model_name)
+            output_column = dataset_info[dataset_name]["output_column"]
+            is_multi_label = dataset_info[dataset_name].get("multi_label", False)
+            num_classes = dataset_info[dataset_name]["num_classes"]
+            
+            # Get classnames if available
+            label_to_idx = None
+            try:
+                if hasattr(centralized_testset, 'features') and 'label' in centralized_testset.features:
+                    classnames = centralized_testset.features['label'].names
+                    if classnames:
+                        label_to_idx = {name: idx for idx, name in enumerate(classnames)}
+            except:
+                pass
+            
+            local_clip_collator = CLIPCollator(
+                processor=clip_processor,
+                label_key=output_column,
+                multi_label=is_multi_label,
+                num_classes=num_classes,
+                label_to_idx=label_to_idx
+            )
+        
+        if local_clip_collator is not None:
+            # Keep dataset raw (no transform) for multimodal
+            testset = centralized_testset
+        else:
+            # Apply transform to dataset for non-multimodal
+            if apply_transforms_test is not None:
+                testset = centralized_testset.with_transform(apply_transforms_test)
+            else:
+                testset = centralized_testset
 
         # Disable tqdm for dataset preprocessing
         disable_progress_bar()
 
-        testloader = DataLoader(testset, batch_size=config_sim["client"]["test_batch_size"])
+        # Create DataLoader with collator for multimodal, without for others
+        if local_clip_collator is not None:
+            testloader = DataLoader(
+                testset,
+                batch_size=config_sim["client"]["test_batch_size"],
+                shuffle=False,
+                num_workers=min(4, os.cpu_count() or 1),
+                pin_memory=True if device.type == 'cuda' else False,
+                persistent_workers=True if min(4, os.cpu_count() or 1) > 0 else False,
+                prefetch_factor=2,
+                collate_fn=local_clip_collator,
+            )
+        else:
+            testloader = DataLoader(testset, batch_size=config_sim["client"]["test_batch_size"])
 
         feature_key = dataset_info[dataset_name]["feature_key"]
-        loss, accuracy, f1 = test(model, testloader, device=device, feature_key=feature_key, dataset_name=dataset_name)
+        # Customize progress bar description based on server round
+        if server_round == 0:
+            desc = "Evaluating initial parameters"
+        else:
+            desc = f"Evaluating round {server_round}"
+        loss, accuracy, f1 = test(model, testloader, device=device, feature_key=feature_key, dataset_name=dataset_name, desc=desc)
         metrics_df = pd.read_csv(metrics_file)
         if metrics_df["global_loss"].min() > loss:
             log(
@@ -1422,6 +1813,7 @@ def get_strategy(
     apply_transforms_test,
     size_weights,
     model,
+    clip_collator=None,  # NEW: Use shared CLIPCollator from main.py
 ):
     STRATEGY = config["server"]["strategy"]
     MIN_CLIENTS_FIT = config["server"]["min_fit_clients"]
@@ -1515,6 +1907,7 @@ def get_strategy(
             device=device,
             apply_transforms_test=apply_transforms_test,
             model=model,
+            clip_collator=clip_collator,  # NEW: Pass shared CLIPCollator
         ),
         evaluate_metrics_aggregation_fn=weighted_average,
         on_fit_config_fn=get_fit_config_fn(config_sim=config),

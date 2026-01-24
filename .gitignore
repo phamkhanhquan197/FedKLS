@@ -175,3 +175,7 @@ test_multimodal.py
 test_training_incremental.py
 test_training_reset.py
 config_test_multimodal.yaml
+test_image.py
+config_test_image_mnist.yaml
+config_test_image_cifar10.yaml
+config_test_image_fashion_mnist.yaml

@@ -3,6 +3,7 @@ import os
 import flwr as fl
 from torch.utils.data import DataLoader
 import torch
+from collections import Counter
 from mak.utils.general import set_params, test
 from mak.utils.helper import get_optimizer
 from mak.utils.dataset_info import dataset_info
@@ -28,6 +29,7 @@ class BaseClient(fl.client.NumPyClient):
         data_scheduler=None, # NEW: DynamicDataScheduler for round-aware allocation
         bias=None,
         rank_policy_map: dict | None = None,
+        clip_collator=None,  # NEW: CLIPCollator for multimodal datasets
     ):
         self.client_id = client_id
         self.config_sim = config_sim
@@ -47,6 +49,7 @@ class BaseClient(fl.client.NumPyClient):
         self.apply_transforms = apply_transforms
         self.partition_id = client_id
         self.data_scheduler = data_scheduler # NEW: Store scheduler
+        self.clip_collator = clip_collator  # NEW: Store collator for multimodal
 
         self.optimizer = None
         self.scheduler = None
@@ -57,6 +60,17 @@ class BaseClient(fl.client.NumPyClient):
 
     def get_parameters(self, config): #Client -> Server
         if self.config_sim["peft"]["enabled"] == True:
+            # Generic adapter-based models (e.g., CustomCLIP after apply_svd_to_model)
+            # Send only adapter params to drastically reduce communication.
+            sd = self.model.state_dict()
+            a_keys = [k for k in sd.keys() if k.endswith(".A")]
+            b_keys = [k for k in sd.keys() if k.endswith(".B")]
+            if a_keys or b_keys:
+                bases = {k[:-2] for k in (a_keys + b_keys)}  # strip ".A"/".B"
+                bias_keys = [f"{base}.bias" for base in bases if f"{base}.bias" in sd] if self.bias else []
+                target_keys = sorted(set(a_keys + b_keys + bias_keys))
+                return [sd[k].detach().cpu().numpy() for k in target_keys]
+
             #Only send the A, B and bias parameters to the server 
             if any(key.startswith("distilbert.") for key in self.model.state_dict().keys()):
                 if self.bias:
@@ -118,18 +132,23 @@ class BaseClient(fl.client.NumPyClient):
         """
         # Use scheduler if available (new approach)
         if self.data_scheduler is not None:
+            # For multimodal: don't apply transforms (raw dataset), collator handles it
             trainset, valset = self.data_scheduler.get_client_round_datasets(
                 client_id=self.client_id,
                 round_num=round_num,
-                apply_transforms=self.apply_transforms
+                apply_transforms=self.apply_transforms if self.clip_collator is None else None  # No transform for multimodal
             )
             self.trainset = trainset
             self.valset = valset
             return
         
         # Fallback to old approach if scheduler not available
-        if self.dataset is None or self.apply_transforms is None:
-            raise RuntimeError("Dataset reference or transform function not provided.")
+        if self.dataset is None:
+            raise RuntimeError("Dataset reference not provided.")
+        
+        # For multimodal: apply_transforms can be None (collator handles it)
+        if self.clip_collator is None and self.apply_transforms is None:
+            raise RuntimeError("Transform function not provided for non-multimodal dataset.")
 
         client_dataset_total = self.dataset.load_partition(
             partition_id=self.partition_id
@@ -140,8 +159,13 @@ class BaseClient(fl.client.NumPyClient):
             seed=self.config_sim["common"]["seed"],
         )
 
-        new_trainset = splits["train"].with_transform(self.apply_transforms)
-        new_valset = splits["test"].with_transform(self.apply_transforms)
+        # For multimodal: keep dataset raw (no transform), collator handles processing
+        if self.clip_collator is None:
+            new_trainset = splits["train"].with_transform(self.apply_transforms)
+            new_valset = splits["test"].with_transform(self.apply_transforms)
+        else:
+            new_trainset = splits["train"]  # Raw dataset
+            new_valset = splits["test"]     # Raw dataset
 
         if mode == "append":
             self.trainset = ConcatDataset([self.trainset, new_trainset])
@@ -156,21 +180,58 @@ class BaseClient(fl.client.NumPyClient):
         set_params(self.model, parameters, method=method, bias=bias)
 
     def count_class_distribution(self, dataset):
-        """Count the class distribution in the dataset."""
-        class_counts = {}
-        for batch_data in dataset:
-            if self.feature_key in ["text", "content", "sentence"]:
-                labels = batch_data["labels"].to(self.device)
-            else:
-                labels = batch_data[self.output_column].to(self.device)
-                
-            # Count the occurrences of each class in the batch
-            unique, counts = torch.unique(labels, return_counts=True)
-            
-            for class_id, count in zip(unique.tolist(), counts.tolist()):
-                class_counts[class_id] = class_counts.get(class_id, 0) + count
+        """Count the class distribution.
 
-        # Sort the class counts by class ID
+        Performance notes:
+        - Prefer counting directly from the underlying dataset label column (fast, no image decode/CLIPProcessor).
+        - Fall back to iterating batches only when the dataset type doesn't expose label columns (e.g., ConcatDataset).
+        """
+        # If a DataLoader is passed in, grab the underlying dataset
+        ds = getattr(dataset, "dataset", dataset)
+
+        # Fast-path: HuggingFace Dataset exposes columns
+        try:
+            if hasattr(ds, "column_names") and self.output_column in getattr(ds, "column_names", []):
+                labels_col = ds[self.output_column]  # typically list[int] (or list[list[int]] for multi-label)
+                if not labels_col:
+                    return {}
+                c = Counter()
+                if isinstance(labels_col[0], (list, tuple)):
+                    for labs in labels_col:
+                        c.update(labs)
+                else:
+                    c.update(labels_col)
+                return dict(sorted(c.items()))
+        except Exception:
+            # Fall back to batch iteration
+            pass
+
+        # Slow-path: iterate batches (keep everything on CPU)
+        class_counts = Counter()
+        for batch_data in dataset:
+            if "labels" in batch_data:
+                labels = batch_data["labels"]
+            elif self.feature_key in ["text", "content", "sentence"]:
+                labels = batch_data["labels"]
+            else:
+                labels = batch_data[self.output_column]
+
+            if isinstance(labels, torch.Tensor):
+                labels = labels.detach().cpu()
+
+            # Multi-label one-hot: [B, C]
+            if isinstance(labels, torch.Tensor) and labels.dim() > 1 and labels.size(1) > 1:
+                for label_vec in labels:
+                    active = torch.nonzero(label_vec, as_tuple=False).squeeze(-1).tolist()
+                    class_counts.update(active)
+            else:
+                if isinstance(labels, torch.Tensor):
+                    unique, counts = torch.unique(labels, return_counts=True)
+                    for class_id, count in zip(unique.tolist(), counts.tolist()):
+                        class_counts[class_id] += int(count)
+                else:
+                    class_counts.update(labels)
+
         return dict(sorted(class_counts.items()))
 
     def fit(self, parameters, config):
@@ -206,7 +267,30 @@ class BaseClient(fl.client.NumPyClient):
             config["epochs"]
         )
         # Create a DataLoader for the training set
-        trainloader = DataLoader(self.trainset, batch_size=batch, shuffle=True)
+        # For multimodal: use collate_fn, enable num_workers for faster processing
+        if self.clip_collator is not None:
+            # Multimodal: use collator, enable workers
+            trainloader = DataLoader(
+                self.trainset,
+                batch_size=batch,
+                shuffle=True,
+                num_workers=min(4, os.cpu_count() or 1),
+                pin_memory=True if self.device.type == 'cuda' else False,
+                persistent_workers=True if min(4, os.cpu_count() or 1) > 0 else False,
+                prefetch_factor=2,
+                collate_fn=self.clip_collator,
+            )
+        else:
+            # Non-multimodal: check if local function (legacy)
+            is_local_function = '<locals>' in self.apply_transforms.__qualname__ if self.apply_transforms else False
+            num_workers = 0 if is_local_function else min(4, os.cpu_count() or 1)
+            trainloader = DataLoader(
+                self.trainset,
+                batch_size=batch,
+                shuffle=True,
+                num_workers=num_workers,
+                pin_memory=True if self.device.type == 'cuda' else False
+            )
         # Count the class distribution in the training set
         class_counts = self.count_class_distribution(trainloader)
         # # Reuse or initialize optimizer
@@ -272,7 +356,28 @@ class BaseClient(fl.client.NumPyClient):
             current_round = config.get("current_round", config.get("round", 0))
             self.reload_dataset(mode=dyn_cfg.get("mode", "incremental"), round_num=current_round)
 
-        valloader = DataLoader(self.valset, batch_size=self.test_batch_size)
+        # Create validation DataLoader with collator for multimodal
+        if self.clip_collator is not None:
+            valloader = DataLoader(
+                self.valset,
+                batch_size=self.test_batch_size,
+                shuffle=False,
+                num_workers=min(4, os.cpu_count() or 1),
+                pin_memory=True if self.device.type == 'cuda' else False,
+                persistent_workers=True if min(4, os.cpu_count() or 1) > 0 else False,
+                prefetch_factor=2,
+                collate_fn=self.clip_collator,
+            )
+        else:
+            is_local_function = '<locals>' in self.apply_transforms.__qualname__ if self.apply_transforms else False
+            num_workers = 0 if is_local_function else min(4, os.cpu_count() or 1)
+            valloader = DataLoader(
+                self.valset,
+                batch_size=self.test_batch_size,
+                shuffle=False,
+                num_workers=num_workers,
+                pin_memory=True if self.device.type == 'cuda' else False
+            )
         # Count the class distribution in the validation set
         class_counts = self.count_class_distribution(valloader)
         loss, accuracy, f1 = self.test(self.model, valloader, device=self.device)
@@ -286,17 +391,43 @@ class BaseClient(fl.client.NumPyClient):
         """Train the network on the training set."""
         criterion = self.get_loss(loss=config["loss"])
         net.train()
-        valloader = DataLoader(self.valset, batch_size=self.test_batch_size)
+        # Create validation DataLoader with collator for multimodal
+        if self.clip_collator is not None:
+            valloader = DataLoader(
+                self.valset,
+                batch_size=self.test_batch_size,
+                shuffle=False,
+                num_workers=min(4, os.cpu_count() or 1),
+                pin_memory=True if self.device.type == 'cuda' else False,
+                persistent_workers=True if min(4, os.cpu_count() or 1) > 0 else False,
+                prefetch_factor=2,
+                collate_fn=self.clip_collator,
+            )
+        else:
+            is_local_function = '<locals>' in self.apply_transforms.__qualname__ if self.apply_transforms else False
+            num_workers = 0 if is_local_function else min(4, os.cpu_count() or 1)
+            valloader = DataLoader(
+                self.valset,
+                batch_size=self.test_batch_size,
+                shuffle=False,
+                num_workers=num_workers,
+                pin_memory=True if self.device.type == 'cuda' else False
+            )
 
         for _ in range(epochs):
             for batch in trainloader:
                 # Check if multimodal (feature_key is a list with both image and text)
                 if isinstance(self.feature_key, list) and "image" in self.feature_key and "text" in self.feature_key:
                     # Multimodal forward pass
-                    pixel_values = batch["image"].to(device)
+                    # CLIPCollator outputs "pixel_values", not "image"
+                    if "pixel_values" in batch:
+                        pixel_values = batch["pixel_values"].to(device)
+                    else:
+                        # Fallback for old transform-based approach
+                        pixel_values = batch["image"].to(device)
                     input_ids = batch["input_ids"].to(device)
                     attention_mask = batch["attention_mask"].to(device)
-                    labels = batch[self.output_column].to(device)
+                    labels = batch["labels"].to(device)  # CLIPCollator always outputs "labels"
                     optim.zero_grad()
                     logits = net(pixel_values=pixel_values, input_ids=input_ids, attention_mask=attention_mask)
                     loss = criterion(logits, labels)

@@ -10,8 +10,10 @@ from torchvision.transforms import (
     ToTensor,
 )
 import torch
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 from mak.utils.dataset_info import dataset_info
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, CLIPProcessor
 
 class TextTransformationPipeline:
     def __init__(self, dataset_name, model_name):
@@ -213,3 +215,71 @@ class CLIPTransformationPipeline:
 
     def get_transformations(self):
         return self.apply_transform, self.apply_transform
+
+
+@dataclass
+class CLIPCollator:
+    """
+    Module-level collator for CLIP multimodal datasets.
+    Picklable, supports num_workers > 0.
+    """
+    processor: Any  # CLIPProcessor from transformers
+    label_key: str  # output_column from dataset_info
+    multi_label: bool = False
+    num_classes: Optional[int] = None
+    label_to_idx: Optional[Dict[str, int]] = None
+
+    def _to_onehot(self, y):
+        """
+        Convert label(s) to one-hot tensor.
+        y: list[str|int] or str|int
+        """
+        t = torch.zeros(self.num_classes, dtype=torch.float32)
+        if not isinstance(y, list):
+            y = [y]
+        for item in y:
+            if isinstance(item, int) and 0 <= item < self.num_classes:
+                t[item] = 1.0
+            elif isinstance(item, str) and self.label_to_idx and item in self.label_to_idx:
+                t[self.label_to_idx[item]] = 1.0
+        return t
+
+    def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+        """
+        Collate batch of examples into tensors.
+        
+        Input: List of dicts with keys ["image", "text", label_key]
+        Output: Dict with keys ["pixel_values", "input_ids", "attention_mask", "labels"]
+        """
+        if not batch:
+            raise ValueError("Empty batch provided to CLIPCollator")
+        
+        images = [ex["image"] for ex in batch]
+        
+        # Use "text" key as defined in dataset (from helper.py: add_text_test/add_empty_text)
+        # Fallback to empty string if "text" key doesn't exist
+        texts = [ex.get("text", "") for ex in batch]
+
+        # Process images and text with CLIPProcessor (batch processing)
+        enc = self.processor(
+            text=texts,
+            images=images,
+            return_tensors="pt",
+            padding=True,  # Dynamic padding (faster + less waste)
+            truncation=True
+        )
+
+        # Process labels
+        labels = [ex[self.label_key] for ex in batch]
+        if self.multi_label:
+            # Multi-label: convert each label list to one-hot
+            y = torch.stack([
+                self._to_onehot(l) if isinstance(l, list) else self._to_onehot([l]) 
+                for l in labels
+            ])
+        else:
+            # Single-label: direct tensor conversion
+            y = torch.tensor(labels, dtype=torch.long)
+
+        enc["labels"] = y
+        return enc

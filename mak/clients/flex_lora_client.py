@@ -45,6 +45,7 @@ class FlexLoRAClient(BaseClient):
             apply_transforms=apply_transforms,
             data_scheduler=data_scheduler,
             bias=bias,
+            rank_policy_map=rank_policy_map,
         )
         self.rank_policy_map = rank_policy_map or {}
         self._policy_initialized = False
