@@ -1,10 +1,20 @@
 from mak.clients.base_client import BaseClient
+from collections import OrderedDict
+import torch
 
 class FedSVDClient(BaseClient):
     """FedSVD Client - supports both FedAvg and FFA modes.
     
-    - FedAvg mode: Send both A and B matrices (like standard FedAvg on LoRA params)
-    - FFA mode: Send only B matrices (A is frozen, like FFA-LoRA)
+    Convention: A(r, in), B(out, r) matching PEFT exactly.
+    Forward: ΔW = B @ A
+    
+    - FedAvg mode: Send delta of both A and B matrices
+    - FFA mode: Freeze A, train B, send delta of B
+    
+    Matches 3rd-party fed-svd implementation:
+    - Downlink: Full model (A+B)
+    - Uplink: Delta (current - initial)
+    - Server: Aggregate delta and apply to base model
     
     The mode is determined from config_sim["fedsvd_config"]["mode"].
     """
@@ -22,152 +32,188 @@ class FedSVDClient(BaseClient):
         
         # Get FedSVD mode from config
         self.fedsvd_mode = config_sim.get("fedsvd_config", {}).get("mode", "fedavg")
+        
+        # Store initial state dict when receiving from server (for delta computation)
+        self.init_state_dict = None
+        
+        # Track current round for SVD reinitialization detection
+        self._current_round = 0
 
     def __repr__(self) -> str:
         return f"FedSVD client (mode={self.fedsvd_mode})"
-
-    def get_parameters(self, config):
+    
+    def set_parameters(self, parameters):
+        """Override to match 3rd-party Fed-SVD behavior exactly.
+        
+        3rd-party logic (misc/utils.py line 97-140):
+        - FedAvg: Load all (A + B)
+        - FFA (no SVD reinit): FILTER to load ONLY B, keep A unchanged
+        - FFA (with SVD reinit): Load all (A + B reinit)
+        
+        W_res: Direct attribute → not transmitted → always unchanged
         """
-        Send parameters based on FedSVD mode:
-        - FedAvg mode: Send both A and B (like standard LoRA)
-        - FFA mode: Send only B (A is frozen)
-        """
-        if not self.config_sim["peft"]["enabled"]:
-            # If PEFT is disabled, send full model parameters
-            return [val.cpu().numpy() for _, val in sorted(self.model.state_dict().items())]
+        from mak.utils.general import set_params
         
         model_state = self.model.state_dict()
         
-        # FFA mode: Send only B matrices (like FFA-LoRA)
-        if self.fedsvd_mode == "ffa":
-            if any(key.startswith("distilbert.") for key in model_state.keys()):
-                if self.bias:
-                    params_to_send = {
-                        name: tensor for name, tensor in model_state.items()
-                        if name.endswith(".B") or (name.endswith(".bias") and "lin" in name)
-                    }
-                else:
-                    params_to_send = {
-                        name: tensor for name, tensor in model_state.items()
-                        if name.endswith(".B")
-                    }
-            elif any(key.startswith("roberta.") for key in model_state.keys()):
-                if self.bias:
-                    params_to_send = {
-                        name: tensor for name, tensor in model_state.items()
-                        if name.endswith(".B")
-                        or (name.endswith(".bias") and "self" in name)
-                        or (name.endswith(".bias") and "dense" in name and "classifier" not in name)
-                    }
-                else:
-                    params_to_send = {
-                        name: tensor for name, tensor in model_state.items()
-                        if name.endswith(".B")
-                    }
-            elif any(key.startswith("bert.") for key in model_state.keys()):
-                if self.bias:
-                    params_to_send = {
-                        name: tensor for name, tensor in model_state.items()
-                        if name.endswith(".B")
-                        or (name.endswith(".bias") and "self" in name)
-                        or (name.endswith(".bias") and "dense" in name)
-                    }
-                else:
-                    params_to_send = {
-                        name: tensor for name, tensor in model_state.items()
-                        if name.endswith(".B")
-                    }
-            elif any(key.startswith("model.") for key in model_state.keys()):
-                if self.bias:
-                    params_to_send = {
-                        name: tensor for name, tensor in model_state.items()
-                        if (
-                            name.endswith(".B")
-                            or (name.endswith(".bias") and "self_attn" in name)
-                            or (name.endswith(".bias") and "mlp" in name)
-                        )
-                    }
-                else:
-                    params_to_send = {
-                        name: tensor for name, tensor in model_state.items()
-                        if name.endswith(".B")
-                    }
-            elif self.config_sim["common"]["model"] in ["Resnet18", "Resnet34", "ResNet18Pretrained", "ResNet34Pretrained"]:
-                if self.bias:
-                    params_to_send = {
-                        name: tensor for name, tensor in model_state.items()
-                        if name.endswith(".B") or (name.endswith(".bias") and "conv" in name)
-                    }
-                else:
-                    params_to_send = {
-                        name: tensor for name, tensor in model_state.items()
-                        if name.endswith(".B")
-                    }
-            else:
-                raise NotImplementedError(f"FedSVD FFA mode: Unsupported model type {self.config_sim['common']['model']}")
+        # Check if SVD reinitialization happened
+        recalculate_svd_period = self.config_sim.get("fedsvd_config", {}).get("recalculate_svd_period", 0)
+        svd_warmup_steps = self.config_sim.get("fedsvd_config", {}).get("svd_warmup_steps", 0)
+        is_svd_reinit = (recalculate_svd_period > 0 and 
+                        self._current_round > svd_warmup_steps and
+                        (self._current_round % recalculate_svd_period) == 0)
         
-        # FedAvg mode: Send both A and B matrices (standard LoRA approach)
-        else:
-            if any(key.startswith("distilbert.") for key in model_state.keys()):
-                if self.bias:
-                    params_to_send = {
-                        name: tensor for name, tensor in model_state.items() 
-                        if "lin" in name
-                    }
-                else:
-                    params_to_send = {
-                        name: tensor for name, tensor in model_state.items() 
-                        if name.endswith(".B") or name.endswith(".A")
-                    }
-            elif any(key.startswith("roberta.") for key in model_state.keys()):
-                if self.bias:
-                    params_to_send = {
-                        name: tensor for name, tensor in model_state.items() 
-                        if "self" in name or ("dense" in name and "classifier" not in name)
-                    }
-                else:
-                    params_to_send = {
-                        name: tensor for name, tensor in model_state.items() 
-                        if name.endswith(".B") or name.endswith(".A")
-                    }
-            elif any(key.startswith("bert.") for key in model_state.keys()):
-                if self.bias:
-                    params_to_send = {
-                        name: tensor for name, tensor in model_state.items() 
-                        if "self" in name or "dense" in name
-                    }
-                else:
-                    params_to_send = {
-                        name: tensor for name, tensor in model_state.items() 
-                        if name.endswith(".B") or name.endswith(".A")
-                    }
-            elif any(key.startswith("model.") for key in model_state.keys()):
-                if self.bias:
-                    params_to_send = {
-                        name: tensor for name, tensor in model_state.items() 
-                        if "self_attn" in name or "mlp" in name
-                    }
-                else:
-                    params_to_send = {
-                        name: tensor for name, tensor in model_state.items() 
-                        if name.endswith(".B") or name.endswith(".A")
-                    }
-            elif self.config_sim["common"]["model"] in ["Resnet18", "Resnet34", "ResNet18Pretrained", "ResNet34Pretrained"]:
-                if self.bias:
-                    params_to_send = {
-                        name: tensor for name, tensor in model_state.items() 
-                        if "conv" in name
-                    }
-                else:
-                    params_to_send = {
-                        name: tensor for name, tensor in model_state.items() 
-                        if name.endswith(".B") or name.endswith(".A")
-                    }
-            else:
-                raise ValueError(f"FedSVD FedAvg mode: PEFT parameter extraction not defined for model {self.config_sim['common']['model']}")
+        # Matching 3rd-party logic (misc/utils.py line 113-119):
+        # - if model_type == 'fedavg': receive_all = True
+        # - elif args.recalculate_svd_period: receive_all = True  
+        # - elif round == 1: receive_all = True (first initialization)
+        # - else (ffa): filter to load only B
+        
+        if self.fedsvd_mode == "fedavg":
+            # FedAvg mode: Always load all
+            print(f"[FedSVDClient {self.client_id}] FedAvg mode - Loading all (A + B)")
+            set_params(self.model, parameters, device=self.device, 
+                      method=None, bias=self.bias)
+        
+        elif is_svd_reinit:
+            # SVD reinit: Load all (even in FFA mode)
+            print(f"[FedSVDClient {self.client_id}] Server re-calculated SVD - Loading all (A + B)")
+            set_params(self.model, parameters, device=self.device, 
+                      method=None, bias=self.bias)
+        
+        elif self._current_round == 1:
+            # Round 1: First initialization - load all (A + B)
+            print(f"[FedSVDClient {self.client_id}] Round 1 initialization - Loading all (A + B)")
+            set_params(self.model, parameters, device=self.device, 
+                      method=None, bias=self.bias)
+        
+        elif self.fedsvd_mode == "ffa":
+            # FFA mode (no SVD reinit): FILTER to load only B
+            print(f"[FedSVDClient {self.client_id}] FFA mode - Filtering to load ONLY B (keep A unchanged)")
+            
+            # Build mapping: parameter name → received array
+            sorted_keys = sorted(model_state.keys())
+            params_dict = dict(zip(sorted_keys, parameters))
+            
+            # Filter: Keep only B (matching 3rd-party logic)
+            filtered_state = OrderedDict()
+            for name in sorted_keys:
+                if name.endswith(".B"):
+                    # Load B from server
+                    filtered_state[name] = torch.tensor(params_dict[name], device=self.device)
+                    print(f"  ✅ Loading: {name}")
+                elif self.bias and "bias" in name:
+                    # Load bias if enabled
+                    if any(kw in name for kw in ["lin", "self", "dense", "conv", "mlp", "self_attn"]):
+                        filtered_state[name] = torch.tensor(params_dict[name], device=self.device)
+                        print(f"  ✅ Loading: {name}")
+                elif name.endswith(".A"):
+                    # Skip A (keep unchanged)
+                    print(f"  ⏭️  Skipping (keep unchanged): {name}")
+            
+            # Update model with filtered parameters
+            model_state.update(filtered_state)
+            self.model.load_state_dict(model_state, strict=False)
+            print(f"  → Loaded {len(filtered_state)} parameters, kept {len(sorted_keys) - len(filtered_state)} unchanged")
+        
+        # Save initial state dict for delta computation
+        self.init_state_dict = OrderedDict()
+        for name, param in self.model.state_dict().items():
+            if self._should_track_for_delta(name):
+                self.init_state_dict[name] = param.clone().detach().cpu()
+        
+        # FFA mode: Freeze A matrices (only train B)
+        if self.fedsvd_mode == "ffa":
+            for name, param in self.model.named_parameters():
+                if name.endswith(".A"):
+                    param.requires_grad = False  # Freeze A
+                elif name.endswith(".B"):
+                    param.requires_grad = True   # Train B
 
-        # Return parameters in deterministic sorted order
-        return [
-            tensor.cpu().numpy()
-            for _, tensor in sorted(params_to_send.items())
-        ]
+    def _should_track_for_delta(self, param_name):
+        """Check if parameter should be tracked for delta computation.
+        
+        We track all LoRA/SVD parameters: A, B, and bias.
+        """
+        # Track if it ends with .A, .B
+        if param_name.endswith(".A") or param_name.endswith(".B"):
+            return True
+        # Track bias if enabled
+        if self.bias and "bias" in param_name:
+            # Check if it's a LoRA-related bias
+            if any(keyword in param_name for keyword in ["lin", "self", "dense", "conv", "mlp", "self_attn"]):
+                return True
+        return False
+    
+    def _should_send_parameter(self, param_name):
+        """Determine if a parameter should be sent based on mode.
+        
+        - FedAvg mode: Send all LoRA parameters (A + B + bias)
+        - FFA mode: Send only B matrices (+ bias), A is frozen
+        """
+        if self.fedsvd_mode == "ffa":
+            # FFA mode: only send B matrices and bias (A is frozen)
+            if param_name.endswith(".B"):
+                return True
+            if self.bias and "bias" in param_name:
+                if any(keyword in param_name for keyword in ["lin", "self", "dense", "conv", "mlp", "self_attn"]):
+                    return True
+            return False
+        else:
+            # FedAvg mode: send all LoRA parameters
+            return self._should_track_for_delta(param_name)
+
+    def get_parameters(self, config=None):
+        """Return delta (current - initial) of parameters based on mode.
+        
+        This matches 3rd-party fed-svd implementation:
+        - Client sends: theta_diff = {k: (state_dict[k] - init_state_dict[k]) for k in keys}
+        - Server aggregates deltas and applies to base model
+        """
+        if self.init_state_dict is None:
+            raise ValueError(
+                "init_state_dict is None. Make sure set_parameters() was called before get_parameters()."
+            )
+        
+        current_state = self.model.state_dict()
+        
+        # Compute deltas for parameters that should be sent
+        delta_dict = OrderedDict()
+        for name in sorted(current_state.keys()):
+            if self._should_send_parameter(name):
+                if name not in self.init_state_dict:
+                    raise KeyError(
+                        f"Parameter {name} not found in init_state_dict. "
+                        f"This should not happen - check _should_track_for_delta()."
+                    )
+                # Compute delta: current - initial
+                delta = current_state[name].cpu() - self.init_state_dict[name]
+                delta_dict[name] = delta
+        
+        # Debug: Log delta statistics
+        if len(delta_dict) > 0:
+            first_key = next(iter(delta_dict.keys()))
+            first_delta = delta_dict[first_key]
+            print(f"[FedSVDClient {self.client_id}] Sending {len(delta_dict)} deltas. "
+                  f"First delta '{first_key[:50]}': shape={first_delta.shape}, "
+                  f"mean={first_delta.mean():.6f}, std={first_delta.std():.6f}, "
+                  f"max_abs={first_delta.abs().max():.6f}")
+        
+        # Return as list of numpy arrays (sorted by key for determinism)
+        return [tensor.numpy() for tensor in delta_dict.values()]
+
+    def fit(self, parameters, config):
+        """Override to track round number for SVD reinitialization detection."""
+        # Update round number from config (Flower passes "current_round")
+        self._current_round = config.get("current_round", config.get("server_round", 0))
+        
+        # Call parent's fit method
+        return super().fit(parameters, config)
+
+    def evaluate(self, parameters, config):
+        """Override to track round number for SVD reinitialization detection."""
+        # Update round number from config before set_parameters is called
+        self._current_round = config.get("current_round", config.get("server_round", config.get("round", 0)))
+        
+        # Call parent's evaluate method
+        return super().evaluate(parameters, config)

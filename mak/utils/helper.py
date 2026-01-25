@@ -355,18 +355,43 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
         original_bias = layer.bias.data if layer.bias is not None else None
 
         if method == 'lora' or method == 'fedsvd_lora':
-            # Original LoRA: Random initialization without SVD
+            # LoRA initialization - PEFT convention: A(r, in), B(out, r)
+            # Forward: ΔW = B @ A
+            fedsvd_init = None
+            if method == 'fedsvd_lora':
+                fedsvd_cfg = config.get("fedsvd_config", {})
+                fedsvd_init = fedsvd_cfg.get("init_method", "kaiming")
+            
             if isinstance(layer, torch.nn.Conv2d):
                 c_out, c_in, k1, k2 = weight_matrix.shape
-                A = torch.randn(c_out, rank, device=weight_matrix.device) * 0.01  # Gaussian init
-                B = torch.zeros(rank, c_in * k1 * k2, device=weight_matrix.device)  # Zero init
+                d_in = c_in * k1 * k2
+                
+                # A: (r, in) - Kaiming init
+                A = torch.empty(rank, d_in, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                if fedsvd_init == "gaussian":
+                    init.normal_(A, mean=0.0, std=0.01)
+                else:
+                    init.kaiming_uniform_(A, a=math.sqrt(5))
+                
+                # B: (out, r) - Zero init
+                B = torch.zeros(c_out, rank, device=weight_matrix.device, dtype=weight_matrix.dtype)
                 W_res = weight_matrix
             else:
                 d_out, d_in = weight_matrix.shape
-                A = torch.randn(d_out, rank, device=weight_matrix.device) * 0.01  # Gaussian init
-                B = torch.zeros(rank, d_in, device=weight_matrix.device)  # Zero init
+                
+                # A: (r, in) - Kaiming init
+                A = torch.empty(rank, d_in, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                if fedsvd_init == "gaussian":
+                    init.normal_(A, mean=0.0, std=0.01)
+                else:
+                    init.kaiming_uniform_(A, a=math.sqrt(5))
+                
+                # B: (out, r) - Zero init
+                B = torch.zeros(d_out, rank, device=weight_matrix.device, dtype=weight_matrix.dtype)
                 W_res = weight_matrix
-            log(INFO, f"Layer {name}: Applied LoRA with rank {rank}.")
+            
+            init_name = fedsvd_init if fedsvd_init else "kaiming"
+            log(INFO, f"Layer {name}: Applied LoRA with rank {rank} (init={init_name}, A({rank},{d_in}), B({d_out if not isinstance(layer, torch.nn.Conv2d) else c_out},{rank})).")
 
         elif method == 'ffa_lora':
             # FFA-LoRA: Initialize A (configurable), B = 0, freeze A forever (external control)

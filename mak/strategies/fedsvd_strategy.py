@@ -45,6 +45,9 @@ def _infer_ffa_uplink_names(full_names: List[str], *, bias: bool) -> List[str]:
     This repo's clients historically use architecture-specific filters.
     We replicate those string-based rules here so the server can map the
     returned ndarray list back into the full parameter vector.
+    
+    Convention: A(r, in), B(out, r) matching PEFT.
+    FFA mode: Freeze A, train B, aggregate B.
     """
 
     # Base rule: always include LoRA-B (or B matrices for SVDAdapter/ConvAdapter)
@@ -194,66 +197,38 @@ class FedSVDStrategy(FedAvg):
             if A.ndim != 2 or B.ndim != 2:
                 continue
 
-            # Support both conventions:
-            # 1) This repo's adapters: A (out, r), B (r, in)
-            #    prod = A @ B -> (out, in)
-            # 2) PEFT LoRA:        A (r, in),  B (out, r)
-            #    prod = B @ A -> (out, in)
-            is_repo_adapter = A.shape[1] == B.shape[0]
-            is_peft_lora = A.shape[0] == B.shape[1]
-            if not (is_repo_adapter or is_peft_lora):
+            # Only PEFT LoRA convention: A (r, in), B (out, r)
+            # prod = B @ A -> (out, in)
+            if A.shape[0] != B.shape[1]:
+                # Shape mismatch - skip this pair
                 continue
 
             try:
-                if is_repo_adapter:
-                    # A: (out, r), B: (r, in)
-                    prod = A @ B
-                    U, S, Vt = np.linalg.svd(prod, full_matrices=False)
+                # PEFT LoRA: A (r, in), B (out, r)
+                prod = B @ A  # (out, in)
+                U, S, Vt = np.linalg.svd(prod, full_matrices=False)
+                # U: (out, k), S: (k,), Vt: (k, in) where k = min(out, in)
 
-                    r = int(A.shape[1])
-                    k = int(S.shape[0])
-                    r_eff = min(r, k)
+                r = int(A.shape[0])  # rank
+                k = int(S.shape[0])  # min(out, in)
+                r_eff = min(r, k)
 
-                    Ur = U[:, :r_eff]
-                    Sr = S[:r_eff]
-                    Vtr = Vt[:r_eff, :]
+                Ur = U[:, :r_eff]    # (out, r_eff)
+                Sr = S[:r_eff]       # (r_eff,)
+                Vtr = Vt[:r_eff, :]  # (r_eff, in)
 
-                    # Re-factorize prod into A(out,r) and B(r,in)
-                    # A <- U * sqrt(S), B <- sqrt(S) * Vt
-                    sqrtS = np.sqrt(Sr).astype(A.dtype, copy=False)
-                    A_new = Ur * sqrtS[None, :]
-                    B_new = (sqrtS[:, None] * Vtr).astype(B.dtype, copy=False)
+                # Match upstream 3rd-party behavior exactly:
+                # A <- Vt[:r]              -> (r, in)
+                # B <- U[:,:r] @ diag(S)   -> (out, r)
+                A_new = Vtr.astype(A.dtype, copy=False)
+                B_new = (Ur @ np.diag(Sr)).astype(B.dtype, copy=False)
 
-                    # If rank shrank due to numerical limits, pad back to r
-                    if r_eff < r:
-                        A_pad = np.zeros((A.shape[0], r - r_eff), dtype=A_new.dtype)
-                        B_pad = np.zeros((r - r_eff, B.shape[1]), dtype=B_new.dtype)
-                        A_new = np.concatenate([A_new, A_pad], axis=1)
-                        B_new = np.concatenate([B_new, B_pad], axis=0)
-
-                else:
-                    # PEFT LoRA: A (r, in), B (out, r)
-                    prod = B @ A
-                    U, S, Vt = np.linalg.svd(prod, full_matrices=False)
-
-                    r = int(A.shape[0])
-                    k = int(S.shape[0])
-                    r_eff = min(r, k)
-
-                    Ur = U[:, :r_eff]
-                    Sr = S[:r_eff]
-                    Vtr = Vt[:r_eff, :]
-
-                    # Match upstream 3rd-party behavior:
-                    # A <- Vt[:r], B <- U[:,:r] diag(S[:r])
-                    A_new = Vtr.astype(A.dtype, copy=False)
-                    B_new = (Ur @ np.diag(Sr)).astype(B.dtype, copy=False)
-
-                    if r_eff < r:
-                        A_pad = np.zeros((r - r_eff, A.shape[1]), dtype=A_new.dtype)
-                        B_pad = np.zeros((B.shape[0], r - r_eff), dtype=B_new.dtype)
-                        A_new = np.concatenate([A_new, A_pad], axis=0)
-                        B_new = np.concatenate([B_new, B_pad], axis=1)
+                # If rank shrank due to numerical limits, pad back to r
+                if r_eff < r:
+                    A_pad = np.zeros((r - r_eff, A.shape[1]), dtype=A_new.dtype)
+                    B_pad = np.zeros((B.shape[0], r - r_eff), dtype=B_new.dtype)
+                    A_new = np.concatenate([A_new, A_pad], axis=0)
+                    B_new = np.concatenate([B_new, B_pad], axis=1)
             except Exception:
                 continue
 
@@ -315,6 +290,14 @@ class FedSVDStrategy(FedAvg):
                     sum(ratios[i] * weights[i][j] for i in range(len(weights)))
                     for j in range(min_len)
                 ]
+
+                # Debug: Log aggregation statistics
+                if len(agg_payload) > 0:
+                    first_agg = agg_payload[0]
+                    print(f"[FedSVD aggregate_fit] Round {server_round}: Aggregated {len(agg_payload)} deltas. "
+                          f"First agg: shape={first_agg.shape}, mean={first_agg.mean():.6f}, "
+                          f"std={first_agg.std():.6f}, max_abs={np.abs(first_agg).max():.6f}")
+                    print(f"[FedSVD aggregate_fit] send_deltas={self.send_deltas}, uplink_names[:3]={uplink_names[:3]}")
 
                 updated_full = list(self._round_start)
                 name_to_idx = {nm: idx for idx, nm in enumerate(names)}
@@ -406,7 +389,7 @@ class FedSVDStrategy(FedAvg):
                 return True
             if self.mode == "fedavg":
                 return _is_lora_a(nm) or _is_lora_b(nm)
-            # ffa
+            # ffa: Freeze A, train B, aggregate B
             return _is_lora_b(nm)
 
         sel = [should_aggregate(nm) for nm in names_eff]

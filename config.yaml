@@ -12,19 +12,19 @@ common:
   model: distilbert-base-uncased
   # model: Resnet18
   # Optional: redirect Ray session/spill files off /tmp (useful when /tmp is nearly full)
-  ray_tmp_dir: /home/ai/tmp # /home/ai/tmp, /tmp
+  ray_tmp_dir: /tmp # /home/ai/tmp, /tmp
   optimizer : sgd # one among [sgd,adam]
   sgd_momentum : 0.9
   seed : 123  #123 456 789
   multi_node : False
   save_log : True
-  num_train_thread: 10 #Save the most memory when setting to 1
-  num_test_thread: 10
+  num_train_thread: 3 #Save the most memory when setting to 1
+  num_test_thread: 3
 
 server:
   num_rounds : 1000 # default 1000
   address : 127.0.0.1
-  fraction_fit : 0.3 # fraction of clients to be selected for training
+  fraction_fit : 1 # fraction of clients to be selected for training
   min_fit_clients : 3 # minimum number of clients to be selected for training
   num_clients : 10 # total number of clients participating in training
   fraction_evaluate : 1 # fraction of clients to be selected for evaluation
@@ -36,17 +36,17 @@ client:
   epochs : 1
   batch_size : 4
   test_batch_size : 4
-  lr: 0.005 #  [0.00002, 0.0001,0.001, 0.005, 0.01, 0.1, 0.2] 0.005->distilbert-base-uncased, 0.001->bert-base-uncased, 0.0001->Qwen/Qwen1.5-0.5B
+  lr: 0.005 #  [0.00002, 0.0001,0.001, 0.005, 0.01, 0.1, 0.2] 0.005->distilbert-base-uncased, 0.001->bert-base-uncased, 0.0001->Qwen/Qwen1.5-0.5B. FedSVD with rank=32: start with 0.001 to avoid NaN
   save_train_res : True
   # Too many total_cpus lets Ray schedule many actors concurrently and can OOM host RAM.
   # Keep this near your physical core count.
-  total_cpus : 40
+  total_cpus : 8
   total_gpus : 1 # no. of GPU's assigned for whole simulation
   gpu : True  # True or Faslse, Use GPU for training or not.
   # Request more resources per actor => fewer concurrent actors => less RAM/GPU contention.
-  num_cpus : 4
+  num_cpus : 1
   # With 1 GPU total, setting 1.0 forces a single GPU actor at a time.
-  num_gpus : 0.1
+  num_gpus : 0.25
 
 peft:
   enabled: True #False = FFT, do not set method = fedkls when running FFT, pfedmoap do not run with peft=True
@@ -59,13 +59,15 @@ peft:
 # FedSVD (fed-svd-like) config
 fedsvd_config:
   mode: "ffa"       # "fedavg" (aggregate A+B) | "ffa" (aggregate B only)
-  send_deltas: False   # True => clients send deltas; server applies deltas to round-start params
+  send_deltas: True    # True => clients send deltas; server applies deltas to round-start params
   agg_flora: False     # (placeholder) requires delta semantics
   agg_fedex: False     # (placeholder) requires delta semantics
   # Optional: rerun SVD on LoRA (server-side) periodically, like 3rd-party/fed-svd
   # 0 disables. 1 means rerun every round after warmup.
   recalculate_svd_period: 1
   svd_warmup_steps: 1
+  # A matrix initialization method: kaiming | gaussian
+  init_method: "kaiming"  # kaiming = PEFT default (adaptive variance), gaussian = N(0, 0.01)
   dp:
     enabled: False        # True => enable DP-SGD (Opacus) during client training
     eps: 8.0              # target epsilon (used to compute noise_multiplier if noise_multiplier is null)

@@ -12,29 +12,29 @@ class SVDAdapter(nn.Module):
         self.scaling = alpha/rank
         self.bias = None if original_bias is None else nn.Parameter(original_bias.clone().detach())
         self.W_res = W_res.cuda()
-        # self.register_buffer("W_res", W_res.clone().detach())
-        self.W_res.requires_grad = False #Freeze the residual matrix
+        self.W_res.requires_grad = False
 
     def forward(self, x):
         """
         Performs the forward pass of the SVDAdapter.
 
+        Convention: A(r, in), B(out, r) matching PEFT.
         The computation is equivalent to:
-        Output = x @ (W_res + scaling * A @ B)^T + bias
-               = F.linear(x, W_res + scaling * A @ B, bias)
+        Output = x @ (W_res + scaling * B @ A)^T + bias
+               = F.linear(x, W_res + scaling * B @ A, bias)
 
         Args:
             x (torch.Tensor): Input tensor.
                               Expected shape: [batch_size, ..., in_features]
                               where in_features must match self.W_res.shape[1],
-                              self.B.shape[1].
+                              self.A.shape[1].
 
         Returns:
             torch.Tensor: Output tensor.
                           Shape: [batch_size, ..., out_features]
-                          where out_features is self.W_res.shape[0], self.A.shape[0].
+                          where out_features is self.W_res.shape[0], self.B.shape[0].
         """
-        effective_weight = self.W_res + self.scaling * (self.A @ self.B)
+        effective_weight = self.W_res + self.scaling * (self.B @ self.A)
         output = F.linear(x, effective_weight, bias=self.bias if self.bias is not None else None)
         return output
     
@@ -54,7 +54,7 @@ class ConvAdapter(nn.Module):
     def __init__(self, original_conv, W_res, A, B, alpha, rank):
         super().__init__()
         self.W_res = W_res.cuda()
-        self.W_res.requires_grad = False  # Freeze the residual matrix
+        self.W_res.requires_grad = False
         self.A = nn.Parameter(A.clone().detach())  # Trainable
         self.B = nn.Parameter(B.clone().detach())  # Trainable
         self.lora_scale = alpha / rank if rank > 0 else 0.0
@@ -69,8 +69,8 @@ class ConvAdapter(nn.Module):
         self.alpha = alpha
 
     def forward(self, x):
-         # A [Cout, r] @ B [r, Cin*k1*k2] = [Cout, Cin*k1*k2]
-        delta_w_flat = torch.matmul(self.A, self.B) * self.lora_scale
+         # B [Cout, r] @ A [r, Cin*k1*k2] = [Cout, Cin*k1*k2]
+        delta_w_flat = torch.matmul(self.B, self.A) * self.lora_scale
         # Reshape back to [Cout, Cin, k1, k2]
         delta_w = delta_w_flat.view(
             self.out_channels,
