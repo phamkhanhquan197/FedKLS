@@ -305,11 +305,59 @@ def extract_linear_layers(model, config):
     skip_layer_names = ["pre_classifier", "classifier", "model.norm", "score", "classifier.dense", "classifier.out_proj"]
     attenion_layer_names = ["self_attn", "attn", "attention"]
 
+    # Optional: match PEFT-style target modules (e.g., ["query", "value"]) like 3rd-party/fed-svd.
+    # For DistilBERT, HF uses q_lin/k_lin/v_lin/out_lin instead of query/key/value.
+    target_modules = (config or {}).get("peft", {}).get("target_modules", None)
+    if isinstance(target_modules, str):
+        target_modules = [target_modules]
+    if target_modules is not None:
+        target_modules = [str(x) for x in target_modules if str(x).strip()]
+
+    # Implicit default: when running FedSVD with fedsvd_lora, target query/value only
+    # to match the 3rd-party fed-svd PEFT LoRA placement.
+    if not target_modules:
+        strategy_name = str((config or {}).get("server", {}).get("strategy", "")).lower()
+        peft_method = str((config or {}).get("peft", {}).get("method", "")).lower()
+        if strategy_name == "fedsvd" and peft_method == "fedsvd_lora":
+            target_modules = ["query", "value"]
+
+    model_state = None
+    try:
+        model_state = model.state_dict()
+    except Exception:
+        model_state = {}
+
+    is_distilbert = any(k.startswith("distilbert.") for k in model_state.keys())
+    if target_modules and is_distilbert:
+        # Minimal mapping to emulate PEFT target_modules=["query","value"] on DistilBERT.
+        # query -> q_lin, value -> v_lin
+        mapping = {
+            "query": "q_lin",
+            "key": "k_lin",
+            "value": "v_lin",
+            "out": "out_lin",
+        }
+        resolved = []
+        for tm in target_modules:
+            resolved.append(mapping.get(tm, tm))
+        target_modules = resolved
+
     for name, module in model.named_modules():
         # Check if the module is a Linear layer
         if isinstance(module, torch.nn.Linear):
             if name in skip_layer_names: # Check if any part of the layer_to_skip is in the current layer's name
                 continue
+
+            # If target_modules are specified, select only those submodules.
+            # Example: BERT/Roberta: ...attention.self.query / ...attention.self.value
+            #          DistilBERT:   ...attention.q_lin / ...attention.v_lin
+            if target_modules:
+                leaf = name.split(".")[-1]
+                if leaf in set(target_modules):
+                    linear_layers[name] = module
+                continue
+
+            # Fallback: legacy selection by broad attention path matching
             if config["peft"]["layer"] == "attention_only":
                 if any(att_name in name for att_name in attenion_layer_names):
                     linear_layers[name] = module

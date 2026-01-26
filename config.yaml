@@ -69,7 +69,7 @@ fedsvd_config:
   # A matrix initialization method: kaiming | gaussian
   init_method: "kaiming"  # kaiming = PEFT default (adaptive variance), gaussian = N(0, 0.01)
   dp:
-    enabled: True        # True => enable DP-SGD (Opacus) during client training
+    enabled: False        # True => enable DP-SGD (Opacus) during client training
     eps: 8.0              # target epsilon (used to compute noise_multiplier if noise_multiplier is null)
     delta: 1.0e-5         # target delta
     max_grad_norm: 2.0    # per-sample grad clipping norm
