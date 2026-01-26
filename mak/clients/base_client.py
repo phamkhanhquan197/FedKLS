@@ -379,6 +379,9 @@ class BaseClient(fl.client.NumPyClient):
             else:
                 dp_trainloader = trainloader
 
+            # Save original batch size before make_private wraps the loader
+            original_batch_size = dp_trainloader.batch_size if hasattr(dp_trainloader, 'batch_size') else trainloader.batch_size
+
             # Use explicit criterion like 3rd-party.
             dp_criterion = nn.CrossEntropyLoss(reduction="mean")
             if grad_sample_mode == "hooks":
@@ -434,49 +437,69 @@ class BaseClient(fl.client.NumPyClient):
             else:
                 raise RuntimeError(f"Unexpected PrivacyEngine.make_private() return arity: {len(res)}")
 
-            max_physical_batch_size = int(dp_cfg.get("max_physical_batch_size", trainloader.batch_size))
-            trainloader = BatchMemoryManager(
+            # Use the saved original batch size (trainloader.batch_size may be None after make_private)
+            max_physical_batch_size = int(dp_cfg.get("max_physical_batch_size", original_batch_size))
+            
+            # BatchMemoryManager must be used as context manager for DP
+            # We wrap the entire epoch loop
+            dp_batch_memory_manager = BatchMemoryManager(
                 data_loader=trainloader,
                 optimizer=optim,
                 max_physical_batch_size=max_physical_batch_size,
             )
 
+        # Original training loop (kept as-is for non-DP)
         for _ in range(epochs):
-            for batch in trainloader:
-                if self.feature_key in ["text", "content", "sentence"]:
-                    if dp_enabled:
-                        input_ids, attention_mask, labels = batch
-                        # 3rd-party behavior: skip empty batch
-                        if input_ids.size(0) == 0:
-                            continue
-                        batch_dict = {
-                            "input_ids": input_ids.to(device),
-                            "attention_mask": attention_mask.to(device),
-                        }
-                        labels = labels.to(device)
-                        optim.zero_grad()
-                        outputs = net(**batch_dict)
-                        logits = outputs.logits
-                        loss = dp_criterion(logits, labels)
+            # If DP enabled, wrap this epoch with BatchMemoryManager context
+            if dp_enabled:
+                trainloader_iter = dp_batch_memory_manager.__enter__()
+            else:
+                trainloader_iter = trainloader
+            
+            try:
+                for batch in trainloader_iter:
+                    if self.feature_key in ["text", "content", "sentence"]:
+                        if dp_enabled:
+                            # DP: tuple format (input_ids, attention_mask, labels)
+                            input_ids, attention_mask, labels = batch
+                            # 3rd-party behavior: skip empty batch
+                            if input_ids.size(0) == 0:
+                                continue
+                            batch_dict = {
+                                "input_ids": input_ids.to(device),
+                                "attention_mask": attention_mask.to(device),
+                            }
+                            labels = labels.to(device)
+                            optim.zero_grad()
+                            outputs = net(**batch_dict)
+                            logits = outputs.logits
+                            loss = dp_criterion(logits, labels)
+                        else:
+                            # Non-DP: dict format
+                            input_ids = batch["input_ids"].to(device)
+                            attention_mask = batch["attention_mask"].to(device)
+                            labels = batch["labels"].to(device)
+                            optim.zero_grad()
+                            outputs = net(input_ids, attention_mask=attention_mask, labels=labels)
+                            loss = outputs.loss
                     else:
-                        # Text-specific forward pass (non-DP)
-                        input_ids = batch["input_ids"].to(device)
-                        attention_mask = batch["attention_mask"].to(device)
-                        labels = batch["labels"].to(device)
+                        # For image datasets
+                        keys = list(batch.keys())
+                        x_label, y_label = keys[0], keys[1]
+                        images, labels = batch[x_label].to(device), batch[y_label].to(device)
                         optim.zero_grad()
-                        outputs = net(input_ids, attention_mask=attention_mask, labels=labels)
-                        loss = outputs.loss
-                else:
-                    # For image datasets, we can use the standard loss function
-                    keys = list(batch.keys())
-                    x_label, y_label = keys[0], keys[1]
-                    images, labels = batch[x_label].to(device), batch[y_label].to(device)
-                    optim.zero_grad()
-                    loss = criterion(net(images), labels)
+                        if dp_enabled:
+                            loss = dp_criterion(net(images), labels)
+                        else:
+                            loss = criterion(net(images), labels)
 
-                # Backpropagation
-                loss.backward()
-                optim.step()
+                    # Backpropagation
+                    loss.backward()
+                    optim.step()
+            finally:
+                # Exit BatchMemoryManager context if DP was enabled
+                if dp_enabled:
+                    dp_batch_memory_manager.__exit__(None, None, None)
         # # Compute validation loss for scheduler
         # val_loss, _, _ = self.test(net=net, testloader=valloader, device=device)
         # print(f"Client {self.client_id}, Before Scheduler Step: Val Loss = {val_loss:.6f}, "
