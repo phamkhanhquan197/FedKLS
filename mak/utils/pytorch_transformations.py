@@ -1,3 +1,5 @@
+import os
+
 import torch.nn.functional as F
 from torch.autograd import Variable
 from torchvision.transforms import (
@@ -5,6 +7,8 @@ from torchvision.transforms import (
     Compose,
     Lambda,
     Normalize,
+    RandomCrop,
+    RandomHorizontalFlip,
     Resize,
     ToPILImage,
     ToTensor,
@@ -13,11 +17,39 @@ import torch
 from mak.utils.dataset_info import dataset_info
 from transformers import AutoTokenizer
 
+
+def _is_hf_offline() -> bool:
+    # Standard Hugging Face offline flags + a project-specific escape hatch.
+    return any(
+        os.getenv(key, "0") in {"1", "true", "True", "yes", "YES"}
+        for key in ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "FEDKLS_HF_OFFLINE")
+    )
+
+
+def _load_tokenizer(model_name: str):
+    # Prefer cached files to avoid any network calls (fixes DNS/offline failures).
+    # If cache is missing and we're not explicitly offline, fall back to normal behavior.
+    try:
+        return AutoTokenizer.from_pretrained(model_name, local_files_only=True)
+    except Exception as cached_err:
+        if _is_hf_offline():
+            raise RuntimeError(
+                "Offline mode is enabled but the tokenizer isn't available in the local Hugging Face cache. "
+                "Either (1) pre-download the model/tokenizer once with internet, or (2) set model_name to a local path."
+            ) from cached_err
+        try:
+            return AutoTokenizer.from_pretrained(model_name)
+        except Exception as online_err:
+            raise RuntimeError(
+                "Failed to load tokenizer. If you're offline, set HF_HUB_OFFLINE=1 (or TRANSFORMERS_OFFLINE=1) and ensure the model is cached, "
+                "or set model_name to a local directory containing the tokenizer files."
+            ) from online_err
+
 class TextTransformationPipeline:
     def __init__(self, dataset_name, model_name):
         self.dataset_name = dataset_name
         self.model_name = model_name
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.tokenizer = _load_tokenizer(model_name)
         # Set pad_token to eos_token if not already set
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token

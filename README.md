@@ -94,7 +94,7 @@ The `server` section contains the configurations for the server that coordinates
 - `num_clients`: Total number of clients participating in training.
 - `fraction_evaluate`: This field specifies the fraction of participating clients used for evaluation in each round.
 - `min_evaluate_clients`: This field specifies that at least this many clients are required for evaluation.
-- `strategy`: This field specifies the strategy used for Federated Learning. Currently supported strategies are [`FedAWA`, `FedAvg`]. Detailed explanation can be found [here](./docs/strategies.md)
+- `strategy`: This field specifies the strategy used for Federated Learning. Currently supported strategies are [`FedAWA`, `FedAvg`, `FedSVD`, `FedKLSVD`, `Scaffold`, `FedNova`, `FedProx`, ...]. Detailed explanation can be found [here](./docs/strategies.md)
 
 ### Client Section
 The `client` section contains the configurations for the clients participating in the Federated Learning process.
@@ -115,6 +115,13 @@ If `save_train_res` is set to `true`, all the output data, like accuracy, loss, 
 - `rank`: Low-rank dimension for adapters.
 - `alpha`: LoRA/adapter alpha parameter (typically same as rank).
 - `method`: Choose among 'lora', 'pissa', 'milora', 'middle', 'fedkls' (Do not set `method` = 'fedkls' when running FFT)
+
+### FedSVD Config Section
+When `server.strategy: FedSVD`, you can control the aggregation behavior with `fedsvd_config` in `config.yaml`:
+
+- `mode`: `"fedavg"` (aggregate LoRA A+B) or `"ffa"` (aggregate only LoRA B).
+- `send_deltas`: if `True`, treat client updates as deltas and apply them to the round-start global params.
+- `agg_flora`, `agg_fedex`: advanced variants from the upstream FedSVD repo (require delta semantics; keep `False` unless the client is ported for it).
 
 ### Dynamic Data Section
 - `enabled`: `True` to enable dynamic dataset updates; `False` to use static datasets (default).
