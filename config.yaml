@@ -68,6 +68,7 @@ fedsvd_config:
   svd_warmup_steps: 1
   # A matrix initialization method: kaiming | gaussian
   init_method: "kaiming"  # kaiming = PEFT default (adaptive variance), gaussian = N(0, 0.01)
+  debug: False      # True => show Ray actor logs (client messages; False => hide them
   dp:
     enabled: True        # True => enable DP-SGD (Opacus) during client training
     eps: 8.0              # target epsilon (used to compute noise_multiplier if noise_multiplier is null)

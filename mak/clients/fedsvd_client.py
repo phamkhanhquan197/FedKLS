@@ -33,6 +33,9 @@ class FedSVDClient(BaseClient):
         # Get FedSVD mode from config
         self.fedsvd_mode = config_sim.get("fedsvd_config", {}).get("mode", "fedavg")
         
+        # Get debug flag from config
+        self.debug = config_sim.get("fedsvd_config", {}).get("debug", False)
+        
         # Store initial state dict when receiving from server (for delta computation)
         self.init_state_dict = None
         
@@ -142,25 +145,29 @@ class FedSVDClient(BaseClient):
         
         if self.fedsvd_mode == "fedavg":
             # FedAvg mode: Always load all
-            print(f"[FedSVDClient {self.client_id}] FedAvg mode - Loading all (A + B)")
+            if self.debug:
+                print(f"[FedSVDClient {self.client_id}] FedAvg mode - Loading all (A + B)")
             set_params(self.model, parameters, device=self.device, 
                       method=None, bias=self.bias)
         
         elif is_svd_reinit:
             # SVD reinit: Load all (even in FFA mode)
-            print(f"[FedSVDClient {self.client_id}] Server re-calculated SVD - Loading all (A + B)")
+            if self.debug:
+                print(f"[FedSVDClient {self.client_id}] Server re-calculated SVD - Loading all (A + B)")
             set_params(self.model, parameters, device=self.device, 
                       method=None, bias=self.bias)
         
         elif self._current_round == 1:
             # Round 1: First initialization - load all (A + B)
-            print(f"[FedSVDClient {self.client_id}] Round 1 initialization - Loading all (A + B)")
+            if self.debug:
+                print(f"[FedSVDClient {self.client_id}] Round 1 initialization - Loading all (A + B)")
             set_params(self.model, parameters, device=self.device, 
                       method=None, bias=self.bias)
         
         elif self.fedsvd_mode == "ffa":
             # FFA mode (no SVD reinit): FILTER to load only B
-            print(f"[FedSVDClient {self.client_id}] FFA mode - Filtering to load ONLY B (keep A unchanged)")
+            if self.debug:
+                print(f"[FedSVDClient {self.client_id}] FFA mode - Filtering to load ONLY B (keep A unchanged)")
             
             # Build mapping: parameter name → received array
             sorted_keys = sorted(model_state.keys())
@@ -172,20 +179,24 @@ class FedSVDClient(BaseClient):
                 if name.endswith(".B"):
                     # Load B from server
                     filtered_state[name] = torch.tensor(params_dict[name], device=self.device)
-                    print(f"  ✅ Loading: {name}")
+                    if self.debug:
+                        print(f"  ✅ Loading: {name}")
                 elif self.bias and "bias" in name:
                     # Load bias if enabled
                     if any(kw in name for kw in ["lin", "self", "dense", "conv", "mlp", "self_attn"]):
                         filtered_state[name] = torch.tensor(params_dict[name], device=self.device)
-                        print(f"  ✅ Loading: {name}")
+                        if self.debug:
+                            print(f"  ✅ Loading: {name}")
                 elif name.endswith(".A"):
                     # Skip A (keep unchanged)
-                    print(f"  ⏭️  Skipping (keep unchanged): {name}")
+                    if self.debug:
+                        print(f"  ⏭️  Skipping (keep unchanged): {name}")
             
             # Update model with filtered parameters
             model_state.update(filtered_state)
             self.model.load_state_dict(model_state, strict=False)
-            print(f"  → Loaded {len(filtered_state)} parameters, kept {len(sorted_keys) - len(filtered_state)} unchanged")
+            if self.debug:
+                print(f"  → Loaded {len(filtered_state)} parameters, kept {len(sorted_keys) - len(filtered_state)} unchanged")
         
         # Save initial state dict for delta computation
         self.init_state_dict = OrderedDict()
@@ -257,7 +268,7 @@ class FedSVDClient(BaseClient):
                 delta_dict[name] = delta
         
         # Debug: Log delta statistics
-        if len(delta_dict) > 0:
+        if self.debug and len(delta_dict) > 0:
             first_key = next(iter(delta_dict.keys()))
             first_delta = delta_dict[first_key]
             print(f"[FedSVDClient {self.client_id}] Sending {len(delta_dict)} deltas. "

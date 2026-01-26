@@ -121,6 +121,7 @@ class FedSVDStrategy(FedAvg):
         svd_warmup_steps: int = 0,
         include_classifier: bool = True,
         bias: bool = True,
+        debug: bool = False,
         param_name_fn: Optional[Callable[[], List[str]]] = None,
         **kwargs,
     ):
@@ -133,6 +134,7 @@ class FedSVDStrategy(FedAvg):
         self.svd_warmup_steps = int(svd_warmup_steps or 0)
         self.include_classifier = include_classifier
         self.bias = bool(bias)
+        self.debug = bool(debug)
         self.param_name_fn = param_name_fn
 
         self._round_start: Optional[List[np.ndarray]] = None
@@ -292,7 +294,7 @@ class FedSVDStrategy(FedAvg):
                 ]
 
                 # Debug: Log aggregation statistics
-                if len(agg_payload) > 0:
+                if self.debug and len(agg_payload) > 0:
                     first_agg = agg_payload[0]
                     print(f"[FedSVD aggregate_fit] Round {server_round}: Aggregated {len(agg_payload)} deltas. "
                           f"First agg: shape={first_agg.shape}, mean={first_agg.mean():.6f}, "
