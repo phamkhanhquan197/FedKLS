@@ -308,6 +308,14 @@ class BaseClient(fl.client.NumPyClient):
                     "Install it (e.g., pip install opacus) or disable DP."
                 ) from e
 
+            # Match 3rd-party Fed-SVD behavior:
+            # - grad_sample_mode="ghost"
+            # - BatchMemoryManager
+            # - use a tuple-based dataloader to avoid Opacus empty-batch collation bugs
+            #   with dict-like batches from HuggingFace Datasets.
+            from opacus.utils.batch_memory_manager import BatchMemoryManager  # type: ignore
+            import torch.nn as nn
+
             # Compute / use noise multiplier
             noise_multiplier = dp_cfg.get("noise_multiplier", None)
             if noise_multiplier is None:
@@ -332,7 +340,60 @@ class BaseClient(fl.client.NumPyClient):
 
             max_grad_norm = float(dp_cfg.get("max_grad_norm", 1.0))
             secure_rng = bool(dp_cfg.get("secure_rng", False))
-            grad_sample_mode = str(dp_cfg.get("grad_sample_mode", "hooks"))
+            # 3rd-party uses ghost; keep configurable but default to ghost.
+            grad_sample_mode = str(dp_cfg.get("grad_sample_mode", "ghost"))
+
+            # Build a DP-friendly dataloader for text models.
+            # HuggingFace Datasets often yield dict-like batches; Opacus' empty-batch
+            # handling can mis-infer dtypes for mappings in some versions.
+            # Returning (input_ids, attention_mask, labels) matches the 3rd-party code.
+            if self.feature_key in ["text", "content", "sentence"]:
+                class _TextTupleDataset(torch.utils.data.Dataset):
+                    def __init__(self, ds):
+                        self.ds = ds
+
+                    def __len__(self):
+                        return len(self.ds)
+
+                    def __getitem__(self, idx):
+                        item = self.ds[idx]
+                        input_ids = item["input_ids"]
+                        attention_mask = item["attention_mask"]
+                        labels = item["labels"]
+
+                        # Ensure per-sample shapes: [T], [T], [] or [1]
+                        if hasattr(input_ids, "dim") and input_ids.dim() == 2:
+                            input_ids = input_ids.squeeze(0)
+                        if hasattr(attention_mask, "dim") and attention_mask.dim() == 2:
+                            attention_mask = attention_mask.squeeze(0)
+                        if hasattr(labels, "dim") and labels.dim() > 0:
+                            labels = labels.squeeze()
+                        return input_ids, attention_mask, labels
+
+                dp_trainloader = DataLoader(
+                    _TextTupleDataset(self.trainset),
+                    batch_size=int(trainloader.batch_size),
+                    shuffle=True,
+                    drop_last=False,
+                )
+            else:
+                dp_trainloader = trainloader
+
+            # Use explicit criterion like 3rd-party.
+            dp_criterion = nn.CrossEntropyLoss(reduction="mean")
+            if grad_sample_mode == "hooks":
+                try:
+                    from mak.models.svd_model import SVDAdapter, ConvAdapter
+
+                    has_custom_adapters = any(
+                        isinstance(m, (SVDAdapter, ConvAdapter)) for m in net.modules()
+                    )
+                except Exception:
+                    has_custom_adapters = False
+
+                if has_custom_adapters:
+                    log(INFO, "DP enabled: switching grad_sample_mode=functorch for SVD/Conv adapters")
+                    grad_sample_mode = "functorch"
 
             # Create PrivacyEngine with compatibility across Opacus versions
             try:
@@ -340,52 +401,71 @@ class BaseClient(fl.client.NumPyClient):
             except TypeError:
                 privacy_engine = PrivacyEngine(accountant="rdp", secure_rng=secure_rng)
 
-            # Make private.
-            # NOTE: "ghost" enables fast gradient clipping but can raise
-            # `AssertionError: loss_reduction ...` depending on Opacus version/model.
-            # Default to "hooks" for broader compatibility.
+            # Make private (Opacus versions differ in signature/return values).
+            privacy_engine = PrivacyEngine(secure_mode=secure_rng)
             try:
                 res = privacy_engine.make_private(
                     module=net,
                     optimizer=optim,
-                    data_loader=trainloader,
+                    criterion=dp_criterion,
+                    data_loader=dp_trainloader,
                     noise_multiplier=float(noise_multiplier),
                     max_grad_norm=max_grad_norm,
                     grad_sample_mode=grad_sample_mode,
                 )
             except TypeError:
+                # Older Opacus may not accept some kwargs.
                 res = privacy_engine.make_private(
                     module=net,
                     optimizer=optim,
-                    data_loader=trainloader,
+                    criterion=dp_criterion,
+                    data_loader=dp_trainloader,
                     noise_multiplier=float(noise_multiplier),
                     max_grad_norm=max_grad_norm,
                 )
 
-            # Opacus versions differ in return signature.
-            # Common: (module, optimizer, data_loader)
-            # Some:   (module, optimizer, data_loader, privacy_engine)
             if not isinstance(res, tuple):
                 raise RuntimeError(f"Unexpected PrivacyEngine.make_private() return type: {type(res)}")
-            if len(res) == 3:
-                net, optim, trainloader = res
-            elif len(res) == 4:
-                net, optim, trainloader, _privacy_engine = res
+            # Expected (module, optimizer, criterion, data_loader) for the API used by 3rd-party.
+            if len(res) == 4:
+                net, optim, dp_criterion, trainloader = res
             elif len(res) == 5:
-                net, optim, trainloader, _privacy_engine, _criterion = res
+                net, optim, dp_criterion, trainloader, _privacy_engine = res
             else:
                 raise RuntimeError(f"Unexpected PrivacyEngine.make_private() return arity: {len(res)}")
+
+            max_physical_batch_size = int(dp_cfg.get("max_physical_batch_size", trainloader.batch_size))
+            trainloader = BatchMemoryManager(
+                data_loader=trainloader,
+                optimizer=optim,
+                max_physical_batch_size=max_physical_batch_size,
+            )
 
         for _ in range(epochs):
             for batch in trainloader:
                 if self.feature_key in ["text", "content", "sentence"]:
-                    # Text-specific forward pass
-                    input_ids = batch["input_ids"].to(device)
-                    attention_mask = batch["attention_mask"].to(device)
-                    labels = batch["labels"].to(device)
-                    optim.zero_grad()
-                    outputs = net(input_ids, attention_mask=attention_mask, labels=labels)
-                    loss = outputs.loss
+                    if dp_enabled:
+                        input_ids, attention_mask, labels = batch
+                        # 3rd-party behavior: skip empty batch
+                        if input_ids.size(0) == 0:
+                            continue
+                        batch_dict = {
+                            "input_ids": input_ids.to(device),
+                            "attention_mask": attention_mask.to(device),
+                        }
+                        labels = labels.to(device)
+                        optim.zero_grad()
+                        outputs = net(**batch_dict)
+                        logits = outputs.logits
+                        loss = dp_criterion(logits, labels)
+                    else:
+                        # Text-specific forward pass (non-DP)
+                        input_ids = batch["input_ids"].to(device)
+                        attention_mask = batch["attention_mask"].to(device)
+                        labels = batch["labels"].to(device)
+                        optim.zero_grad()
+                        outputs = net(input_ids, attention_mask=attention_mask, labels=labels)
+                        loss = outputs.loss
                 else:
                     # For image datasets, we can use the standard loss function
                     keys = list(batch.keys())
@@ -393,7 +473,8 @@ class BaseClient(fl.client.NumPyClient):
                     images, labels = batch[x_label].to(device), batch[y_label].to(device)
                     optim.zero_grad()
                     loss = criterion(net(images), labels)
-                # Backpropagation    
+
+                # Backpropagation
                 loss.backward()
                 optim.step()
         # # Compute validation loss for scheduler

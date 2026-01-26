@@ -349,6 +349,9 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
     rank = config["peft"]["rank"]
     alpha = config["peft"]["alpha"]
     method = config["peft"]["method"]
+    dp_fedsvd = False
+    if config["fedsvd_config"]:
+        dp_fedsvd = config["fedsvd_config"]["dp"]["enabled"]
 
     for name, layer in layers_to_svd.items():
         weight_matrix = layer.weight.data
@@ -648,9 +651,9 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
 
         # Create appropriate adapter
         if isinstance(layer, torch.nn.Conv2d):
-            new_layer = ConvAdapter(original_conv=layer, W_res=W_res, A=A, B=B, alpha=alpha, rank=rank)
+            new_layer = ConvAdapter(original_conv=layer, W_res=W_res, A=A, B=B, alpha=alpha, rank=rank, use_dp = dp_fedsvd)
         else:
-            new_layer = SVDAdapter(W_res=W_res, A=A, B=B, alpha=alpha, rank=rank, original_bias=original_bias)
+            new_layer = SVDAdapter(W_res=W_res, A=A, B=B, alpha=alpha, rank=rank, original_bias=original_bias, use_dp = dp_fedsvd)
         
         # Freeze A for FFA-LoRA (external control)
         if method == "ffa_lora":
@@ -1392,11 +1395,27 @@ def parse_args() -> argparse.Namespace:
 
 
 def get_optimizer(model, client_config):
+    params = [p for p in model.parameters() if p.requires_grad]
+    if len(params) == 0:
+        # Safety net for FedSVD: if adapter params exist but were accidentally
+        # frozen, unfreeze them by name to avoid hard-crashing.
+        if client_config.get("strategy") == "FedSVD":
+            has_adapters = False
+            for n, p in model.named_parameters():
+                if n.endswith(".A") or n.endswith(".B"):
+                    has_adapters = True
+                    p.requires_grad = True
+            if has_adapters:
+                params = [p for p in model.parameters() if p.requires_grad]
+
+        if len(params) == 0:
+            raise ValueError("No trainable parameters found (all requires_grad=False)")
+
     if client_config["optimizer"] == "adam":
-        return torch.optim.Adam(model.parameters(), lr=client_config["lr"])
+        return torch.optim.Adam(params, lr=client_config["lr"])
     else:
         return torch.optim.SGD(
-            model.parameters(),
+            params,
             lr=client_config["lr"],
             momentum=client_config["sgd_momentum"],
         )

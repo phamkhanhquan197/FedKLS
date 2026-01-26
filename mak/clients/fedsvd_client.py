@@ -41,6 +41,77 @@ class FedSVDClient(BaseClient):
 
     def __repr__(self) -> str:
         return f"FedSVD client (mode={self.fedsvd_mode})"
+
+    def _configure_trainable_parameters(self) -> None:
+        """Freeze backbone; train only adapter params.
+
+        This mirrors 3rd-party fed-svd+PEFT behavior (only LoRA parameters are
+        trainable) and avoids Opacus DP failures caused by mixing unsupported
+        trainable parameters.
+        """
+        trainable_names: set[str] = set()
+
+        # Prefer explicit adapter module detection when available
+        try:
+            from mak.models.svd_model import SVDAdapter, ConvAdapter
+
+            for module_name, module in self.model.named_modules():
+                if isinstance(module, SVDAdapter):
+                    trainable_names.add(f"{module_name}.A")
+                    trainable_names.add(f"{module_name}.B")
+                    if self.bias and getattr(module, "bias", None) is not None:
+                        trainable_names.add(f"{module_name}.bias")
+                elif isinstance(module, ConvAdapter):
+                    trainable_names.add(f"{module_name}.A")
+                    trainable_names.add(f"{module_name}.B")
+        except Exception:
+            # Fallback: name-based selection
+            pass
+
+        for name, param in self.model.named_parameters():
+            # Fallback path: if we couldn't detect adapters, still try to only train A/B/bias
+            if not trainable_names:
+                is_adapter = name.endswith(".A") or name.endswith(".B")
+                is_bias = self.bias and name.endswith(".bias")
+                if not (is_adapter or is_bias):
+                    param.requires_grad = False
+                    continue
+            else:
+                if name not in trainable_names:
+                    param.requires_grad = False
+                    continue
+
+            # Now within trainable set
+            if self.fedsvd_mode == "ffa" and name.endswith(".A"):
+                param.requires_grad = False
+            else:
+                param.requires_grad = True
+
+        # Safety net: if we ended up freezing everything, recover by unfreezing
+        # adapter parameters by name. This prevents crashes in optimizer setup.
+        num_trainable = sum(1 for p in self.model.parameters() if p.requires_grad)
+        if num_trainable == 0:
+            has_adapter_params = any(
+                n.endswith(".A") or n.endswith(".B") or n.endswith(".bias")
+                for n, _p in self.model.named_parameters()
+            )
+            if not has_adapter_params:
+                raise RuntimeError(
+                    "FedSVD expected an SVD-adapted model with adapter parameters (.A/.B), "
+                    "but none were found on the client model. Ensure client_model is the SVD/LoRA-adapted model "
+                    "(not the base model) when using strategy=FedSVD."
+                )
+
+            # Unfreeze LoRA/SVD params as a fallback
+            for n, p in self.model.named_parameters():
+                if n.endswith(".B"):
+                    p.requires_grad = True
+                elif self.fedsvd_mode != "ffa" and n.endswith(".A"):
+                    p.requires_grad = True
+                elif self.bias and n.endswith(".bias"):
+                    p.requires_grad = True
+                else:
+                    p.requires_grad = False
     
     def set_parameters(self, parameters):
         """Override to match 3rd-party Fed-SVD behavior exactly.
@@ -121,14 +192,9 @@ class FedSVDClient(BaseClient):
         for name, param in self.model.state_dict().items():
             if self._should_track_for_delta(name):
                 self.init_state_dict[name] = param.clone().detach().cpu()
-        
-        # FFA mode: Freeze A matrices (only train B)
-        if self.fedsvd_mode == "ffa":
-            for name, param in self.model.named_parameters():
-                if name.endswith(".A"):
-                    param.requires_grad = False  # Freeze A
-                elif name.endswith(".B"):
-                    param.requires_grad = True   # Train B
+
+        # Freeze backbone and keep only adapter params trainable (3rd-party behavior)
+        self._configure_trainable_parameters()
 
     def _should_track_for_delta(self, param_name):
         """Check if parameter should be tracked for delta computation.

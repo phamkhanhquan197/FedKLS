@@ -3,7 +3,7 @@ import torch.nn.functional as F
 import torch
 
 class SVDAdapter(nn.Module):
-    def __init__(self, W_res, A, B, alpha, rank, original_bias=None):
+    def __init__(self, W_res, A, B, alpha, rank, original_bias=None, use_dp=False):
         super().__init__()
         self.A = nn.Parameter(A.clone().detach()) # Trainable
         self.B = nn.Parameter(B.clone().detach()) # Trainable
@@ -11,8 +11,10 @@ class SVDAdapter(nn.Module):
         self.rank = rank
         self.scaling = alpha/rank
         self.bias = None if original_bias is None else nn.Parameter(original_bias.clone().detach())
-        self.W_res = W_res.cuda()
-        self.W_res.requires_grad = False
+        # Opacus (DP-SGD) does not support trainable modules that contain buffers.
+        # Keep residual weights as a frozen Parameter so it is device/state_dict aware.
+        _ = use_dp  # kept for backward compatibility
+        self.W_res = nn.Parameter(W_res.clone().detach(), requires_grad=False)
 
     def forward(self, x):
         """
@@ -42,7 +44,7 @@ class SVDAdapter(nn.Module):
         bias_info = f", bias=None" if self.bias is None else f", bias={list(self.bias.shape)} (trainable: {self.bias.requires_grad})"
         return (
             f"{self.__class__.__name__}("
-            f"W_res: {list(self.W_res.shape)} (buffer, frozen), "
+            f"W_res: {list(self.W_res.shape)} (frozen), "
             f"A: {list(self.A.shape)} (trainable: {self.A.requires_grad}), "
             f"B: {list(self.B.shape)} (trainable: {self.B.requires_grad}), "
             f"rank={self.rank}, alpha={self.alpha}, scaling={self.scaling:.4f}"
@@ -51,10 +53,12 @@ class SVDAdapter(nn.Module):
 
 class ConvAdapter(nn.Module):
     """Adapter for Conv2d layers using LoRA, without bias."""
-    def __init__(self, original_conv, W_res, A, B, alpha, rank):
+    def __init__(self, original_conv, W_res, A, B, alpha, rank, use_dp=False):
         super().__init__()
-        self.W_res = W_res.cuda()
-        self.W_res.requires_grad = False
+        # Opacus (DP-SGD) does not support trainable modules that contain buffers.
+        # Keep residual weights as a frozen Parameter so it is device/state_dict aware.
+        _ = use_dp  # kept for backward compatibility
+        self.W_res = nn.Parameter(W_res.clone().detach(), requires_grad=False)
         self.A = nn.Parameter(A.clone().detach())  # Trainable
         self.B = nn.Parameter(B.clone().detach())  # Trainable
         self.lora_scale = alpha / rank if rank > 0 else 0.0
@@ -84,7 +88,7 @@ class ConvAdapter(nn.Module):
         return F.conv2d(x, effective_weight, bias=None, stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups)
 
     def __repr__(self):
-        return (f"ConvAdapter(W_res: {list(self.W_res.shape)} (buffer, frozen), "
+        return (f"ConvAdapter(W_res: {list(self.W_res.shape)} (frozen), "
                 f"A: {list(self.A.shape)} (trainable: {self.A.requires_grad}), "
                 f"B: {list(self.B.shape)} (trainable: {self.B.requires_grad}), "
                 f"rank={self.rank}, alpha={self.alpha}, scaling={self.lora_scale:.4f}, "

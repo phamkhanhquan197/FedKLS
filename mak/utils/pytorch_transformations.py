@@ -46,9 +46,10 @@ def _load_tokenizer(model_name: str):
             ) from online_err
 
 class TextTransformationPipeline:
-    def __init__(self, dataset_name, model_name):
+    def __init__(self, dataset_name, model_name, dp_enabled: bool = False):
         self.dataset_name = dataset_name
         self.model_name = model_name
+        self.dp_enabled = bool(dp_enabled)
         self.tokenizer = _load_tokenizer(model_name)
         # Set pad_token to eos_token if not already set
         if self.tokenizer.pad_token is None:
@@ -58,16 +59,46 @@ class TextTransformationPipeline:
 
     def apply_transform(self, batch):
         """Apply transformations to the partition from FederatedDataset."""
+        # Non-DP path: keep original behavior.
+        if not self.dp_enabled:
+            encodings = self.tokenizer(
+                batch[self.feature_key],
+                padding="max_length",
+                max_length=self.max_sequence_length,
+                truncation=True,
+                return_tensors="pt",
+            )
+            encodings["labels"] = torch.tensor(batch["label"])  # "label" → "labels"
+            return encodings
+
+        # DP path: Opacus Poisson sampling can yield empty batches.
+        # Keep original indexing style but guard against empty batches.
+        texts = batch[self.feature_key]
+
+        # HuggingFace Datasets + PyTorch DataLoader can occasionally request an
+        # empty index list (e.g., some edge cases with tiny/empty client splits).
+        # Fast tokenizers crash on empty batches, so short-circuit to empty tensors.
+        if isinstance(texts, (list, tuple)) and len(texts) == 0:
+            max_len = int(self.max_sequence_length)
+            empty_ids = torch.empty((0, max_len), dtype=torch.long)
+            empty_labels = torch.empty((0,), dtype=torch.long)
+            return {
+                "input_ids": empty_ids,
+                "attention_mask": empty_ids.clone(),
+                "labels": empty_labels,
+            }
+
         # Tokenize the text data
         encodings = self.tokenizer(
-            batch[self.feature_key],
+            texts,
             padding="max_length",
             max_length=self.max_sequence_length,
             truncation=True,
             return_tensors="pt",
         )
+
         # Convert labels to tensor and rename key
-        encodings["labels"] = torch.tensor(batch["label"]) # "label" → "labels"
+        encodings["labels"] = torch.tensor(batch["label"], dtype=torch.long)  # "label" → "labels"
         return encodings
 
     def get_transformations(self):
