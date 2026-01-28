@@ -36,10 +36,14 @@ def _is_lora_b(name: str) -> bool:
 
 
 def _is_classifier(name: str) -> bool:
-    return "classifier" in name
+    # HF heads vary by backbone:
+    # - DistilBERT: pre_classifier.*, classifier.*
+    # - BERT/Roberta: classifier.*
+    # - Some models: score.*
+    return ("classifier" in name) or ("pre_classifier" in name) or ("score" in name)
 
 
-def _infer_ffa_uplink_names(full_names: List[str], *, bias: bool) -> List[str]:
+def _infer_ffa_uplink_names(full_names: List[str], *, bias: bool, include_classifier: bool) -> List[str]:
     """Infer the ordered list of parameter names a FedSVD FFA client uploads.
 
     This repo's clients historically use architecture-specific filters.
@@ -68,6 +72,10 @@ def _infer_ffa_uplink_names(full_names: List[str], *, bias: bool) -> List[str]:
     selected: List[str] = []
     for nm in full_names:
         if is_b(nm):
+            selected.append(nm)
+            continue
+
+        if include_classifier and _is_classifier(nm):
             selected.append(nm)
             continue
 
@@ -278,7 +286,11 @@ class FedSVDStrategy(FedAvg):
         ):
             min_len = min(len(w) for w in weights) if weights else 0
             if 0 < min_len < len(names):
-                uplink_names = _infer_ffa_uplink_names(names, bias=self.bias)
+                uplink_names = _infer_ffa_uplink_names(
+                    names,
+                    bias=self.bias,
+                    include_classifier=self.include_classifier,
+                )
                 # If inference doesn't match payload length, fall back to the
                 # simplest assumption: client sent only LoRA-B tensors.
                 if len(uplink_names) != min_len:

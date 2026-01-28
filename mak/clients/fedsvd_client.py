@@ -35,6 +35,17 @@ class FedSVDClient(BaseClient):
         
         # Get debug flag from config
         self.debug = config_sim.get("fedsvd_config", {}).get("debug", False)
+
+        # Classifier handling:
+        # - sync_classifier: whether classifier is synchronized/aggregated (uplink/downlink)
+        # - train_classifier: whether classifier is trainable locally
+        #
+        # We keep backwards-compat with older configs via `include_classifier`.
+        fedsvd_cfg = config_sim.get("fedsvd_config", {}) or {}
+        self.include_classifier = bool(fedsvd_cfg.get("include_classifier", True))
+        self.sync_classifier = bool(fedsvd_cfg.get("sync_classifier", self.include_classifier))
+        self.train_classifier = bool(fedsvd_cfg.get("train_classifier", True))
+        self.send_deltas = bool(fedsvd_cfg.get("send_deltas", True))
         
         # Store initial state dict when receiving from server (for delta computation)
         self.init_state_dict = None
@@ -46,12 +57,18 @@ class FedSVDClient(BaseClient):
         return f"FedSVD client (mode={self.fedsvd_mode})"
 
     def _configure_trainable_parameters(self) -> None:
-        """Freeze backbone; train only adapter params.
+        """Configure requires_grad flags similar to 3rd-party fed-svd.
 
-        This mirrors 3rd-party fed-svd+PEFT behavior (only LoRA parameters are
-        trainable) and avoids Opacus DP failures caused by mixing unsupported
-        trainable parameters.
+        - Always freeze the base model weights.
+        - Train LoRA/SVD adapter params (A/B) (FFA freezes A).
+        - Also train and sync classifier head by default for text models, except
+          for backbones where 3rd-party freezes it (roberta/vit).
         """
+
+        # Freeze everything first
+        for _n, p in self.model.named_parameters():
+            p.requires_grad = False
+
         trainable_names: set[str] = set()
 
         # Prefer explicit adapter module detection when available
@@ -71,24 +88,24 @@ class FedSVDClient(BaseClient):
             # Fallback: name-based selection
             pass
 
-        for name, param in self.model.named_parameters():
-            # Fallback path: if we couldn't detect adapters, still try to only train A/B/bias
-            if not trainable_names:
-                is_adapter = name.endswith(".A") or name.endswith(".B")
-                is_bias = self.bias and name.endswith(".bias")
-                if not (is_adapter or is_bias):
-                    param.requires_grad = False
-                    continue
-            else:
-                if name not in trainable_names:
-                    param.requires_grad = False
-                    continue
+        # Decide whether to train classifier like 3rd-party.
+        model_name = str((self.config_sim or {}).get("common", {}).get("model", ""))
+        freeze_head_like_third_party = ("roberta" in model_name.lower()) or ("vit" in model_name.lower())
+        if self.train_classifier and (not freeze_head_like_third_party):
+            for n, _p in self.model.named_parameters():
+                if ("classifier" in n) or ("pre_classifier" in n) or ("score" in n):
+                    trainable_names.add(n)
 
-            # Now within trainable set
-            if self.fedsvd_mode == "ffa" and name.endswith(".A"):
-                param.requires_grad = False
+        # Apply requires_grad mask
+        for name, param in self.model.named_parameters():
+            if name in trainable_names:
+                # FFA mode freezes A
+                if self.fedsvd_mode == "ffa" and name.endswith(".A"):
+                    param.requires_grad = False
+                else:
+                    param.requires_grad = True
             else:
-                param.requires_grad = True
+                param.requires_grad = False
 
         # Safety net: if we ended up freezing everything, recover by unfreezing
         # adapter parameters by name. This prevents crashes in optimizer setup.
@@ -181,6 +198,11 @@ class FedSVDClient(BaseClient):
                     filtered_state[name] = torch.tensor(params_dict[name], device=self.device)
                     if self.debug:
                         print(f"  ✅ Loading: {name}")
+                elif self.sync_classifier and ("classifier" in name or "pre_classifier" in name or "score" in name):
+                    # Keep classifier synchronized with server (3rd-party behavior)
+                    filtered_state[name] = torch.tensor(params_dict[name], device=self.device)
+                    if self.debug:
+                        print(f"  ✅ Loading: {name}")
                 elif self.bias and "bias" in name:
                     # Load bias if enabled
                     if any(kw in name for kw in ["lin", "self", "dense", "conv", "mlp", "self_attn"]):
@@ -215,6 +237,9 @@ class FedSVDClient(BaseClient):
         # Track if it ends with .A, .B
         if param_name.endswith(".A") or param_name.endswith(".B"):
             return True
+        # Track classifier/head params when syncing is enabled
+        if self.sync_classifier and ("classifier" in param_name or "pre_classifier" in param_name or "score" in param_name):
+            return True
         # Track bias if enabled
         if self.bias and "bias" in param_name:
             # Check if it's a LoRA-related bias
@@ -232,6 +257,9 @@ class FedSVDClient(BaseClient):
             # FFA mode: only send B matrices and bias (A is frozen)
             if param_name.endswith(".B"):
                 return True
+            # Also send classifier/head params for synchronization if enabled
+            if self.sync_classifier and ("classifier" in param_name or "pre_classifier" in param_name or "score" in param_name):
+                return True
             if self.bias and "bias" in param_name:
                 if any(keyword in param_name for keyword in ["lin", "self", "dense", "conv", "mlp", "self_attn"]):
                     return True
@@ -241,33 +269,36 @@ class FedSVDClient(BaseClient):
             return self._should_track_for_delta(param_name)
 
     def get_parameters(self, config=None):
-        """Return delta (current - initial) of parameters based on mode.
-        
-        This matches 3rd-party fed-svd implementation:
-        - Client sends: theta_diff = {k: (state_dict[k] - init_state_dict[k]) for k in keys}
-        - Server aggregates deltas and applies to base model
+        """Return parameters (full or delta) based on `fedsvd_config.send_deltas`.
+
+        - If `send_deltas=True`: return (current - initial) for the selected subset.
+        - If `send_deltas=False`: return current values for the selected subset.
         """
-        if self.init_state_dict is None:
+        if self.send_deltas and self.init_state_dict is None:
             raise ValueError(
                 "init_state_dict is None. Make sure set_parameters() was called before get_parameters()."
             )
         
         current_state = self.model.state_dict()
         
-        # Compute deltas for parameters that should be sent
+        # Compute values for parameters that should be sent
         delta_dict = OrderedDict()
         for name in sorted(current_state.keys()):
             if self._should_send_parameter(name):
-                if name not in self.init_state_dict:
-                    raise KeyError(
-                        f"Parameter {name} not found in init_state_dict. "
-                        f"This should not happen - check _should_track_for_delta()."
-                    )
-                # Compute delta: current - initial
-                delta = current_state[name].cpu() - self.init_state_dict[name]
-                delta_dict[name] = delta
+                if self.send_deltas:
+                    if name not in self.init_state_dict:
+                        raise KeyError(
+                            f"Parameter {name} not found in init_state_dict. "
+                            f"This should not happen - check _should_track_for_delta()."
+                        )
+                    # Delta: current - initial
+                    value = current_state[name].cpu() - self.init_state_dict[name]
+                else:
+                    # Full param: current
+                    value = current_state[name].detach().cpu()
+                delta_dict[name] = value
         
-        # Debug: Log delta statistics
+        # Debug: Log statistics
         if self.debug and len(delta_dict) > 0:
             first_key = next(iter(delta_dict.keys()))
             first_delta = delta_dict[first_key]

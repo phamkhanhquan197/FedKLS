@@ -18,6 +18,3 @@ from mak.strategies.flex_lora_strategy import FlexLoRAStrategy as FlexLoRA
 # FedSVD: FedAvg-like strategy for SVD/adapter-based finetuning
 # Expose as `FedSVD` so config can use: server.strategy: FedSVD
 from mak.strategies.fedsvd_strategy import FedSVDStrategy as FedSVD
-
-# FedPOE: placeholder (TF/Keras upstream implementation under 3rd-party/Fed-POE)
-# from mak.strategies.fedpoe_strategy import FedPOE

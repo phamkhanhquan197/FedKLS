@@ -1279,6 +1279,7 @@ def get_strategy(
             "agg_fedex": bool(fedsvd_cfg.get("agg_fedex", False)),
             "recalculate_svd_period": int(fedsvd_cfg.get("recalculate_svd_period", 0) or 0),
             "svd_warmup_steps": int(fedsvd_cfg.get("svd_warmup_steps", 0) or 0),
+            "include_classifier": bool(fedsvd_cfg.get("include_classifier", True)),
             "debug": bool(fedsvd_cfg.get("debug", False)),
             "bias": bool((config.get("peft", {}) or {}).get("bias", True)),
             # Provide parameter names so the strategy can select LoRA A/B.
