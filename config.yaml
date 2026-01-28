@@ -40,11 +40,11 @@ client:
   save_train_res : True
   # Too many total_cpus lets Ray schedule many actors concurrently and can OOM host RAM.
   # Keep this near your physical core count.
-  total_cpus : 20
+  total_cpus : 40
   total_gpus : 1 # no. of GPU's assigned for whole simulation
   gpu : True  # True or Faslse, Use GPU for training or not.
   # Request more resources per actor => fewer concurrent actors => less RAM/GPU contention.
-  num_cpus : 2
+  num_cpus : 4
   # With 1 GPU total, setting 1.0 forces a single GPU actor at a time.
   num_gpus : 0.1
 
@@ -78,7 +78,7 @@ fedsvd_config:
   init_method: "kaiming"  # kaiming = PEFT default (adaptive variance), gaussian = N(0, 0.01)
   debug: False      # True => show Ray actor logs (client messages; False => hide them
   dp:
-    enabled: False        # True => enable DP-SGD (Opacus) during client training
+    enabled: False         # True => enable DP-SGD (Opacus) during client training
     eps: 8.0              # target epsilon (used to compute noise_multiplier if noise_multiplier is null)
     delta: 1.0e-5         # target delta
     max_grad_norm: 2.0    # per-sample grad clipping norm
