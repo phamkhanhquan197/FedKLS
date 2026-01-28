@@ -57,17 +57,7 @@ class FedSVDClient(BaseClient):
         return f"FedSVD client (mode={self.fedsvd_mode})"
 
     def _configure_trainable_parameters(self) -> None:
-        """Configure requires_grad flags similar to 3rd-party fed-svd.
-
-        - Always freeze the base model weights.
-        - Train LoRA/SVD adapter params (A/B) (FFA freezes A).
-        - Also train and sync classifier head by default for text models, except
-          for backbones where 3rd-party freezes it (roberta/vit).
-        """
-
-        # Freeze everything first
-        for _n, p in self.model.named_parameters():
-            p.requires_grad = False
+        """Just freeze .A in FFA mode, keep others as is."""
 
         trainable_names: set[str] = set()
 
@@ -96,42 +86,19 @@ class FedSVDClient(BaseClient):
                 if ("classifier" in n) or ("pre_classifier" in n) or ("score" in n):
                     trainable_names.add(n)
 
-        # Apply requires_grad mask
+        # Just freeze .A in FFA mode, keep others as is.
         for name, param in self.model.named_parameters():
-            if name in trainable_names:
-                # FFA mode freezes A
-                if self.fedsvd_mode == "ffa" and name.endswith(".A"):
-                    param.requires_grad = False
-                else:
-                    param.requires_grad = True
-            else:
+            if self.fedsvd_mode == "ffa" and name.endswith(".A"):
                 param.requires_grad = False
+            elif name in trainable_names:
+                param.requires_grad = True
+        # Other layers keep their original requires_grad state (do not force False)
 
-        # Safety net: if we ended up freezing everything, recover by unfreezing
-        # adapter parameters by name. This prevents crashes in optimizer setup.
-        num_trainable = sum(1 for p in self.model.parameters() if p.requires_grad)
-        if num_trainable == 0:
-            has_adapter_params = any(
-                n.endswith(".A") or n.endswith(".B") or n.endswith(".bias")
-                for n, _p in self.model.named_parameters()
-            )
-            if not has_adapter_params:
-                raise RuntimeError(
-                    "FedSVD expected an SVD-adapted model with adapter parameters (.A/.B), "
-                    "but none were found on the client model. Ensure client_model is the SVD/LoRA-adapted model "
-                    "(not the base model) when using strategy=FedSVD."
-                )
-
-            # Unfreeze LoRA/SVD params as a fallback
-            for n, p in self.model.named_parameters():
-                if n.endswith(".B"):
-                    p.requires_grad = True
-                elif self.fedsvd_mode != "ffa" and n.endswith(".A"):
-                    p.requires_grad = True
-                elif self.bias and n.endswith(".bias"):
-                    p.requires_grad = True
-                else:
-                    p.requires_grad = False
+        # # Print out all trainable layers for debugging
+        # print("[FedSVDClient] Trainable parameters:")
+        # for name, param in self.model.named_parameters():
+        #     if param.requires_grad:
+        #         print(f"  [trainable] {name} | shape: {tuple(param.shape)}")
     
     def set_parameters(self, parameters):
         """Override to match 3rd-party Fed-SVD behavior exactly.
@@ -141,7 +108,7 @@ class FedSVDClient(BaseClient):
         - FFA (no SVD reinit): FILTER to load ONLY B, keep A unchanged
         - FFA (with SVD reinit): Load all (A + B reinit)
         
-        W_res: Direct attribute → not transmitted → always unchanged
+        # W_res: This is a direct model attribute, not part of the state_dict, so it is never transmitted between server and client and always remains unchanged on the client.
         """
         from mak.utils.general import set_params
         
