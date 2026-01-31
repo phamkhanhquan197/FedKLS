@@ -5,7 +5,7 @@ import os
 import random
 from datetime import date, datetime
 from logging import INFO
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import flwr as fl
 import numpy as np
@@ -29,6 +29,8 @@ from mak.servers.ffa_lora_server import FFALoRAServer
 from mak.servers.fednova_server import FedNovaServer
 from mak.servers.scaffold_server import ScaffoldServer
 from mak.servers.pfedmoap_server import PFedMoAPServer
+from mak.servers.fedpoe_server import FedPOEServer
+from mak.servers.fedpoe_server import FedPOERegressionTextServer
 from mak.servers.fedsa_lora_server import FedSALoRAServer
 from mak.servers.flex_lora_server import FlexLoRAServer
 
@@ -37,6 +39,8 @@ from mak.strategies.scaffold_strategy import ScaffoldStrategy
 from mak.strategies.fedklsvd_strategy import FedKLSVDStrategy
 from mak.strategies.ffa_lora_strategy import FFALoRAStrategy
 from mak.strategies.pfedmoap_strategy import PFedMoAPStrategy
+from mak.strategies.fedpoe_strategy import FedPOEStrategy
+from mak.strategies.fedpoe_strategy import FedPOERegressionTextStrategy
 from mak.strategies.fedsa_lora_strategy import FedSALoRAStrategy
 from mak.strategies.flex_lora_strategy import FlexLoRAStrategy
 
@@ -88,6 +92,21 @@ def get_target_keys(model, bias=True) -> List[str]:
     # Unique + deterministic order
     return sorted(set(lora_keys))
 
+def _resolve_ray_tmp_dir(config_sim: dict) -> Optional[str]:
+    common_cfg = (config_sim or {}).get("common", {})
+    candidate = (
+        common_cfg.get("ray_tmp_dir")
+        or os.environ.get("FEDKLS_RAY_TMPDIR")
+        or os.environ.get("RAY_TMPDIR")
+        or os.environ.get("TMPDIR")
+    )
+    if not candidate:
+        return None
+    ray_tmp_dir = os.path.abspath(os.path.expanduser(str(candidate)))
+    os.makedirs(ray_tmp_dir, exist_ok=True)
+    return ray_tmp_dir
+
+
 def get_device_and_resources(config_sim):
     # Check if GPU is available
     device = torch.device(
@@ -116,6 +135,31 @@ def get_device_and_resources(config_sim):
         "num_cpus": config_sim["client"]["num_cpus"],
         "num_gpus": config_sim["client"]["num_gpus"] if device.type == "cuda" else 0.0,
     }
+
+    # Ray writes session + spill data under /tmp by default. Allow redirecting this
+    # to a larger disk to avoid GCS/raylet crashes when /tmp is full.
+    if not config_sim["common"].get("multi_node", False):
+        ray_tmp_dir = _resolve_ray_tmp_dir(config_sim)
+        if ray_tmp_dir:
+            ray_init_args["_temp_dir"] = ray_tmp_dir
+            # Only set spilling config if the installed Ray supports it.
+            # Some Ray versions reject unknown kwargs (RuntimeError: Unknown keyword argument(s)).
+            try:
+                import inspect
+                import ray
+
+                if "object_spilling_config" in inspect.signature(ray.init).parameters:
+                    spill_dir = os.path.join(ray_tmp_dir, "spill")
+                    os.makedirs(spill_dir, exist_ok=True)
+                    ray_init_args.setdefault(
+                        "object_spilling_config",
+                        json.dumps(
+                            {"type": "filesystem", "params": {"directory_path": spill_dir}}
+                        ),
+                    )
+            except Exception:
+                pass
+
     if config_sim["common"]["multi_node"]:
         ray_init_args = {}
         ray_init_args["address"] = "auto"
@@ -231,16 +275,23 @@ def get_dataset(config_sim):
         raise Exception(f"Dataset name should be among : {list(dataset_info.keys())}")
     else:
         fds = FederatedDataset(dataset=dataset_name, partitioners=partitioner)
-        # get test column name
-        test_set = dataset_info[dataset_name]["test_set"]
-        centralized_testset = fds.load_split(test_set)
+        # get test split name (can be None for datasets with only 'train')
+        test_set = dataset_info[dataset_name].get("test_set")
+        centralized_testset = None
+        if test_set is not None:
+            centralized_testset = fds.load_split(test_set)
 
         # get class names for pFedMoAP
         out_col = dataset_info[dataset_name]["output_column"]
-        feat = centralized_testset.features.get(out_col, None)
-        if feat is not None and hasattr(feat, "names") and feat.names:
-            classnames = list(feat.names)
+        if centralized_testset is not None:
+            feat = centralized_testset.features.get(out_col, None)
+            if feat is not None and hasattr(feat, "names") and feat.names:
+                classnames = list(feat.names)
+            else:
+                num_classes = dataset_info[dataset_name]["num_classes"]
+                classnames = [f"class{i}" for i in range(num_classes)]
         else:
+            # Fallback: if there's no centralized testset, we can't read label names
             num_classes = dataset_info[dataset_name]["num_classes"]
             classnames = [f"class{i}" for i in range(num_classes)]
 
@@ -254,11 +305,59 @@ def extract_linear_layers(model, config):
     skip_layer_names = ["pre_classifier", "classifier", "model.norm", "score", "classifier.dense", "classifier.out_proj"]
     attenion_layer_names = ["self_attn", "attn", "attention"]
 
+    # Optional: match PEFT-style target modules (e.g., ["query", "value"]) like 3rd-party/fed-svd.
+    # For DistilBERT, HF uses q_lin/k_lin/v_lin/out_lin instead of query/key/value.
+    target_modules = (config or {}).get("peft", {}).get("target_modules", None)
+    if isinstance(target_modules, str):
+        target_modules = [target_modules]
+    if target_modules is not None:
+        target_modules = [str(x) for x in target_modules if str(x).strip()]
+
+    # Implicit default: when running FedSVD with fedsvd_lora, target query/value only
+    # to match the 3rd-party fed-svd PEFT LoRA placement.
+    if not target_modules:
+        strategy_name = str((config or {}).get("server", {}).get("strategy", "")).lower()
+        peft_method = str((config or {}).get("peft", {}).get("method", "")).lower()
+        if strategy_name == "fedsvd" and peft_method == "fedsvd_lora":
+            target_modules = ["query", "value"]
+
+    model_state = None
+    try:
+        model_state = model.state_dict()
+    except Exception:
+        model_state = {}
+
+    is_distilbert = any(k.startswith("distilbert.") for k in model_state.keys())
+    if target_modules and is_distilbert:
+        # Minimal mapping to emulate PEFT target_modules=["query","value"] on DistilBERT.
+        # query -> q_lin, value -> v_lin
+        mapping = {
+            "query": "q_lin",
+            "key": "k_lin",
+            "value": "v_lin",
+            "out": "out_lin",
+        }
+        resolved = []
+        for tm in target_modules:
+            resolved.append(mapping.get(tm, tm))
+        target_modules = resolved
+
     for name, module in model.named_modules():
         # Check if the module is a Linear layer
         if isinstance(module, torch.nn.Linear):
             if name in skip_layer_names: # Check if any part of the layer_to_skip is in the current layer's name
                 continue
+
+            # If target_modules are specified, select only those submodules.
+            # Example: BERT/Roberta: ...attention.self.query / ...attention.self.value
+            #          DistilBERT:   ...attention.q_lin / ...attention.v_lin
+            if target_modules:
+                leaf = name.split(".")[-1]
+                if leaf in set(target_modules):
+                    linear_layers[name] = module
+                continue
+
+            # Fallback: legacy selection by broad attention path matching
             if config["peft"]["layer"] == "attention_only":
                 if any(att_name in name for att_name in attenion_layer_names):
                     linear_layers[name] = module
@@ -298,24 +397,52 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
     rank = config["peft"]["rank"]
     alpha = config["peft"]["alpha"]
     method = config["peft"]["method"]
+    dp_fedsvd = False
+    if config["fedsvd_config"]:
+        dp_fedsvd = config["fedsvd_config"]["dp"]["enabled"]
 
     for name, layer in layers_to_svd.items():
         weight_matrix = layer.weight.data
         original_bias = layer.bias.data if layer.bias is not None else None
 
-        if method == 'lora':
-            # Original LoRA: Random initialization without SVD
+        if method == 'lora' or method == 'fedsvd_lora':
+            # LoRA initialization - PEFT convention: A(r, in), B(out, r)
+            # Forward: ΔW = B @ A
+            fedsvd_init = None
+            if method == 'fedsvd_lora':
+                fedsvd_cfg = config.get("fedsvd_config", {})
+                fedsvd_init = fedsvd_cfg.get("init_method", "kaiming")
+            
             if isinstance(layer, torch.nn.Conv2d):
                 c_out, c_in, k1, k2 = weight_matrix.shape
-                A = torch.randn(c_out, rank, device=weight_matrix.device) * 0.01  # Gaussian init
-                B = torch.zeros(rank, c_in * k1 * k2, device=weight_matrix.device)  # Zero init
+                d_in = c_in * k1 * k2
+                
+                # A: (r, in) - Kaiming init
+                A = torch.empty(rank, d_in, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                if fedsvd_init == "gaussian":
+                    init.normal_(A, mean=0.0, std=0.01)
+                else:
+                    init.kaiming_uniform_(A, a=math.sqrt(5))
+                
+                # B: (out, r) - Zero init
+                B = torch.zeros(c_out, rank, device=weight_matrix.device, dtype=weight_matrix.dtype)
                 W_res = weight_matrix
             else:
                 d_out, d_in = weight_matrix.shape
-                A = torch.randn(d_out, rank, device=weight_matrix.device) * 0.01  # Gaussian init
-                B = torch.zeros(rank, d_in, device=weight_matrix.device)  # Zero init
+                
+                # A: (r, in) - Kaiming init
+                A = torch.empty(rank, d_in, device=weight_matrix.device, dtype=weight_matrix.dtype)
+                if fedsvd_init == "gaussian":
+                    init.normal_(A, mean=0.0, std=0.01)
+                else:
+                    init.kaiming_uniform_(A, a=math.sqrt(5))
+                
+                # B: (out, r) - Zero init
+                B = torch.zeros(d_out, rank, device=weight_matrix.device, dtype=weight_matrix.dtype)
                 W_res = weight_matrix
-            log(INFO, f"Layer {name}: Applied LoRA with rank {rank}.")
+            
+            init_name = fedsvd_init if fedsvd_init else "kaiming"
+            log(INFO, f"Layer {name}: Applied LoRA with rank {rank} (init={init_name}, A({rank},{d_in}), B({d_out if not isinstance(layer, torch.nn.Conv2d) else c_out},{rank})).")
 
         elif method == 'ffa_lora':
             # FFA-LoRA: Initialize A (configurable), B = 0, freeze A forever (external control)
@@ -572,9 +699,9 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
 
         # Create appropriate adapter
         if isinstance(layer, torch.nn.Conv2d):
-            new_layer = ConvAdapter(original_conv=layer, W_res=W_res, A=A, B=B, alpha=alpha, rank=rank)
+            new_layer = ConvAdapter(original_conv=layer, W_res=W_res, A=A, B=B, alpha=alpha, rank=rank, use_dp = dp_fedsvd)
         else:
-            new_layer = SVDAdapter(W_res=W_res, A=A, B=B, alpha=alpha, rank=rank, original_bias=original_bias)
+            new_layer = SVDAdapter(W_res=W_res, A=A, B=B, alpha=alpha, rank=rank, original_bias=original_bias, use_dp = dp_fedsvd)
         
         # Freeze A for FFA-LoRA (external control)
         if method == "ffa_lora":
@@ -710,7 +837,6 @@ def get_model(config, shape, classnames=None):
                 model_name,
                 num_labels=num_classes,
                 # quantization_config=quantization_8_bit_config,
-                device_map="auto",
             )
             # Set pad_token_id to eos_token_id
             if base_model.config.pad_token_id is None:
@@ -737,7 +863,7 @@ def get_model(config, shape, classnames=None):
                     return logits
             base_model = CustomCLIP()
         else:
-            base_model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=num_classes, device_map="auto")
+            base_model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=num_classes)
 
         return base_model
 
@@ -758,6 +884,7 @@ def get_evaluate_fn(
     model,
 ):
     """Return an evaluation function for centralized evaluation."""
+
     dataset_name = config_sim["common"]["dataset"]
     # shape = dataset_info[dataset_name]["input_shape"]
 
@@ -768,6 +895,14 @@ def get_evaluate_fn(
         strategy = config_sim.get("server", {}).get("strategy", "")
         method = config_sim.get("peft", {}).get("method", "")
         bias = config_sim.get("peft", {}).get("bias", "")
+
+        # Handle FedSVD strategy - need special handling for parameter mapping
+        if strategy == "FedSVD":
+            fedsvd_mode = config_sim.get("fedsvd_config", {}).get("mode", "fedavg")
+            if fedsvd_mode == "ffa":
+                method = "ffa_lora"  # Treat as FFA-LoRA (only B matrices)
+            else:
+                method = "lora"  # FedAvg mode: both A and B
 
         if strategy == "PFedMoAP" or method == "pfedmoap":
             if len(parameters) != 1:
@@ -936,6 +1071,60 @@ def get_server(strategy, client_manager, out_file_path, target_acc, num_train_th
             num_train_thread=num_train_thread,
             num_test_thread=num_test_thread,
         )
+    elif isinstance(strategy, FedPOEStrategy):
+        return FedPOEServer(
+            strategy=strategy,
+            client_manager=client_manager,
+            out_file_path=out_file_path,
+            target_acc=target_acc,
+            num_train_thread=num_train_thread,
+            num_test_thread=num_test_thread,
+        )
+    elif isinstance(strategy, FedPOERegressionTextStrategy):
+        return FedPOERegressionTextServer(
+            strategy=strategy,
+            client_manager=client_manager,
+            out_file_path=out_file_path,
+            target_acc=target_acc,
+            num_train_thread=num_train_thread,
+            num_test_thread=num_test_thread,
+        )
+    elif isinstance(strategy, PFedMoAPStrategy):
+        return PFedMoAPServer(
+            strategy=strategy,
+            client_manager=client_manager,
+            out_file_path=out_file_path,
+            target_acc=target_acc,
+            num_train_thread=num_train_thread,
+            num_test_thread=num_test_thread,
+        )
+    elif isinstance(strategy, FedPOEStrategy):
+        return FedPOEServer(
+            strategy=strategy,
+            client_manager=client_manager,
+            out_file_path=out_file_path,
+            target_acc=target_acc,
+            num_train_thread=num_train_thread,
+            num_test_thread=num_test_thread,
+        )
+    elif isinstance(strategy, FedPOERegressionTextStrategy):
+        return FedPOERegressionTextServer(
+            strategy=strategy,
+            client_manager=client_manager,
+            out_file_path=out_file_path,
+            target_acc=target_acc,
+            num_train_thread=num_train_thread,
+            num_test_thread=num_test_thread,
+        )
+    elif isinstance(strategy, PFedMoAPStrategy):
+        return PFedMoAPServer(
+            strategy=strategy,
+            client_manager=client_manager,
+            out_file_path=out_file_path,
+            target_acc=target_acc,
+            num_train_thread=num_train_thread,
+            num_test_thread=num_test_thread,
+        )
     elif isinstance(strategy, FedSALoRAStrategy):
         return FedSALoRAServer(
             strategy=strategy,
@@ -1039,6 +1228,65 @@ def get_strategy(
         },
     } 
 
+    # FedPOE configuration (Hedge mixture weights a/b updated from client-reported losses)
+    if STRATEGY == "FedPOE":
+        fedpoe_cfg = config.get("fedpoe_config", {}) or {}
+        kwargs["FedPOE"] = {
+            "eta": float(fedpoe_cfg.get("eta", 0.0) or 0.0),
+        }
+
+    # FedPOERegressionText configuration (Fed-POE regression-style over text embeddings)
+    if STRATEGY == "FedPOERegressionText":
+        poe_cfg = config.get("fedpoe_regression_text_config", {}) or {}
+        kwargs["FedPOERegressionText"] = {
+            "eta": float(poe_cfg.get("eta", 0.0) or 0.0),
+            "lam": float(poe_cfg.get("lam", 0.0) or 0.0),
+            "num_kernels": int(poe_cfg.get("num_kernels", 4) or 4),
+            "n_components": int(poe_cfg.get("n_components", 256) or 256),
+            "pooling": str(poe_cfg.get("pooling", "auto") or "auto"),
+        }
+
+    # Centralized evaluation:
+    # - For most strategies: require a test split (test_data must not be None).
+    # - For FedPOE / FedPOERegressionText: if the dataset has no test split
+    #   (test_data is None), skip centralized evaluation because these methods
+    #   rely on client-side eval signals.
+    if test_data is None and STRATEGY in {"FedPOE", "FedPOERegressionText"}:
+        log(INFO, f"{STRATEGY}: centralized testset is None -> skipping centralized evaluation.")
+        evaluate_fn = None
+    else:
+        evaluate_fn = get_evaluate_fn(
+            centralized_testset=test_data,
+            config_sim=config,
+            save_model_dir=save_model_dir,
+            metrics_file=out_file_path,
+            device=device,
+            apply_transforms_test=apply_transforms_test,
+            model=model,
+        )
+
+    # FedSVD configuration (matches config.yaml:fedsvd_config)
+    # NOTE: The strategy can aggregate subsets (LoRA A/B) only if it can map
+    # incoming ndarrays to parameter names. For standard PyTorch models we can
+    # derive names from `model.state_dict()`. For other protocols, the strategy
+    # falls back to aggregating all arrays.
+    if STRATEGY == "FedSVD":
+        fedsvd_cfg = config.get("fedsvd_config", {}) or {}
+        kwargs["FedSVD"] = {
+            "mode": fedsvd_cfg.get("mode", "fedavg"),
+            "send_deltas": bool(fedsvd_cfg.get("send_deltas", False)),
+            "agg_flora": bool(fedsvd_cfg.get("agg_flora", False)),
+            "agg_fedex": bool(fedsvd_cfg.get("agg_fedex", False)),
+            "recalculate_svd_period": int(fedsvd_cfg.get("recalculate_svd_period", 0) or 0),
+            "svd_warmup_steps": int(fedsvd_cfg.get("svd_warmup_steps", 0) or 0),
+            "include_classifier": bool(fedsvd_cfg.get("include_classifier", True)),
+            "debug": bool(fedsvd_cfg.get("debug", False)),
+            "bias": bool((config.get("peft", {}) or {}).get("bias", True)),
+            # Provide parameter names so the strategy can select LoRA A/B.
+            # IMPORTANT: must match the same deterministic order used by `initial_parameters` below.
+            "param_name_fn": (lambda: [k for k, _ in sorted(model.state_dict().items())]) if model is not None else None,
+        }
+
     if STRATEGY == "PFedMoAP":
         prompt_len = config["pfedmoap_config"]["prompt_len"]
         
@@ -1048,9 +1296,15 @@ def get_strategy(
         # init global prompt
         prompt0 = (0.02 * np.random.randn(prompt_len, prompt_dim)).astype(np.float32)
         init_params = fl.common.ndarrays_to_parameters([prompt0])
+    elif STRATEGY == "FedPOERegressionText":
+        # This strategy only exchanges a lightweight theta vector for an RFF head.
+        # The theta shape is derived client-side from embedding dim, so we start empty.
+        init_params = fl.common.ndarrays_to_parameters([])
     else:
+        # Sort keys for deterministic order (critical for proper parameter loading)
+        sorted_state_dict = sorted(model.state_dict().items())
         init_params = fl.common.ndarrays_to_parameters(
-            [val.cpu().numpy() for _, val in model.state_dict().items()]
+            [val.cpu().numpy() for _, val in sorted_state_dict]
         )
 
     return getattr(__import__("mak.strategies", fromlist=[STRATEGY]), STRATEGY)(
@@ -1059,15 +1313,7 @@ def get_strategy(
         min_fit_clients=MIN_CLIENTS_FIT,
         min_evaluate_clients=MIN_CLIENTS_EVAL,
         min_available_clients=NUM_CLIENTS,
-        evaluate_fn=get_evaluate_fn(
-            centralized_testset=test_data,
-            config_sim=config,
-            save_model_dir=save_model_dir,
-            metrics_file=out_file_path,
-            device=device,
-            apply_transforms_test=apply_transforms_test,
-            model=model,
-        ),
+        evaluate_fn=evaluate_fn,
         evaluate_metrics_aggregation_fn=weighted_average,
         on_fit_config_fn=get_fit_config_fn(config_sim=config),
         on_evaluate_config_fn=get_evaluate_config_fn(config_sim=config),
@@ -1199,11 +1445,27 @@ def parse_args() -> argparse.Namespace:
 
 
 def get_optimizer(model, client_config):
+    params = [p for p in model.parameters() if p.requires_grad]
+    if len(params) == 0:
+        # Safety net for FedSVD: if adapter params exist but were accidentally
+        # frozen, unfreeze them by name to avoid hard-crashing.
+        if client_config.get("strategy") == "FedSVD":
+            has_adapters = False
+            for n, p in model.named_parameters():
+                if n.endswith(".A") or n.endswith(".B"):
+                    has_adapters = True
+                    p.requires_grad = True
+            if has_adapters:
+                params = [p for p in model.parameters() if p.requires_grad]
+
+        if len(params) == 0:
+            raise ValueError("No trainable parameters found (all requires_grad=False)")
+
     if client_config["optimizer"] == "adam":
-        return torch.optim.Adam(model.parameters(), lr=client_config["lr"])
+        return torch.optim.Adam(params, lr=client_config["lr"])
     else:
         return torch.optim.SGD(
-            model.parameters(),
+            params,
             lr=client_config["lr"],
             momentum=client_config["sgd_momentum"],
         )

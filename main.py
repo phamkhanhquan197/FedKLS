@@ -65,6 +65,11 @@ def main():
     model_name = config_sim['common']['model']
     shape = dataset_info[dataset_name]["input_shape"]
 
+    # DP is only used by FedSVD in this project.
+    dp_enabled = bool((config_sim.get("fedsvd_config", {}) or {}).get("dp", {}).get("enabled", False)) and (
+        config_sim.get("server", {}).get("strategy") == "FedSVD"
+    )
+
     if model_name == "clip" or config_sim["server"]["strategy"] == "PFedMoAP":
         # optional: derive img_size from pfedmoap_config/backbone
         transformation_pipeline = CLIPTransformationPipeline(dataset_name=dataset_name, img_size=224)
@@ -72,7 +77,7 @@ def main():
     # Check if the dataset is a text dataset and use the appropriate transformation pipeline
     if dataset_name in ['SetFit/20_newsgroups', 'legacy-datasets/banking77', 'fancyzhx/dbpedia_14', 'stanfordnlp/sst2']:
         # For text datasets, we need to use a different transformation pipeline
-        transformation_pipeline = TextTransformationPipeline(dataset_name=dataset_name, model_name=model_name)
+        transformation_pipeline = TextTransformationPipeline(dataset_name=dataset_name, model_name=model_name, dp_enabled=dp_enabled)
     elif dataset_name in ['pranavmr/MM-IMDb']:
         # Get multimodal feature keys from dataset_info
         features = dataset_info[dataset_name]["feature_key"]
@@ -83,7 +88,8 @@ def main():
         if "text" in features:
             transformation_pipeline["text"] = TextTransformationPipeline(
                 dataset_name=dataset_name, 
-                model_name=model_name
+                model_name=model_name,
+                dp_enabled=dp_enabled,
             )
 
         def apply_transforms(example):
@@ -173,7 +179,7 @@ def main():
             #Server always needs the SVD-adapted model when PEFT is enabled
             server_model = svd_model
 
-        elif peft_method in ["pissa", "milora", "middle", "lora", "ffa_lora", "fedsa_lora", "flex_lora"]:
+        elif peft_method in ["pissa", "milora", "middle", "lora", "ffa_lora", "fedsa_lora", "flex_lora", "fedsvd_lora"]:
             log(INFO, "Applying SVD to create svd model for server...")
             # Create a deep copy of base_model to avoid modifying it
             model_for_svd = copy.deepcopy(base_model)
@@ -284,7 +290,12 @@ def main():
         elif peft_method == "flex_lora":
             model = copy.deepcopy(client_model)
         else:
-            model = client_model
+            # Only FedSVD mutates requires_grad flags heavily; give each client
+            # its own model instance to avoid cross-client interference.
+            if config_sim.get("server", {}).get("strategy") == "FedSVD":
+                model = copy.deepcopy(client_model)
+            else:
+                model = client_model
             kl_norm = None
 
         rank_policy_map = config_sim.get("flex_lora_config", {}).get("client_rank_policy_map", None)
@@ -320,3 +331,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+

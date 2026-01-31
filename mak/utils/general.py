@@ -107,7 +107,9 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays],
         return  # Skip if parameters is None
 
     if len(model_state.items()) == len(params): #Full model update (Round = 1 or full finetune)
-        params_dict = zip(model_state.keys(), params)
+        # Sort keys to match server's sorted initial_parameters
+        sorted_keys = sorted(model_state.keys())
+        params_dict = zip(sorted_keys, params)
         state_dict = OrderedDict({k: v.clone().detach().to(device) if isinstance(v, torch.Tensor) else torch.tensor(v, device=device)
                                   for k, v in params_dict})
         model.load_state_dict(state_dict, strict=False)
@@ -158,6 +160,15 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays],
                     ]
                 else:
                     lora_keys = [k for k in model_state.keys() if k.endswith(".B")]
+            
+            # Sort keys to match client's sorted order
+            lora_keys = sorted(lora_keys)
+            lora_params = OrderedDict()
+            for key, array in zip(lora_keys, params):
+                lora_params[key] = torch.from_numpy(array)
+            model_state.update(lora_params)
+            model.load_state_dict(model_state, strict=True)
+            return
         
         elif method == "fedsa_lora": #Send and receive only LoRA A adapters
             if any(k.startswith("distilbert.") for k in model_state.keys()):
@@ -275,6 +286,8 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays],
                     lora_keys = [k for k in model_state.keys() if k.endswith(".B") or k.endswith(".A")]
 
         # Create state dict with only LoRA parameters
+        # CRITICAL: Sort keys to match client's sorted order
+        lora_keys = sorted(lora_keys)
         lora_params = OrderedDict()
         for key, array in zip(lora_keys, params):
             lora_params[key] = torch.from_numpy(array)

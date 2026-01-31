@@ -3,6 +3,10 @@ from flwr.server.strategy import FedAdam, FedAvg, FedAvgM, FedMedian, FedOpt, Fe
 from mak.strategies.fedlaw_strategy import FedLaw
 from mak.strategies.fednova_strategy import FedNovaStrategy as FedNova
 from mak.strategies.power_d import PowD
+from mak.strategies.fedpoe_strategy import FedPOEStrategy as FedPOE
+from mak.strategies.fedpoe_strategy import (
+	FedPOERegressionTextStrategy as FedPOERegressionText,
+)
 from mak.strategies.scaffold_strategy import ScaffoldStrategy as Scaffold
 from mak.strategies.fedklsvd_strategy import FedKLSVDStrategy as FedKLSVD
 from mak.strategies.fedawa_strategy import FedAWAStrategy as FedAWA
@@ -10,3 +14,7 @@ from mak.strategies.ffa_lora_strategy import FFALoRAStrategy as FFALoRA
 from mak.strategies.pfedmoap_strategy import PFedMoAPStrategy as PFedMoAP
 from mak.strategies.fedsa_lora_strategy import FedSALoRAStrategy as FedSALoRA
 from mak.strategies.flex_lora_strategy import FlexLoRAStrategy as FlexLoRA
+
+# FedSVD: FedAvg-like strategy for SVD/adapter-based finetuning
+# Expose as `FedSVD` so config can use: server.strategy: FedSVD
+from mak.strategies.fedsvd_strategy import FedSVDStrategy as FedSVD
