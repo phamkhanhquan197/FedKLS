@@ -20,6 +20,7 @@ from datasets import Dataset
 from mak.utils.helper import get_partitioner
 from mak.utils.dataset_info import dataset_info
 
+
 class DynamicDataScheduler:
     """
     Manages dynamic data allocation schedule for federated learning clients.
@@ -36,7 +37,7 @@ class DynamicDataScheduler:
         num_clients: int,
         total_rounds: int,
         seed: int,
-        config_sim: dict,
+        config_sim: dict,  # NEW: Config dict to recreate partitioner
         val_ratio: float = 0.2,
         mode: str = "incremental",
         round_step: int = 10,
@@ -60,7 +61,7 @@ class DynamicDataScheduler:
         self.num_clients = num_clients
         self.total_rounds = total_rounds
         self.seed = seed
-        self.config_sim = config_sim 
+        self.config_sim = config_sim  # NEW: Store config for repartitioning
         self.val_ratio = val_ratio
         self.mode = mode
         self.round_step = round_step
@@ -76,7 +77,7 @@ class DynamicDataScheduler:
         
         # Schedule cache: (client_id, round) -> train_indices
         self._schedule_cache: Dict[Tuple[int, int], List[int]] = {}
-
+        
         # NEW: Cache for repartitioned datasets per round (for reset mode)
         self._repartitioned_datasets: Dict[int, FederatedDataset] = {}
         
@@ -152,7 +153,8 @@ class DynamicDataScheduler:
                 milestone_sizes.append((milestone, target_size))
             
             # Allocate indices incrementally
-            current_indices = []
+            # Use set for O(1) lookup instead of O(n) list lookup (critical for large datasets)
+            current_indices = set()
             
             for i, (milestone, target_size) in enumerate(milestone_sizes):
                 # Ensure we have at least target_size indices
@@ -171,7 +173,7 @@ class DynamicDataScheduler:
                         size=min(needed, len(remaining_indices)), 
                         replace=False
                     ).tolist()
-                    current_indices.extend(sorted(selected))
+                    current_indices.update(selected)
                 
                 # Determine end round for this milestone
                 if i + 1 < len(milestone_sizes):
@@ -181,11 +183,11 @@ class DynamicDataScheduler:
                     end_round = self.total_rounds + 1
                 
                 # Cache for all rounds in this milestone period
-                # IMPORTANT: Use a copy to avoid reference issues
-                indices_copy = sorted(current_indices.copy())
+                # Convert set to sorted list for caching
+                indices_copy = sorted(list(current_indices))
                 for round_num in range(milestone, end_round):
                     self._schedule_cache[(cid, round_num)] = indices_copy
-  
+    
     def _repartition_dataset(self, round_num: int) -> FederatedDataset:
         """
         Repartition the full dataset with a new seed to create different distribution.
@@ -232,7 +234,7 @@ class DynamicDataScheduler:
         milestones = [r for r in range(1, self.total_rounds + 1) if r % self.round_step == 0]
         if not milestones:
             milestones = [self.total_rounds]
-
+        
         # Ensure round 1 is included
         if 1 not in milestones:
             milestones = [1] + milestones
@@ -245,7 +247,7 @@ class DynamicDataScheduler:
             # Repartition dataset with new seed
             repartitioned_fds = self._repartition_dataset(milestone)
             self._repartitioned_datasets[milestone] = repartitioned_fds
-
+            
             # Load full partitions for all clients (100% allocation)
             for cid in range(self.num_clients):
                 partition = repartitioned_fds.load_partition(partition_id=cid)
@@ -265,7 +267,7 @@ class DynamicDataScheduler:
                 else:
                     # Should not happen if round 1 is in milestones
                     raise ValueError(f"No milestone found before round {round_num}")
-
+    
     def get_client_round_indices(self, client_id: int, round_num: int) -> List[int]:
         """
         Get train indices for a specific client at a specific round.
@@ -336,7 +338,7 @@ class DynamicDataScheduler:
         Args:
             client_id: Client ID
             round_num: Current round number
-            apply_transforms: transform function
+            apply_transforms: Optional transform function
             
         Returns:
             Tuple of (trainset, valset) with proper validation split

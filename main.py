@@ -22,8 +22,10 @@ from mak.utils.helper import (
 from mak.utils.pytorch_transformations import (
     TransformationPipeline, 
     TextTransformationPipeline, 
-    CLIPTransformationPipeline
+    CLIPTransformationPipeline,
+    CLIPCollator,
 )
+from transformers import CLIPProcessor
 from mak.clients import get_client_fn
 from mak.utils.dataset_info import dataset_info
 from mak.utils.flex_lora_utils import build_client_rank_policy_map, build_client_type_map, log_flexlora_assignment
@@ -65,50 +67,54 @@ def main():
     model_name = config_sim['common']['model']
     shape = dataset_info[dataset_name]["input_shape"]
 
-    if model_name == "clip" or config_sim["server"]["strategy"] == "PFedMoAP":
-        # optional: derive img_size from pfedmoap_config/backbone
-        transformation_pipeline = CLIPTransformationPipeline(dataset_name=dataset_name, img_size=224)
+    # Initialize clip_collator for multimodal datasets
+    clip_collator = None
 
     # Check if the dataset is a text dataset and use the appropriate transformation pipeline
     if dataset_name in ['SetFit/20_newsgroups', 'legacy-datasets/banking77', 'fancyzhx/dbpedia_14', 'stanfordnlp/sst2']:
         # For text datasets, we need to use a different transformation pipeline
         transformation_pipeline = TextTransformationPipeline(dataset_name=dataset_name, model_name=model_name)
-    elif dataset_name in ['pranavmr/MM-IMDb']:
-        # Get multimodal feature keys from dataset_info
-        features = dataset_info[dataset_name]["feature_key"]
+        # Get the transformations for train and test data
+        apply_transforms, apply_transforms_test = transformation_pipeline.get_transformations()
+    elif dataset_name in ['kkim0451/UPMC-Food101']:
+        # Dataset stays raw, processing happens in collate_fn
+        log(INFO, f"Multimodal dataset detected: {dataset_name}. Using CLIPProcessor + CLIPCollator.")
+
+        # Create CLIPProcessor (module-level, picklable)
+        clip_processor = CLIPProcessor.from_pretrained(model_name)
         
-        transformation_pipeline = {}
-        if "image" in features:
-            transformation_pipeline["image"] = TransformationPipeline(dataset_name=dataset_name)
-        if "text" in features:
-            transformation_pipeline["text"] = TextTransformationPipeline(
-                dataset_name=dataset_name, 
-                model_name=model_name
-            )
-
-        def apply_transforms(example):
-            transformed = {}
-            if "image" in features:
-                transformed["image"] = transformation_pipeline["image"].apply_train_transform(example["image"])
-            if "text" in features:
-                transformed["text"] = transformation_pipeline["text"].apply_train_transform(example["text"])
-            transformed["labels"] = example["labels"]
-            return transformed
-
-        def apply_transforms_test(example):
-            transformed = {}
-            if "image" in features:
-                transformed["image"] = transformation_pipeline["image"].apply_test_transform(example["image"])
-            if "text" in features:
-                transformed["text"] = transformation_pipeline["text"].apply_test_transform(example["text"])
-            transformed["labels"] = example["labels"]
-            return transformed
+        # Get dataset info
+        output_column = dataset_info[dataset_name]["output_column"]
+        is_multi_label = dataset_info[dataset_name].get("multi_label", False)
+        num_classes = dataset_info[dataset_name]["num_classes"]
+        
+        # Create label_to_idx mapping if classnames provided
+        label_to_idx = None
+        if classnames:
+            label_to_idx = {name: idx for idx, name in enumerate(classnames)}
+        
+        # Create CLIPCollator (module-level, picklable)
+        clip_collator = CLIPCollator(
+            processor=clip_processor,
+            label_key=output_column,
+            multi_label=is_multi_label,
+            num_classes=num_classes,
+            label_to_idx=label_to_idx
+        )
+        
+        # No transforms for multimodal - dataset stays raw
+        apply_transforms = None
+        apply_transforms_test = None
     else: 
-        # For image datasets, we can use the existing transformation pipeline
-        transformation_pipeline = TransformationPipeline(dataset_name=dataset_name)
-        
-    # Get the transformations for train and test data
-    apply_transforms, apply_transforms_test = transformation_pipeline.get_transformations()
+        # For image datasets, check if CLIP model is used
+        if model_name == "clip" or config_sim["server"]["strategy"] == "PFedMoAP":
+            # Use CLIPTransformationPipeline for CLIP models
+            transformation_pipeline = CLIPTransformationPipeline(dataset_name=dataset_name, img_size=224)
+        else:
+            # Use standard TransformationPipeline for other image models
+            transformation_pipeline = TransformationPipeline(dataset_name=dataset_name)
+        # Get the transformations for train and test data
+        apply_transforms, apply_transforms_test = transformation_pipeline.get_transformations()
 
     device, ray_init_args, client_res = get_device_and_resources(config_sim=config_sim)
     out_file_path, saved_models_path = gen_dir_outfile_server(config=config_sim)
@@ -204,7 +210,7 @@ def main():
         client_model = base_model
 
     try:
-        dir_alpha = fds._partitioners['train']._alpha[0]
+        dir_alpha = config_sim['common']['dirichlet_alpha']
     except (AttributeError):
         dir_alpha = "NA"
 
@@ -232,6 +238,7 @@ def main():
     log(INFO,f" =>>>>> Dataset : {dataset_name}") 
     log(INFO,f" =>>>>> Model : {base_model._get_name()} Device : {device}")
     log(INFO,f" =>>>>> Partitoner : {config_sim['common']['data_type']} Alpha : {dir_alpha}")
+    log(INFO,f" =>>>>> Learning Rate: {config_sim['client']['lr']} Batch Size : {config_sim['client']['batch_size']}")
     log(INFO,f" =>>>>> Ray init args : {ray_init_args} Client Res : {client_res}")
 
     # NEW: Create DynamicDataScheduler if dynamic_data is enabled
@@ -260,7 +267,9 @@ def main():
         device=device,
         apply_transforms_test=apply_transforms_test,
         size_weights=size_weights,
-        model=server_model)
+        model=server_model,
+        clip_collator=clip_collator,  # NEW: Pass shared CLIPCollator to strategy for evaluation
+        )
     
     server = get_server(
         strategy = strategy,
@@ -299,6 +308,7 @@ def main():
             kl_norm_dict=kl_normalized_per_client if peft_method == "fedkls" else None,  # Pass precomputed kl_norms
             data_scheduler=data_scheduler,  # NEW: Pass data scheduler for dynamic data allocation
             rank_policy_map=rank_policy_map,
+            clip_collator=clip_collator if dataset_name in ['kkim0451/UPMC-Food101'] else None,  # Pass collator for multimodal
         )(cid)
 
     
@@ -317,6 +327,13 @@ def main():
 
     simu_data_file_path = out_file_path.replace('.csv','_metrics.csv')
     save_simulation_history(hist=hist,path = simu_data_file_path)
-
+    # delete FedKLS client .pt files
+    if config_sim['peft']['enabled'] and config_sim['peft']['method'] == "fedkls":
+        client_models_dir = os.path.join(saved_models_path, "client_models")
+        if os.path.exists(client_models_dir):
+            for f in os.listdir(client_models_dir):
+                if f.endswith(".pt"):
+                    os.remove(os.path.join(client_models_dir, f))
+            
 if __name__ == "__main__":
     main()

@@ -7,9 +7,11 @@ from mak.clients.scaffold_client import ScaffoldClient
 from mak.clients.fedklsvd_client import FedKLSVDClient
 from mak.clients.fedawa_client import FedAWAClient
 from mak.clients.ffa_lora_client import FFALoRAClient
-from mak.clients.flex_lora_client import FlexLoRAClient
 from mak.clients.pfedmoap_client import PFedMoAPClient
 from mak.clients.fedsa_lora_client import FedSALoRAClient
+from mak.clients.flex_lora_client import FlexLoRAClient
+from mak.clients.fedpoe_client import FedPOEClient, FedPOERegressionTextClient
+from mak.clients.fedsvd_client import FedSVDClient
 
 from logging import INFO
 from flwr.common.logger import log
@@ -24,7 +26,8 @@ def get_client_fn(
     kl_norm_dict: dict = None, #Precomputed KL divergence values from server, if available
     data_scheduler = None, # NEW: DynamicDataScheduler for round-aware allocation
     bias = None,
-    rank_policy_map: dict | None = None, # Client ID -> per-layer rank policy mapping for FlexLoRA
+    rank_policy_map: dict = None,
+    clip_collator = None,  # NEW: CLIPCollator for multimodal datasets
 ):
     strategy = config_sim["server"]["strategy"]
     client_class = get_client_class(strategy)
@@ -60,15 +63,18 @@ def get_client_fn(
             trainset, valset = data_scheduler.get_client_round_datasets(
                 client_id=int(cid),
                 round_num=1, #Initial round
-                apply_transforms=apply_transforms,
+                apply_transforms=apply_transforms if clip_collator is None else None,  # No transform for multimodal
             )
         else:
-            # Fallback to old approach
             client_dataset_total = dataset.load_partition(partition_id = int(cid))
             client_dataset_splits = client_dataset_total.train_test_split(test_size=0.2, seed=config_sim["common"]["seed"])
-            
-            trainset = client_dataset_splits["train"].with_transform(apply_transforms)
-            valset = client_dataset_splits["test"].with_transform(apply_transforms)
+
+            if clip_collator is None:
+                trainset = client_dataset_splits["train"].with_transform(apply_transforms)
+                valset = client_dataset_splits["test"].with_transform(apply_transforms)
+            else:
+                trainset = client_dataset_splits["train"]  # Raw dataset
+                valset = client_dataset_splits["test"]    # Raw dataset
 
         #Pass the normalized KL divergence to the client
         kl_norm = kl_normalized_per_client[int(cid)] if method == "fedkls" else 0.0
@@ -86,12 +92,12 @@ def get_client_fn(
             data_scheduler=data_scheduler, # NEW: DynamicDataScheduler for round-aware allocation
             bias=bias,
             rank_policy_map=rank_policy_map,
+            clip_collator=clip_collator,  # NEW: CLIPCollator for multimodal datasets
         )
         return client.to_client()
     
 
     return client_fn
-
 
 def get_client_class(strategy: str):
     if strategy == "FedProx":
@@ -112,5 +118,11 @@ def get_client_class(strategy: str):
         return FedSALoRAClient
     elif strategy == "FlexLoRA":
         return FlexLoRAClient
+    elif strategy == "FedPOE":
+        return FedPOEClient
+    elif strategy == "FedPOE_Regression_Text":
+        return FedPOERegressionTextClient
+    elif strategy == "FedSVD":
+        return FedSVDClient
     else:
         return FedAvgClient

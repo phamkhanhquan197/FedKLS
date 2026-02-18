@@ -97,19 +97,6 @@ dataset_info = {  # Image datasets
 
     ########################################################################
     #Multimodal datasets
-    "pranavmr/MM-IMDb": {
-        "num_classes": 10,
-        "feature_key": ["image", "text"],
-        "output_column": "labels",
-        "test_set": None,  # only 'train' split is provided
-        "input_shape": {
-            "image": (3, 224, 224),
-            "text": (128,)
-        },  
-        "max_sequence_length": 128,  # For transformer models
-        "multi_label": True, # each movice can have multiple genres
-    },
-    
     "kkim0451/UPMC-Food101":
     {
         "num_classes": 101,
@@ -118,9 +105,8 @@ dataset_info = {  # Image datasets
         "test_set": None,  # only 'train' split is provided
         "input_shape": {
             "image": (3, 224, 224),
-            "text": (128,)
+            "text": (77,)
         },  
-        "max_sequence_length": 128,  # For transformer models
-        "multi_label": False,
+        "max_sequence_length": 77,  # CLIP model max_position_embeddings is 77
     },
 }

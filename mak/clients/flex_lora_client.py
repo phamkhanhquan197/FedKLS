@@ -32,6 +32,7 @@ class FlexLoRAClient(BaseClient):
         data_scheduler=None,
         bias=None,
         rank_policy_map: dict | None = None,
+        clip_collator=None,
     ):
         super().__init__(
             client_id=client_id,
@@ -48,7 +49,7 @@ class FlexLoRAClient(BaseClient):
         )
         self.rank_policy_map = rank_policy_map or {}
         self._policy_initialized = False
-
+        self.clip_collator = clip_collator
     def __repr__(self) -> str:
         return " FlexLoRA client"
 

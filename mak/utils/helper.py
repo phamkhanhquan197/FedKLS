@@ -5,14 +5,14 @@ import os
 import random
 from datetime import date, datetime
 from logging import INFO
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import flwr as fl
 import numpy as np
 import pandas as pd
 import torch
 import yaml
-from datasets import Dataset
+from datasets import Dataset, Features, Value, Image as HFImage
 from datasets.utils.logging import disable_progress_bar
 from flwr.common import Scalar
 from flwr.common.logger import log
@@ -20,7 +20,8 @@ from flwr.common.typing import Scalar
 from flwr_datasets import FederatedDataset
 from flwr_datasets.partitioner import DirichletPartitioner, IidPartitioner
 from torch.utils.data import DataLoader
-from sklearn.model_selection import train_test_split
+from PIL import Image, ImageOps
+from pathlib import Path
 
 import mak
 from mak.servers.custom_server import ServerSaveData
@@ -31,6 +32,8 @@ from mak.servers.scaffold_server import ScaffoldServer
 from mak.servers.pfedmoap_server import PFedMoAPServer
 from mak.servers.fedsa_lora_server import FedSALoRAServer
 from mak.servers.flex_lora_server import FlexLoRAServer
+from mak.servers.fedpoe_server import FedPOEServer
+from mak.servers.fedpoe_server import FedPOERegressionTextServer
 
 from mak.strategies.fednova_strategy import FedNovaStrategy
 from mak.strategies.scaffold_strategy import ScaffoldStrategy
@@ -39,6 +42,8 @@ from mak.strategies.ffa_lora_strategy import FFALoRAStrategy
 from mak.strategies.pfedmoap_strategy import PFedMoAPStrategy
 from mak.strategies.fedsa_lora_strategy import FedSALoRAStrategy
 from mak.strategies.flex_lora_strategy import FlexLoRAStrategy
+from mak.strategies.fedpoe_strategy import FedPOEStrategy
+from mak.strategies.fedpoe_strategy import FedPOERegressionTextStrategy
 
 from mak.utils.dataset_info import dataset_info
 from mak.utils.general import set_params, test, weighted_average
@@ -46,7 +51,14 @@ from mak.models.svd_model import SVDAdapter, ConvAdapter
 import math
 from collections import Counter
 import torch.nn.init as init
-from datasets import load_dataset
+
+from datasets import Dataset, Features, Value, Image as HFImage
+from PIL import Image
+from pathlib import Path
+from huggingface_hub import hf_hub_download
+import tempfile
+import zipfile
+import shutil
 
 def get_target_keys(model, bias=True) -> List[str]:
     """Return deterministic sorted list of target parameter names for FFA/Flex LoRA.
@@ -58,7 +70,7 @@ def get_target_keys(model, bias=True) -> List[str]:
     This function is intentionally model-agnostic and must remain deterministic.
     """
     model_state = model.state_dict()
-
+    
     if any(key.startswith("distilbert.") for key in model_state.keys()):
         if bias:
             lora_keys = [k for k in model_state.keys() if ("lin" in k)]
@@ -88,6 +100,418 @@ def get_target_keys(model, bias=True) -> List[str]:
     # Unique + deterministic order
     return sorted(set(lora_keys))
 
+# def _resolve_ray_tmp_dir(config_sim: dict) -> Optional[str]:
+#     common_cfg = (config_sim or {}).get("common", {})
+#     candidate = (
+#         common_cfg.get("ray_tmp_dir")
+#         or os.environ.get("FEDKLS_RAY_TMPDIR")
+#         or os.environ.get("RAY_TMPDIR")
+#         or os.environ.get("TMPDIR")
+#     )
+#     if not candidate:
+#         return None
+#     ray_tmp_dir = os.path.abspath(os.path.expanduser(str(candidate)))
+#     os.makedirs(ray_tmp_dir, exist_ok=True)
+#     return ray_tmp_dir
+
+
+from pathlib import Path
+
+def add_label_from_folder(df, images_dir, split="train", save_csv_path=None):
+    """
+    Infer label and image path from folder structure.
+    Also update dataframe with new columns and optionally save CSV.
+    """
+
+    split_dir = Path(images_dir) / split
+
+    # class mapping
+    class_names = sorted([d.name for d in split_dir.iterdir() if d.is_dir()])
+    class_to_id = {c: i for i, c in enumerate(class_names)}
+
+    filename_col = df.columns[0]
+    text_col = df.columns[1] if len(df.columns) > 1 else df.columns[0]
+
+    image_paths, texts, labels = [], [], []
+
+    # fast lookup: filename -> class
+    filename_to_class = {}
+    for c in class_names:
+        for img in (split_dir / c).iterdir():
+            filename_to_class[img.name] = c
+
+    # new columns (same length as df)
+    label_col = []
+
+    for _, row in df.iterrows():
+        fname = Path(str(row[filename_col])).name
+
+        if fname in filename_to_class:
+            class_name = filename_to_class[fname]
+            label = class_to_id[class_name]
+            img_path = split_dir / class_name / fname
+
+            image_paths.append(str(img_path))
+            texts.append(str(row[text_col]))
+            labels.append(label)
+
+            label_col.append(label)
+        else:
+            # keep row but mark as missing
+            label_col.append(-1)
+
+    # update dataframe WITHOUT changing number of rows
+    df["label"] = label_col
+
+    # optionally overwrite CSV so you can see label column
+    if save_csv_path is not None:
+        df.to_csv(save_csv_path, index=False)
+        print(f"Updated CSV saved to: {save_csv_path}")
+
+    return image_paths, texts, labels
+
+def _find_upmc_root(extract_dir: Path) -> Path | None:
+    """Find extracted UPMC-Food-101 root directory under extract_dir."""
+    candidate = extract_dir / "UPMC-Food-101"
+    if candidate.exists():
+        return candidate
+    # Fallback: search for a directory containing train.csv and images/
+    for root, dirs, files in os.walk(extract_dir):
+        root_p = Path(root)
+        if (root_p / "train.csv").exists() and (root_p / "images").exists():
+            return root_p
+    return None
+
+
+def _ensure_upmc_images_resized(
+    upmc_root: Path,
+    resize_to: int,
+    jpeg_quality: int = 85,
+) -> Path | None:
+    """Create resized copy of UPMC images once, keep originals intact.
+
+    Returns the resized images root (e.g., upmc_root/images_224) if created/existed,
+    otherwise None.
+    """
+    if resize_to <= 0:
+        return None
+
+    src_images = upmc_root / "images"
+    if not src_images.exists():
+        return None
+
+    dst_images = upmc_root / f"images_{resize_to}"
+    done_flag = dst_images / ".done"
+    if done_flag.exists():
+        return dst_images
+
+    # Create resized tree
+    dst_images.mkdir(parents=True, exist_ok=True)
+    # Build worklist first (so we can show an accurate progress bar)
+    to_process: List[tuple[Path, Path]] = []
+    seen = 0
+    for split in ("train", "test"):
+        split_dir = src_images / split
+        if not split_dir.exists():
+            continue
+        for root, _, files in os.walk(split_dir):
+            root_p = Path(root)
+            rel = root_p.relative_to(src_images)
+            out_dir = dst_images / rel
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for fn in files:
+                if not fn.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+                    continue
+                seen += 1
+                src_path = root_p / fn
+                dst_path = out_dir / Path(fn).with_suffix(".jpg").name
+                if dst_path.exists():
+                    continue
+                to_process.append((src_path, dst_path))
+
+    total = len(to_process)
+    converted = 0
+    failed = 0
+    if total == 0:
+        log(INFO, f"Resized images already exist at: {dst_images} (seen={seen})")
+    else:
+        from tqdm import tqdm
+
+        log(INFO, f"Resizing {total} images to {resize_to}x{resize_to} (seen={seen}) ...")
+        pbar = tqdm(
+            to_process,
+            desc=f"Resizing images_{resize_to}x{resize_to}",
+            unit="img",
+            leave=True,
+            mininterval=0.5,
+        )
+        converted = 0
+        for src_path, dst_path in pbar:
+            try:
+                with Image.open(src_path) as im:
+                    im = im.convert("RGB")
+                    # Center-crop square then resize (cheap + deterministic)
+                    im = ImageOps.fit(
+                        im,
+                        (resize_to, resize_to),
+                        method=Image.BICUBIC,
+                    )
+                    im.save(
+                        dst_path,
+                        format="JPEG",
+                        quality=int(jpeg_quality),
+                        optimize=True,
+                    )
+                converted += 1
+            except Exception as e:
+                log(INFO, f"Failed to resize {src_path}: {e}")
+                failed += 1
+            # Keep postfix lightweight (avoid slowing down)
+            if converted and converted % 500 == 0:
+                pbar.set_postfix_str(f"ok={converted}/{total}")
+
+    # Mark complete
+    try:
+        done_flag.write_text(
+            f"resize_to={resize_to}\nquality={jpeg_quality}\nseen={seen}\nconverted={converted}\nfailed={failed}\n",
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+    log(INFO, f"Resized images ready at: {dst_images} (to_process={total}, seen={seen})")
+    return dst_images
+
+
+def load_text_from_zip(repo_id: str, resize_images: bool = False, resize_to: int = 96):
+    """
+    Download zip file from HuggingFace Hub to project data directory, extract, and load text CSV files.
+    
+    Args:
+        repo_id: HuggingFace repository ID (e.g., "kkim0451/UPMC-Food101")
+    
+    Returns:
+        dict: {"train": list of texts, "test": list of texts} or None if failed
+    """
+    try:
+        # Get project root directory (assuming helper.py is in mak/utils/)
+        project_root = Path(__file__).parent.parent.parent
+        data_dir = project_root / "data"
+        data_dir.mkdir(exist_ok=True)
+        
+        # Create dataset-specific directory
+        dataset_name = repo_id.replace("/", "_")
+        dataset_dir = data_dir / dataset_name
+        dataset_dir.mkdir(exist_ok=True)
+        
+        extract_dir = dataset_dir / "extracted"
+        zip_path = dataset_dir / "UPMC-Food-101.zip"
+        
+        # Check if zip file exists and is valid
+        zip_exists_and_valid = False
+        if zip_path.exists():
+            try:
+                # Try to open zip file to verify it's valid
+                with zipfile.ZipFile(zip_path, 'r') as test_zip:
+                    test_zip.testzip()  # Test zip file integrity
+                zip_exists_and_valid = True
+                log(INFO, f"Using existing valid zip file: {zip_path}")
+            except (zipfile.BadZipFile, zipfile.LargeZipFile, Exception) as e:
+                log(INFO, f"Existing zip file is invalid or corrupted: {e}. Will re-download.")
+                zip_path.unlink()  # Remove corrupted zip file
+        
+        # Download zip file if not exists or invalid
+        if not zip_exists_and_valid:
+            log(INFO, f"Downloading zip file from HuggingFace Hub: {repo_id}")
+            downloaded_path = hf_hub_download(
+                repo_id=repo_id,
+                filename="UPMC-Food-101.zip",
+                repo_type="dataset"
+            )
+            # Copy to project data directory
+            shutil.copy2(downloaded_path, zip_path)
+            log(INFO, f"Downloaded zip to: {zip_path}")
+        
+        # Check if extraction is needed
+        # Verify extracted files exist and are complete
+        texts_dir = extract_dir / "texts"
+        train_csv = texts_dir / "train_titles.csv"
+        test_csv = texts_dir / "test_titles.csv"
+        
+        # Check if texts directory exists, if not try to find it
+        if not texts_dir.exists():
+            for root, dirs, files in os.walk(extract_dir):
+                if "texts" in dirs:
+                    texts_dir = Path(root) / "texts"
+                    train_csv = texts_dir / "train_titles.csv"
+                    test_csv = texts_dir / "test_titles.csv"
+                    break
+        
+        # Check if both CSV files exist
+        extraction_needed = False
+        if not extract_dir.exists():
+            extraction_needed = True
+            log(INFO, f"Extract directory does not exist: {extract_dir}")
+        elif not texts_dir.exists():
+            extraction_needed = True
+            log(INFO, f"Texts directory does not exist: {texts_dir}")
+        elif not train_csv.exists() or not test_csv.exists():
+            extraction_needed = True
+            log(INFO, f"CSV files incomplete. Train CSV exists: {train_csv.exists()}, Test CSV exists: {test_csv.exists()}")
+        
+        # Extract zip if needed
+        if extraction_needed:
+            log(INFO, f"Extracting zip to: {extract_dir}")
+            extract_dir.mkdir(exist_ok=True)
+            # Remove existing extraction if incomplete
+            if extract_dir.exists() and (not train_csv.exists() or not test_csv.exists()):
+                log(INFO, f"Removing incomplete extraction directory: {extract_dir}")
+                shutil.rmtree(extract_dir)
+                extract_dir.mkdir(exist_ok=True)
+            
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_dir)
+            log(INFO, f"Extracted zip to: {extract_dir}")
+            
+            # Re-find texts directory after extraction
+            texts_dir = extract_dir / "texts"
+            if not texts_dir.exists():
+                for root, dirs, files in os.walk(extract_dir):
+                    if "texts" in dirs:
+                        texts_dir = Path(root) / "texts"
+                        break
+        else:
+            log(INFO, f"Using existing extracted files in: {extract_dir}")
+        
+        # CSV files should already be located above, but ensure paths are correct
+        train_csv = texts_dir / "train_titles.csv"
+        test_csv = texts_dir / "test_titles.csv"
+        
+        result = {}
+
+        # If extracted dataset root exists, optionally create resized images once
+        upmc_root = _find_upmc_root(extract_dir)
+        if upmc_root is not None:
+            result["upmc_root"] = str(upmc_root)
+            if resize_images:
+                _ensure_upmc_images_resized(upmc_root=upmc_root, resize_to=int(resize_to))
+        
+        # Load train CSV
+        if train_csv.exists():
+            log(INFO, f"Loading train CSV from: {train_csv}")
+            train_df = pd.read_csv(train_csv)
+            # Find text column (usually 'title' or second column)
+            text_col = None
+            for col in train_df.columns:
+                if 'title' in col.lower() or 'text' in col.lower():
+                    text_col = col
+                    break
+            if text_col is None and len(train_df.columns) > 1:
+                text_col = train_df.columns[1]  # Assume second column is text
+            elif text_col is None:
+                text_col = train_df.columns[0]  # Fallback to first column
+            
+            result["train"] = [str(row[text_col]).strip() for _, row in train_df.iterrows()]
+            log(INFO, f"Loaded {len(result['train'])} train text entries")
+        else:
+            log(INFO, f"Train CSV not found at: {train_csv}")
+            result["train"] = None
+        
+        # Load test CSV
+        if test_csv.exists():
+            log(INFO, f"Loading test CSV from: {test_csv}")
+            test_df = pd.read_csv(test_csv)
+            # Find text column
+            text_col = None
+            for col in test_df.columns:
+                if 'title' in col.lower() or 'text' in col.lower():
+                    text_col = col
+                    break
+            if text_col is None and len(test_df.columns) > 1:
+                text_col = test_df.columns[1]
+            elif text_col is None:
+                text_col = test_df.columns[0]
+            
+            result["test"] = [str(row[text_col]).strip() for _, row in test_df.iterrows()]
+            log(INFO, f"Loaded {len(result['test'])} test text entries")
+        else:
+            log(INFO, f"Test CSV not found at: {test_csv}")
+            result["test"] = None
+        
+        return result if (result.get("train") or result.get("test")) else None
+        
+    except Exception as e:
+        log(INFO, f"Failed to load text from zip: {e}")
+        import traceback
+        log(INFO, f"Traceback: {traceback.format_exc()}")
+        return None
+
+
+class LocalFederatedDataset:
+    """Minimal FederatedDataset-like wrapper for local datasets (train partitions + splits)."""
+
+    def __init__(self, train_dataset: Dataset, test_dataset: Dataset, partitions: List[List[int]]):
+        self._train = train_dataset
+        self._test = test_dataset
+        self._partitions = partitions
+
+    def load_partition(self, partition_id: int) -> Dataset:
+        return self._train.select(self._partitions[int(partition_id)])
+
+    def load_split(self, split: str) -> Dataset:
+        if split in ("test", "validation", "val"):
+            return self._test
+        if split == "train":
+            return self._train
+        raise ValueError(f"Unknown split: {split}")
+
+
+def _iid_partitions(n: int, num_clients: int, seed: int) -> List[List[int]]:
+    rng = np.random.RandomState(seed)
+    idxs = np.arange(n)
+    rng.shuffle(idxs)
+    chunks = np.array_split(idxs, num_clients)
+    return [c.astype(int).tolist() for c in chunks]
+
+
+def _dirichlet_partitions(labels: List[int], num_clients: int, alpha: float, seed: int) -> List[List[int]]:
+    rng = np.random.RandomState(seed)
+    y = np.asarray(labels, dtype=np.int64)
+    client_idxs: List[List[int]] = [[] for _ in range(num_clients)]
+
+    classes = np.unique(y)
+    for c in classes:
+        cls_idxs = np.where(y == c)[0]
+        if cls_idxs.size == 0:
+            continue
+        rng.shuffle(cls_idxs)
+        props = rng.dirichlet(alpha * np.ones(num_clients))
+        counts = (props * cls_idxs.size).astype(int)
+        # Fix rounding to match total
+        while counts.sum() < cls_idxs.size:
+            counts[rng.randint(num_clients)] += 1
+        while counts.sum() > cls_idxs.size:
+            j = rng.randint(num_clients)
+            if counts[j] > 0:
+                counts[j] -= 1
+        splits = np.split(cls_idxs, np.cumsum(counts)[:-1])
+        for cid, part in enumerate(splits):
+            if part.size:
+                client_idxs[cid].extend(part.astype(int).tolist())
+
+    # Ensure no empty partitions (steal 1 sample from the largest partition)
+    for cid in range(num_clients):
+        if client_idxs[cid]:
+            continue
+        largest = max(range(num_clients), key=lambda k: len(client_idxs[k]))
+        if client_idxs[largest]:
+            client_idxs[cid].append(client_idxs[largest].pop())
+
+    for cid in range(num_clients):
+        rng.shuffle(client_idxs[cid])
+        client_idxs[cid] = sorted(client_idxs[cid])
+
+    return client_idxs
+
 def get_device_and_resources(config_sim):
     # Check if GPU is available
     device = torch.device(
@@ -116,12 +540,36 @@ def get_device_and_resources(config_sim):
         "num_cpus": config_sim["client"]["num_cpus"],
         "num_gpus": config_sim["client"]["num_gpus"] if device.type == "cuda" else 0.0,
     }
+
+    # # Ray writes session + spill data under /tmp by default. Allow redirecting this
+    # # to a larger disk to avoid GCS/raylet crashes when /tmp is full.
+    # if not config_sim["common"].get("multi_node", False):
+    #     ray_tmp_dir = _resolve_ray_tmp_dir(config_sim)
+    #     if ray_tmp_dir:
+    #         ray_init_args["_temp_dir"] = ray_tmp_dir
+    #         # Only set spilling config if the installed Ray supports it.
+    #         # Some Ray versions reject unknown kwargs (RuntimeError: Unknown keyword argument(s)).
+    #         try:
+    #             import inspect
+    #             import ray
+
+    #             if "object_spilling_config" in inspect.signature(ray.init).parameters:
+    #                 spill_dir = os.path.join(ray_tmp_dir, "spill")
+    #                 os.makedirs(spill_dir, exist_ok=True)
+    #                 ray_init_args.setdefault(
+    #                     "object_spilling_config",
+    #                     json.dumps(
+    #                         {"type": "filesystem", "params": {"directory_path": spill_dir}}
+    #                     ),
+    #                 )
+    #         except Exception:
+    #             pass
+
     if config_sim["common"]["multi_node"]:
         ray_init_args = {}
         ray_init_args["address"] = "auto"
         ray_init_args["runtime_env"] = {"py_modules": [mak]}
     return device, ray_init_args, client_res
-
 
 def gen_dir_outfile_server(config):
     # generates the basic directory structure for out data and the header for file
@@ -201,6 +649,7 @@ def gen_dir_outfile_server(config):
 
 def get_partitioner(config_sim):
     num_clients = config_sim["server"]["num_clients"]
+
     if config_sim["common"]["data_type"] == "dirichlet_niid":
         # alpha value
         dirichlet_alpha = config_sim["common"]["dirichlet_alpha"]
@@ -220,7 +669,7 @@ def get_partitioner(config_sim):
         )
         
     else:
-        partitioner = IidPartitioner(num_partitions=num_clients)
+       partitioner = IidPartitioner(num_partitions=num_clients)
     # return train data
     return {"train": partitioner}
 
@@ -229,29 +678,123 @@ def get_dataset(config_sim):
     dataset_name = config_sim["common"]["dataset"]
     if dataset_name not in dataset_info.keys():
         raise Exception(f"Dataset name should be among : {list(dataset_info.keys())}")
-    else:
+    
+
+    # --------------------------------------------
+    # UPMC-Food101: prefer local extracted dataset
+    # --------------------------------------------
+    if dataset_name == "kkim0451/UPMC-Food101":
+        resize_to = int(config_sim.get("common", {}).get("upmc_resize_to", 96))
+        _ = load_text_from_zip(dataset_name, resize_images=True, resize_to=resize_to)
+
+        project_root = Path(__file__).parent.parent.parent
+        upmc_root = (
+            project_root
+            / "data"
+            / dataset_name.replace("/", "_")
+            / "extracted"
+            / "UPMC-Food-101"
+        )
+
+        texts_dir = upmc_root / "texts"
+        train_titles = texts_dir / "train_titles.csv"
+        test_titles = texts_dir / "test_titles.csv"
+        images_dir = upmc_root / f"images_{resize_to}"
+        if not images_dir.exists():
+            images_dir = upmc_root / "images"
+
+        if train_titles.exists() and test_titles.exists() and images_dir.exists():
+            log(INFO, f"Loading UPMC-Food101 from titles files: {upmc_root}")
+            train_df = pd.read_csv(train_titles)
+            test_df = pd.read_csv(test_titles)
+
+            # Infer label and image path from folder
+            train_imgs, train_texts, train_labels = add_label_from_folder(
+                train_df,
+                images_dir,
+                split="train",
+                save_csv_path=train_titles,
+            )
+            test_imgs, test_texts, test_labels = add_label_from_folder(
+                test_df,
+                images_dir,
+                split="test",
+                save_csv_path=test_titles,
+            )
+
+            # Create datasets (same as before)
+            features = Features(
+                {"image": HFImage(), "text": Value("string"), "label": Value("int64")}
+            )
+
+            train_ds = Dataset.from_dict(
+                {"image": train_imgs, "text": train_texts, "label": train_labels},
+                features=features,
+            )
+
+            test_ds = Dataset.from_dict(
+                {"image": test_imgs, "text": test_texts, "label": test_labels},
+                features=features,
+            )
+
+            # Partition train set for federated simulation
+            num_clients = int(config_sim["server"]["num_clients"])
+            if config_sim["common"]["data_type"] == "dirichlet_niid":
+                alpha = float(config_sim["common"]["dirichlet_alpha"])
+                parts = _dirichlet_partitions(
+                    labels=train_ds[dataset_info[dataset_name]["output_column"]],
+                    num_clients=num_clients,
+                    alpha=alpha,
+                    seed=int(config_sim["common"]["seed"]),
+                )
+            else:
+                parts = _iid_partitions(
+                    n=len(train_ds),
+                    num_clients=num_clients,
+                    seed=int(config_sim["common"]["seed"]),
+                )
+            fds = LocalFederatedDataset(train_dataset=train_ds, test_dataset=test_ds, partitions=parts)
+
+            # Centralized test set (keep existing truncation behavior)
+            centralized_testset = test_ds
+
+            num_classes = dataset_info[dataset_name]["num_classes"]
+            classnames = [f"class{i}" for i in range(num_classes)]
+            return fds, centralized_testset, classnames
+
+        log(INFO, f"Local UPMC-Food101 not ready at {upmc_root}, falling back to HuggingFace Hub")
+
+    else: #For other datasets, always load from HuggingFace Hub (which will cache locally after first download)
+        # Load from HuggingFace Hub (default)
+        log(INFO, f"Loading dataset from HuggingFace Hub: {dataset_name}")
         fds = FederatedDataset(dataset=dataset_name, partitioners=partitioner)
         # get test column name
         test_set = dataset_info[dataset_name]["test_set"]
-        centralized_testset = fds.load_split(test_set)
-
-        # get class names for pFedMoAP
-        out_col = dataset_info[dataset_name]["output_column"]
-        feat = centralized_testset.features.get(out_col, None)
-        if feat is not None and hasattr(feat, "names") and feat.names:
-            classnames = list(feat.names)
+        if test_set is None:
+            # If no test set, use train split and create validation split
+            train_data = fds.load_split("train")
+            # Split train into train/val (80/20)
+            train_data = train_data.train_test_split(test_size=0.2, seed=config_sim["common"]["seed"])
+            centralized_testset = train_data["test"]
         else:
-            num_classes = dataset_info[dataset_name]["num_classes"]
-            classnames = [f"class{i}" for i in range(num_classes)]
+            centralized_testset = fds.load_split(test_set)
+    # get class names for pFedMoAP
+    out_col = dataset_info[dataset_name]["output_column"]
+    feat = centralized_testset.features.get(out_col, None)
+    if feat is not None and hasattr(feat, "names") and feat.names:
+        classnames = list(feat.names)
+    else:
+        num_classes = dataset_info[dataset_name]["num_classes"]
+        classnames = [f"class{i}" for i in range(num_classes)]
 
-        return fds, centralized_testset, classnames
+    return fds, centralized_testset, classnames
     
 def extract_linear_layers(model, config):
     """Return a dict of {layer_name: layer_module} for all linear layers in the model.
     Optionally skips layers specified in layers_to_skip.
     """
     linear_layers = {}
-    skip_layer_names = ["pre_classifier", "classifier", "model.norm", "score", "classifier.dense", "classifier.out_proj"]
+    skip_layer_names = ["pre_classifier", "classifier", "model.norm", "score", "classifier.dense", "classifier.out_proj", "visual_projection", "text_projection"]
     attenion_layer_names = ["self_attn", "attn", "attention"]
 
     for name, module in model.named_modules():
@@ -298,7 +841,10 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
     rank = config["peft"]["rank"]
     alpha = config["peft"]["alpha"]
     method = config["peft"]["method"]
-
+    dp_fedsvd = False
+    if config["fedsvd_config"]:
+        dp_fedsvd = config["fedsvd_config"]["dp"]["enabled"]
+        
     for name, layer in layers_to_svd.items():
         weight_matrix = layer.weight.data
         original_bias = layer.bias.data if layer.bias is not None else None
@@ -472,7 +1018,7 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
             if isinstance(layer, torch.nn.Conv2d): #Conv2d layer SVD
                 # weight_matrix = weight_matrix.view(weight_matrix.size(0), -1)  # Flatten Conv2d weights
                 c_out, c_in, k1, k2 = weight_matrix.shape
-                W_flat = weight_matrix.view(c_out, -1)  # Shape: [c_out, c_in * k1 * k2]
+                W_flat = weight_matrix.reshape(c_out, -1)  # Shape: [c_out, c_in * k1 * k2]
 
                 # SVD decompistion
                 U, S, Vt = torch.linalg.svd(W_flat, full_matrices=False)
@@ -517,10 +1063,24 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
                 W_res = weight_matrix - (U_select @ torch.diag(S_select) @ Vt_select).view(c_out, c_in, k1, k2)
                 A = U_select @ torch.diag(torch.sqrt(S_select))  # Shape: [c_out, rank]
                 B = torch.diag(torch.sqrt(S_select)) @ Vt_select  # Shape: [rank, c_in * k1 * k2]
+                
+                # A = (U_select * torch.sqrt(S_select)).reshape(c_out, rank, 1, 1)
+                # B = (torch.sqrt(S_select)[:, None] * Vt_select).reshape(rank, c_in, k1, k2)
 
+                # # ---- Residual base weight (PiSSA) ----
+                # delta_W = torch.einsum("orxy, rixy -> oixy", A, B)
+                # W_res = weight_matrix - delta_W
                 # ----- Compute relative differences -----
                 rel_recon_error = torch.norm(weight_matrix - (A @ B).view(c_out, c_in, k1, k2)) / torch.norm(weight_matrix)
-                print(f"Relative reconstruction error (W vs ΔW): {rel_recon_error:.6f}")
+                print(f"Relative reconstruction error (PiSSA Conv-LoRA): {rel_recon_error:.6e}")
+
+                with torch.no_grad():
+                    delta_norm = torch.norm(
+                        (A.view(A.size(0), -1) @ B.view(B.size(0), -1))
+                    )
+                    base_norm = torch.norm(W_res)
+                    print("||ΔW|| / ||W_res|| =", delta_norm / base_norm)
+
 
             else: #Linear layer SVD
                 U, S, Vt = torch.linalg.svd(weight_matrix, full_matrices=False) 
@@ -638,16 +1198,23 @@ def compute_client_distributions(config, dataset, num_clients: int) -> dict:
         dict: Mapping of client IDs to their label distributions
     """
     client_distributions = {}
-    
+    dataset_name = config["common"]["dataset"]
+    output_column = dataset_info[dataset_name]["output_column"]
+
     log(INFO, "=>>>>> CLASS DISTRIBUTIONS OF ALL CLIENTS <<<<<<=")
     for cid in range(num_clients):
-        if config["common"]["dataset"] == "pranavmr/MM-IMDb":
-            client_data = dataset[cid]["train"]
-        else:
-            client_data = dataset.load_partition(cid)
-        dataset_name = config["common"]["dataset"]
-        output_column = dataset_info[dataset_name]["output_column"]
-        labels = [item[output_column] for item in client_data]
+        # Load partition for all datasets using load_partition method
+        client_data = dataset.load_partition(cid)
+        
+        # Optimized: Use direct column access instead of iterating through all items
+        # This is much faster for large datasets (e.g., 405K samples)
+        try:
+            # Try direct column access (HuggingFace datasets support this)
+            labels = client_data[output_column]
+        except (TypeError, KeyError):
+            # Fallback to iteration if direct access not supported
+            labels = [item[output_column] for item in client_data]
+        
         client_distributions[cid] = dict(sorted(Counter(labels).items()))
         log(INFO, f"Client {cid} ({len(client_distributions[cid])} classes, {len(client_data)} samples) : {client_distributions[cid]}")
     log(INFO, f"Total samples from all clients: {sum([sum(dist.values()) for dist in client_distributions.values()])}")
@@ -693,8 +1260,9 @@ def get_model(config, shape, classnames=None):
         "Qwen/Qwen1.5-0.5B", 
         "meta-llama/Llama-2-7b-hf",
         "openai/clip-vit-base-patch32",
+        "openai/clip-vit-large-patch14",
         ]:  # Add more as needed
-        from transformers import AutoModelForSequenceClassification, BitsAndBytesConfig, CLIPModel
+        from transformers import AutoModelForSequenceClassification, BitsAndBytesConfig
         if model_name == "Qwen/Qwen1.5-0.5B": #Need to check again when applying the quantization -> still error
             quantization_8_bit_config = BitsAndBytesConfig(
                 load_in_8bit=True,
@@ -715,29 +1283,11 @@ def get_model(config, shape, classnames=None):
             # Set pad_token_id to eos_token_id
             if base_model.config.pad_token_id is None:
                 base_model.config.pad_token_id = base_model.config.eos_token_id
-        elif model_name == "openai/clip-vit-base-patch32": #For multimodal dataset MM-IMDB
-            clip_model = CLIPModel.from_pretrained(model_name)
-            class CustomCLIP(torch.nn.Module):
-                def __init__(self):
-                    super().__init__()
-                    self.vision_model = clip_model.vision_model
-                    self.text_model = clip_model.text_model
-                    self.visual_projection = clip_model.visual_projection
-                    self.text_projection = clip_model.text_projection
-                    embed_dim = clip_model.config.projection_dim #512
-                    self.classifier = torch.nn.Linear(embed_dim*2, num_classes) # Concatenate vision + text embeds
-                def forward(self, pixel_values, input_ids, attention_mask):
-                    vision_outputs = self.vision_model(pixel_values=pixel_values)
-                    text_outputs = self.text_model(input_ids=input_ids, attention_mask=attention_mask)
-                    vision_embeds = self.visual_projection(vision_outputs.pooler_output)
-                    text_embeds = self.text_projection(text_outputs.pooler_output)
-                    # Concatenate vision and text embeddings
-                    combined = torch.cat([vision_embeds, text_embeds], dim=1)
-                    logits = self.classifier(combined)
-                    return logits
-            base_model = CustomCLIP()
+        elif model_name in ["openai/clip-vit-base-patch32", "openai/clip-vit-large-patch14"]: #For multimodal dataset MM-IMDB
+            from mak.models.multi_modal_clip import MultiModalCLIP
+            base_model = MultiModalCLIP(model_name, num_labels=num_classes)
         else:
-            base_model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=num_classes, device_map="auto")
+            base_model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=num_classes)
 
         return base_model
 
@@ -756,6 +1306,7 @@ def get_evaluate_fn(
     metrics_file,
     apply_transforms_test,
     model,
+    clip_collator=None,  # NEW: Use shared CLIPCollator from main.py
 ):
     """Return an evaluation function for centralized evaluation."""
     dataset_name = config_sim["common"]["dataset"]
@@ -787,21 +1338,81 @@ def get_evaluate_fn(
                 parameters=parameters,
                 device=device,
             )
-        else:
+        else: #Other methods
             set_params(model, parameters, method=method, bias=bias)
 
         model.to(device)
-
-        # Apply transform to dataset
-        testset = centralized_testset.with_transform(apply_transforms_test)
+        
+        # Handle multimodal datasets (no transform, use CLIPCollator)
+        is_multimodal = dataset_name in ['kkim0451/UPMC-Food101']
+        # NOTE: don't assign to `clip_collator` in this scope (would shadow outer var)
+        local_clip_collator = clip_collator
+        
+        # Use shared clip_collator if provided, otherwise create new one (fallback)
+        if local_clip_collator is None and is_multimodal and apply_transforms_test is None:
+            # Fallback: Create CLIPCollator if not provided (should not happen in normal flow)
+            from mak.utils.pytorch_transformations import CLIPCollator
+            from transformers import CLIPProcessor
+            
+            model_name = config_sim["common"]["model"]
+            clip_processor = CLIPProcessor.from_pretrained(model_name)
+            output_column = dataset_info[dataset_name]["output_column"]
+            is_multi_label = dataset_info[dataset_name].get("multi_label", False)
+            num_classes = dataset_info[dataset_name]["num_classes"]
+            
+            # Get classnames if available
+            label_to_idx = None
+            try:
+                if hasattr(centralized_testset, 'features') and 'label' in centralized_testset.features:
+                    classnames = centralized_testset.features['label'].names
+                    if classnames:
+                        label_to_idx = {name: idx for idx, name in enumerate(classnames)}
+            except:
+                pass
+            
+            local_clip_collator = CLIPCollator(
+                processor=clip_processor,
+                label_key=output_column,
+                multi_label=is_multi_label,
+                num_classes=num_classes,
+                label_to_idx=label_to_idx
+            )
+        
+        if local_clip_collator is not None:
+            # Keep dataset raw (no transform) for multimodal
+            testset = centralized_testset
+        else:
+            # Apply transform to dataset for non-multimodal
+            if apply_transforms_test is not None:
+                testset = centralized_testset.with_transform(apply_transforms_test)
+            else:
+                testset = centralized_testset
 
         # Disable tqdm for dataset preprocessing
         disable_progress_bar()
 
-        testloader = DataLoader(testset, batch_size=config_sim["client"]["test_batch_size"])
+        # Create DataLoader with collator for multimodal, without for others
+        if local_clip_collator is not None:
+            testloader = DataLoader(
+                testset,
+                batch_size=config_sim["client"]["test_batch_size"],
+                shuffle=False,
+                num_workers=min(4, os.cpu_count() or 1),
+                pin_memory=True if device.type == 'cuda' else False,
+                persistent_workers=True if min(4, os.cpu_count() or 1) > 0 else False,
+                prefetch_factor=2,
+                collate_fn=local_clip_collator,
+            )
+        else:
+            testloader = DataLoader(testset, batch_size=config_sim["client"]["test_batch_size"])
 
         feature_key = dataset_info[dataset_name]["feature_key"]
-        loss, accuracy, f1 = test(model, testloader, device=device, feature_key=feature_key)
+        # Customize progress bar description based on server round
+        if server_round == 0:
+            desc = "Evaluating initial parameters"
+        else:
+            desc = f"Evaluating round {server_round}"
+        loss, accuracy, f1 = test(model, testloader, device=device, feature_key=feature_key, dataset_name=dataset_name, desc=desc)
         metrics_df = pd.read_csv(metrics_file)
         if metrics_df["global_loss"].min() > loss:
             log(
@@ -954,6 +1565,24 @@ def get_server(strategy, client_manager, out_file_path, target_acc, num_train_th
             num_train_thread=num_train_thread,
             num_test_thread=num_test_thread,
         )
+    elif isinstance(strategy, FedPOEStrategy):
+        return FedPOEServer(
+            strategy=strategy,
+            client_manager=client_manager,
+            out_file_path=out_file_path,
+            target_acc=target_acc,
+            num_train_thread=num_train_thread,
+            num_test_thread=num_test_thread,
+        )
+    elif isinstance(strategy, FedPOERegressionTextStrategy):
+        return FedPOERegressionTextServer(
+            strategy=strategy,
+            client_manager=client_manager,
+            out_file_path=out_file_path,
+            target_acc=target_acc,
+            num_train_thread=num_train_thread,
+            num_test_thread=num_test_thread,
+        )
     else:           
         return ServerSaveData(
             strategy=strategy,
@@ -974,6 +1603,7 @@ def get_strategy(
     apply_transforms_test,
     size_weights,
     model,
+    clip_collator=None,  # NEW: Use shared CLIPCollator from main.py
 ):
     STRATEGY = config["server"]["strategy"]
     MIN_CLIENTS_FIT = config["server"]["min_fit_clients"]
@@ -1038,8 +1668,39 @@ def get_strategy(
             "candidate_client_set": config["powd_config"]["candidate_client_set"],
         },
     } 
+    init_params = fl.common.ndarrays_to_parameters(
+        [val.cpu().numpy() for _, val in model.state_dict().items()]
+    )
+    if STRATEGY == "FedSVD":
+        fedsvd_cfg = config.get("fedsvd_config", {}) or {}
+        kwargs["FedSVD"] = {
+            "mode": fedsvd_cfg.get("mode", "fedavg"),
+            "send_deltas": bool(fedsvd_cfg.get("send_deltas", False)),
+            "agg_flora": bool(fedsvd_cfg.get("agg_flora", False)),
+            "agg_fedex": bool(fedsvd_cfg.get("agg_fedex", False)),
+            "recalculate_svd_period": int(fedsvd_cfg.get("recalculate_svd_period", 0) or 0),
+            "svd_warmup_steps": int(fedsvd_cfg.get("svd_warmup_steps", 0) or 0),
+            # Provide parameter names so the strategy can select LoRA A/B.
+            "param_name_fn": (lambda: list(model.state_dict().keys())) if model is not None else None,
+        }
 
-    if STRATEGY == "PFedMoAP":
+    elif STRATEGY == "FedPOE":
+        fedpoe_cfg = config.get("fedpoe_config", {}) or {}
+        kwargs["FedPOE"] = {
+            "eta": float(fedpoe_cfg.get("eta", 0.0) or 0.0),
+        }
+        
+    elif STRATEGY == "FedPOERegressionText":
+        poe_cfg = config.get("fedpoe_regression_text_config", {}) or {}
+        kwargs["FedPOERegressionText"] = {
+            "eta": float(poe_cfg.get("eta", 0.0) or 0.0),
+            "lam": float(poe_cfg.get("lam", 0.0) or 0.0),
+            "num_kernels": int(poe_cfg.get("num_kernels", 4) or 4),
+            "n_components": int(poe_cfg.get("n_components", 256) or 256),
+            "pooling": str(poe_cfg.get("pooling", "auto") or "auto"),
+        }
+        
+    elif STRATEGY == "PFedMoAP":
         prompt_len = config["pfedmoap_config"]["prompt_len"]
         
         prompt_dim = int(model.prompt_learner.ctx.shape[1])
@@ -1067,6 +1728,7 @@ def get_strategy(
             device=device,
             apply_transforms_test=apply_transforms_test,
             model=model,
+            clip_collator=clip_collator,  # NEW: Pass shared CLIPCollator
         ),
         evaluate_metrics_aggregation_fn=weighted_average,
         on_fit_config_fn=get_fit_config_fn(config_sim=config),
