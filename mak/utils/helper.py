@@ -5,7 +5,7 @@ import os
 import random
 from datetime import date, datetime
 from logging import INFO
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import flwr as fl
 import numpy as np
@@ -20,7 +20,6 @@ from flwr.common.typing import Scalar
 from flwr_datasets import FederatedDataset
 from flwr_datasets.partitioner import DirichletPartitioner, IidPartitioner
 from torch.utils.data import DataLoader
-from sklearn.model_selection import train_test_split
 from PIL import Image, ImageOps
 from pathlib import Path
 
@@ -33,6 +32,8 @@ from mak.servers.scaffold_server import ScaffoldServer
 from mak.servers.pfedmoap_server import PFedMoAPServer
 from mak.servers.fedsa_lora_server import FedSALoRAServer
 from mak.servers.flex_lora_server import FlexLoRAServer
+from mak.servers.fedpoe_server import FedPOEServer
+from mak.servers.fedpoe_server import FedPOERegressionTextServer
 
 from mak.strategies.fednova_strategy import FedNovaStrategy
 from mak.strategies.scaffold_strategy import ScaffoldStrategy
@@ -41,6 +42,8 @@ from mak.strategies.ffa_lora_strategy import FFALoRAStrategy
 from mak.strategies.pfedmoap_strategy import PFedMoAPStrategy
 from mak.strategies.fedsa_lora_strategy import FedSALoRAStrategy
 from mak.strategies.flex_lora_strategy import FlexLoRAStrategy
+from mak.strategies.fedpoe_strategy import FedPOEStrategy
+from mak.strategies.fedpoe_strategy import FedPOERegressionTextStrategy
 
 from mak.utils.dataset_info import dataset_info
 from mak.utils.general import set_params, test, weighted_average
@@ -48,7 +51,10 @@ from mak.models.svd_model import SVDAdapter, ConvAdapter
 import math
 from collections import Counter
 import torch.nn.init as init
-from datasets import load_dataset
+
+from datasets import Dataset, Features, Value, Image as HFImage
+from PIL import Image
+from pathlib import Path
 from huggingface_hub import hf_hub_download
 import tempfile
 import zipfile
@@ -64,16 +70,7 @@ def get_target_keys(model, bias=True) -> List[str]:
     This function is intentionally model-agnostic and must remain deterministic.
     """
     model_state = model.state_dict()
-
-    # Generic adapter-based models (incl. CustomCLIP + SVDAdapter)
-    # If adapters exist, prefer selecting adapter params directly (robust across architectures).
-    a_keys = [k for k in model_state.keys() if k.endswith(".A")]
-    b_keys = [k for k in model_state.keys() if k.endswith(".B")]
-    if a_keys or b_keys:
-        bases = {k[:-2] for k in (a_keys + b_keys)}  # strip ".A"/".B"
-        bias_keys = [f"{base}.bias" for base in bases if f"{base}.bias" in model_state] if bias else []
-        return sorted(set(a_keys + b_keys + bias_keys))
-
+    
     if any(key.startswith("distilbert.") for key in model_state.keys()):
         if bias:
             lora_keys = [k for k in model_state.keys() if ("lin" in k)]
@@ -103,307 +100,75 @@ def get_target_keys(model, bias=True) -> List[str]:
     # Unique + deterministic order
     return sorted(set(lora_keys))
 
-def get_device_and_resources(config_sim):
-    # Check if GPU is available
-    device = torch.device(
-        "cuda" if torch.cuda.is_available() and config_sim["client"]["gpu"] else "cpu"
-    )
-    # Assign GPU and CPU resources
-    if device.type == "cuda":
-        # Assign GPU resources
-        num_gpus_total = config_sim["client"]["total_gpus"]
-        if num_gpus_total > 0:
-            ray_init_args = {
-                "num_cpus": config_sim["client"]["total_cpus"],
-                "num_gpus": num_gpus_total,
-            }
-        else:
-            ray_init_args = {
-                "num_cpus": config_sim["client"]["total_cpus"],
-                "num_gpus": 0,
-            }
-    else:
-        # Assign CPU resources
-        ray_init_args = {"num_cpus": config_sim["client"]["total_cpus"], "num_gpus": 0}
-
-    # Assign client resources
-    client_res = {
-        "num_cpus": config_sim["client"]["num_cpus"],
-        "num_gpus": config_sim["client"]["num_gpus"] if device.type == "cuda" else 0.0,
-    }
-    if config_sim["common"]["multi_node"]:
-        ray_init_args = {}
-        ray_init_args["address"] = "auto"
-        ray_init_args["runtime_env"] = {"py_modules": [mak]}
-    return device, ray_init_args, client_res
+# def _resolve_ray_tmp_dir(config_sim: dict) -> Optional[str]:
+#     common_cfg = (config_sim or {}).get("common", {})
+#     candidate = (
+#         common_cfg.get("ray_tmp_dir")
+#         or os.environ.get("FEDKLS_RAY_TMPDIR")
+#         or os.environ.get("RAY_TMPDIR")
+#         or os.environ.get("TMPDIR")
+#     )
+#     if not candidate:
+#         return None
+#     ray_tmp_dir = os.path.abspath(os.path.expanduser(str(candidate)))
+#     os.makedirs(ray_tmp_dir, exist_ok=True)
+#     return ray_tmp_dir
 
 
-def gen_dir_outfile_server(config):
-    # generates the basic directory structure for out data and the header for file
-    today = date.today()
-    BASE_DIR = "output"
-    if not os.path.exists(BASE_DIR):
-        os.mkdir(BASE_DIR)
+from pathlib import Path
 
-    # create a date wise folder
-    if not os.path.exists(os.path.join(BASE_DIR, str(today))):
-        os.mkdir(os.path.join(BASE_DIR, str(today)))
-
-    # create saperate folder based on strategy
-    if not os.path.exists(
-        os.path.join(BASE_DIR, str(today), config["server"]["strategy"])
-    ):
-        os.mkdir(os.path.join(BASE_DIR, str(today), config["server"]["strategy"]))
-
-    # create saperate folder based on data distribution type
-    if not os.path.exists(
-        os.path.join(
-            BASE_DIR,
-            str(today),
-            config["server"]["strategy"],
-            config["common"]["data_type"],
-        )
-    ):
-        os.mkdir(
-            os.path.join(
-                BASE_DIR,
-                str(today),
-                config["server"]["strategy"],
-                config["common"]["data_type"],
-            )
-        )
-
-    dirs = os.listdir(
-        os.path.join(
-            BASE_DIR,
-            str(today),
-            config["server"]["strategy"],
-            config["common"]["data_type"],
-        )
-    )
-    final_dir_path = os.path.join(
-        BASE_DIR,
-        str(today),
-        config["server"]["strategy"],
-        config["common"]["data_type"],
-        str(len(dirs)),
-    )
-
-    if not os.path.exists(final_dir_path):
-        os.mkdir(final_dir_path)
-    if not os.path.exists(os.path.join(final_dir_path, "clients")):
-        os.mkdir(os.path.join(final_dir_path, "clients"))
-    # models_dir = os.path.join(final_dir_path,'models')
-    now = datetime.now()
-    current_time = now.strftime("%H-%M-%S")
-    # save all confugration file as json file
-    json_file_name = f"config.json"
-    with open(os.path.join(final_dir_path, json_file_name), "w") as fp:
-        json.dump(config, fp, indent=4)
-    dataset_str = config["common"]["dataset"].replace("/", "_")
-    file_name = f"{config['server']['strategy']}_{dataset_str}_{config['common']['data_type']}_{config['client']['batch_size']}_{config['client']['lr']}_{config['client']['epochs']}"
-    file_name = f"{file_name}.csv"
-    out_file_path = os.path.join(final_dir_path, file_name)
-    # create empty server history file
-    if not os.path.exists(out_file_path):
-        with open(out_file_path, "w", encoding="UTF8") as f:
-            # create the csv writer
-            header = ["round", "global_accuracy", "global_f1_score", "global_loss", "local_accuracy", "local_f1", "local_loss", "processing_time", "upload_gb", "download_gb"]
-            writer = csv.writer(f)
-            writer.writerow(header)
-            f.close()
-    return out_file_path, final_dir_path
-
-def get_partitioner(config_sim):
-    num_clients = config_sim["server"]["num_clients"]
-    dataset_name = config_sim["common"]["dataset"]
-    
-    if config_sim["common"]["data_type"] == "dirichlet_niid":
-        # alpha value
-        dirichlet_alpha = config_sim["common"]["dirichlet_alpha"]
-        # dataset's label column
-        label = dataset_info[dataset_name]["output_column"]
-        # create partitioner
-        partitioner = DirichletPartitioner(
-            num_partitions=num_clients,
-            partition_by=label,
-            alpha=dirichlet_alpha,
-            min_partition_size=1,  # minimum number of samples in each partition
-            self_balancing=False,
-            shuffle=True,
-            seed=config_sim["common"]["seed"],
-        )
-    else:
-        partitioner = IidPartitioner(num_partitions=num_clients)
-    # return train data
-    return {"train": partitioner}
-
-def load_upmc_food101_local(dataset_path: str):
+def add_label_from_folder(df, images_dir, split="train", save_csv_path=None):
     """
-    Load UPMC-Food101 dataset from local files.
-    
-    Expected structure:
-    dataset_path/
-        images/
-            train/
-                apple_ipe/
-                    *.jpg
-                baby_back_ribs/
-                    *.jpg
-                ...
-            test/
-                apple_ipe/
-                    *.jpg
-                ...
-        texts/
-            train_titles.csv (columns: filename, title)
-            test_titles.csv (columns: filename, title)
-        train.csv (columns: filename, label or class_id)
-        test.csv (columns: filename, label or class_id)
-    
-    Returns:
-        train_dataset, test_dataset: HuggingFace Dataset objects with 'image', 'text', 'label' columns
+    Infer label and image path from folder structure.
+    Also update dataframe with new columns and optionally save CSV.
     """
-    dataset_path = Path(dataset_path)
-    images_train_dir = dataset_path / "images" / "train"
-    images_test_dir = dataset_path / "images" / "test"
-    texts_train_file = dataset_path / "texts" / "train_titles.csv"
-    texts_test_file = dataset_path / "texts" / "test_titles.csv"
-    train_csv = dataset_path / "train.csv"
-    test_csv = dataset_path / "test.csv"
-    
-    # Verify paths exist
-    if not images_train_dir.exists():
-        raise FileNotFoundError(f"Train images directory not found: {images_train_dir}")
-    if not images_test_dir.exists():
-        raise FileNotFoundError(f"Test images directory not found: {images_test_dir}")
-    if not train_csv.exists():
-        raise FileNotFoundError(f"Train CSV not found: {train_csv}")
-    if not test_csv.exists():
-        raise FileNotFoundError(f"Test CSV not found: {test_csv}")
-    
-    # Load CSV files
-    train_df = pd.read_csv(train_csv)
-    test_df = pd.read_csv(test_csv)
-    train_texts_df = pd.read_csv(texts_train_file) if texts_train_file.exists() else pd.DataFrame()
-    test_texts_df = pd.read_csv(texts_test_file) if texts_test_file.exists() else pd.DataFrame()
-    
-    # Create text lookup dictionary (filename -> text)
-    train_text_dict = {}
-    if not train_texts_df.empty:
-        # Assume first column is filename, second is text
-        text_col = train_texts_df.columns[1] if len(train_texts_df.columns) > 1 else train_texts_df.columns[0]
-        filename_col = train_texts_df.columns[0]
-        train_text_dict = dict(zip(train_texts_df[filename_col], train_texts_df[text_col]))
-    
-    test_text_dict = {}
-    if not test_texts_df.empty:
-        text_col = test_texts_df.columns[1] if len(test_texts_df.columns) > 1 else test_texts_df.columns[0]
-        filename_col = test_texts_df.columns[0]
-        test_text_dict = dict(zip(test_texts_df[filename_col], test_texts_df[text_col]))
-    
-    train_data = []
-    test_data = []
-    
-    # Process train data
-    for idx, row in train_df.iterrows():
-        # Get filename and label from CSV
-        # Try common column names
-        filename = row.get('filename', row.get('image', row.get('image_path', '')))
-        if pd.isna(filename) or filename == '':
-            continue
-            
-        label = row.get('label', row.get('class', row.get('class_id', row.get('class_name', 0))))
-        
-        # Get text from text dictionary
-        text = train_text_dict.get(filename, train_text_dict.get(Path(filename).name, ""))
-        
-        # Find image file - check if filename includes class name or just filename
-        filename_path = Path(filename)
-        if filename_path.parent.name:  # Has directory in filename
-            class_name = filename_path.parent.name
-            img_filename = filename_path.name
-        else:
-            # Extract class name from filename (format: class_name_xxxxx.jpg)
-            img_filename = filename_path.name
-            class_name = img_filename.split('_')[0] if '_' in img_filename else filename_path.stem
-        
-        # Try to find image in class directory
-        img_path = images_train_dir / class_name / img_filename
-        if not img_path.exists():
-            # Try direct filename match
-            img_path = images_train_dir / img_filename
-        if not img_path.exists():
-            # Try searching in all class directories
-            found = False
-            for class_dir in images_train_dir.iterdir():
-                if class_dir.is_dir():
-                    potential_path = class_dir / img_filename
-                    if potential_path.exists():
-                        img_path = potential_path
-                        found = True
-                        break
-            if not found:
-                continue
-        
-        train_data.append({
-            'image': Image.open(img_path).convert('RGB'),
-            'text': str(text) if text else "",
-            'label': int(label)
-        })
-    
-    # Process test data
-    for idx, row in test_df.iterrows():
-        filename = row.get('filename', row.get('image', row.get('image_path', '')))
-        if pd.isna(filename) or filename == '':
-            continue
-            
-        label = row.get('label', row.get('class', row.get('class_id', row.get('class_name', 0))))
-        text = test_text_dict.get(filename, test_text_dict.get(Path(filename).name, ""))
-        
-        filename_path = Path(filename)
-        if filename_path.parent.name:
-            class_name = filename_path.parent.name
-            img_filename = filename_path.name
-        else:
-            img_filename = filename_path.name
-            class_name = img_filename.split('_')[0] if '_' in img_filename else filename_path.stem
-        
-        img_path = images_test_dir / class_name / img_filename
-        if not img_path.exists():
-            img_path = images_test_dir / img_filename
-        if not img_path.exists():
-            found = False
-            for class_dir in images_test_dir.iterdir():
-                if class_dir.is_dir():
-                    potential_path = class_dir / img_filename
-                    if potential_path.exists():
-                        img_path = potential_path
-                        found = True
-                        break
-            if not found:
-                continue
-        
-        test_data.append({
-            'image': Image.open(img_path).convert('RGB'),
-            'text': str(text) if text else "",
-            'label': int(label)
-        })
-    
-    # Create HuggingFace Dataset
-    features = Features({
-        'image': HFImage(),
-        'text': Value('string'),
-        'label': Value('int64')
-    })
-    
-    train_dataset = Dataset.from_list(train_data, features=features)
-    test_dataset = Dataset.from_list(test_data, features=features)
-    
-    log(INFO, f"Loaded {len(train_data)} train samples and {len(test_data)} test samples from local dataset")
-    
-    return train_dataset, test_dataset
 
+    split_dir = Path(images_dir) / split
+
+    # class mapping
+    class_names = sorted([d.name for d in split_dir.iterdir() if d.is_dir()])
+    class_to_id = {c: i for i, c in enumerate(class_names)}
+
+    filename_col = df.columns[0]
+    text_col = df.columns[1] if len(df.columns) > 1 else df.columns[0]
+
+    image_paths, texts, labels = [], [], []
+
+    # fast lookup: filename -> class
+    filename_to_class = {}
+    for c in class_names:
+        for img in (split_dir / c).iterdir():
+            filename_to_class[img.name] = c
+
+    # new columns (same length as df)
+    label_col = []
+
+    for _, row in df.iterrows():
+        fname = Path(str(row[filename_col])).name
+
+        if fname in filename_to_class:
+            class_name = filename_to_class[fname]
+            label = class_to_id[class_name]
+            img_path = split_dir / class_name / fname
+
+            image_paths.append(str(img_path))
+            texts.append(str(row[text_col]))
+            labels.append(label)
+
+            label_col.append(label)
+        else:
+            # keep row but mark as missing
+            label_col.append(-1)
+
+    # update dataframe WITHOUT changing number of rows
+    df["label"] = label_col
+
+    # optionally overwrite CSV so you can see label column
+    if save_csv_path is not None:
+        df.to_csv(save_csv_path, index=False)
+        print(f"Updated CSV saved to: {save_csv_path}")
+
+    return image_paths, texts, labels
 
 def _find_upmc_root(extract_dir: Path) -> Path | None:
     """Find extracted UPMC-Food-101 root directory under extract_dir."""
@@ -475,7 +240,7 @@ def _ensure_upmc_images_resized(
         log(INFO, f"Resizing {total} images to {resize_to}x{resize_to} (seen={seen}) ...")
         pbar = tqdm(
             to_process,
-            desc=f"Resizing images_{resize_to}",
+            desc=f"Resizing images_{resize_to}x{resize_to}",
             unit="img",
             leave=True,
             mininterval=0.5,
@@ -681,94 +446,6 @@ def load_text_from_zip(repo_id: str, resize_images: bool = False, resize_to: int
         return None
 
 
-def add_text_to_dataset(dataset, text_data, split: str = "train"):
-    """
-    Add text field to HuggingFace dataset.
-    
-    Args:
-        dataset: HuggingFace Dataset object
-        text_data: Dictionary or list from load_text_from_hf_hub
-        split: Dataset split name
-    
-    Returns:
-        Dataset with 'text' field added
-    """
-    if text_data is None:
-        # If no text data, add empty strings
-        def add_empty_text(example, idx):
-            return {"text": ""}
-        return dataset.map(add_empty_text, with_indices=True)
-    
-    text_type = text_data.get("type")
-    text_content = text_data.get("data")
-    
-    if text_type == "dict":
-        # Map by filename or index
-        def add_text_from_dict(example, idx):
-            # Try to get filename from example
-            filename = None
-            
-            # Check common filename fields
-            for key in ["filename", "file_name", "image_path", "path", "image"]:
-                if key in example:
-                    value = example[key]
-                    if isinstance(value, str):
-                        filename = value
-                        break
-                    elif hasattr(value, "filename"):
-                        filename = value.filename
-                        break
-                    elif isinstance(value, dict) and "path" in value:
-                        filename = value["path"]
-                        break
-            
-            text = ""
-            if filename:
-                # Try full filename, then just name, then path parts
-                filename_str = str(filename)
-                text = text_content.get(filename_str, "")
-                if not text:
-                    # Try with just the filename (without path)
-                    filename_name = Path(filename_str).name
-                    text = text_content.get(filename_name, "")
-                if not text:
-                    # Try with different path separators
-                    for sep in ['/', '\\']:
-                        if sep in filename_str:
-                            parts = filename_str.split(sep)
-                            if parts:
-                                text = text_content.get(parts[-1], "")
-                                if text:
-                                    break
-            
-            # If still no text found and we have a list-like dict, try index
-            if not text and idx < len(text_content):
-                # Convert dict to list if possible (assuming ordered dict)
-                text_list = list(text_content.values())
-                if idx < len(text_list):
-                    text = text_list[idx]
-            
-            return {"text": text if text else ""}
-        
-        return dataset.map(add_text_from_dict, with_indices=True)
-    
-    elif text_type == "list":
-        # Map by index
-        def add_text_from_list(example, idx):
-            if idx < len(text_content):
-                return {"text": text_content[idx]}
-            else:
-                return {"text": ""}
-        
-        return dataset.map(add_text_from_list, with_indices=True)
-    
-    else:
-        # Fallback: empty text
-        def add_empty_text(example, idx):
-            return {"text": ""}
-        return dataset.map(add_empty_text, with_indices=True)
-
-
 class LocalFederatedDataset:
     """Minimal FederatedDataset-like wrapper for local datasets (train partitions + splits)."""
 
@@ -835,12 +512,173 @@ def _dirichlet_partitions(labels: List[int], num_clients: int, alpha: float, see
 
     return client_idxs
 
+def get_device_and_resources(config_sim):
+    # Check if GPU is available
+    device = torch.device(
+        "cuda" if torch.cuda.is_available() and config_sim["client"]["gpu"] else "cpu"
+    )
+    # Assign GPU and CPU resources
+    if device.type == "cuda":
+        # Assign GPU resources
+        num_gpus_total = config_sim["client"]["total_gpus"]
+        if num_gpus_total > 0:
+            ray_init_args = {
+                "num_cpus": config_sim["client"]["total_cpus"],
+                "num_gpus": num_gpus_total,
+            }
+        else:
+            ray_init_args = {
+                "num_cpus": config_sim["client"]["total_cpus"],
+                "num_gpus": 0,
+            }
+    else:
+        # Assign CPU resources
+        ray_init_args = {"num_cpus": config_sim["client"]["total_cpus"], "num_gpus": 0}
+
+    # Assign client resources
+    client_res = {
+        "num_cpus": config_sim["client"]["num_cpus"],
+        "num_gpus": config_sim["client"]["num_gpus"] if device.type == "cuda" else 0.0,
+    }
+
+    # # Ray writes session + spill data under /tmp by default. Allow redirecting this
+    # # to a larger disk to avoid GCS/raylet crashes when /tmp is full.
+    # if not config_sim["common"].get("multi_node", False):
+    #     ray_tmp_dir = _resolve_ray_tmp_dir(config_sim)
+    #     if ray_tmp_dir:
+    #         ray_init_args["_temp_dir"] = ray_tmp_dir
+    #         # Only set spilling config if the installed Ray supports it.
+    #         # Some Ray versions reject unknown kwargs (RuntimeError: Unknown keyword argument(s)).
+    #         try:
+    #             import inspect
+    #             import ray
+
+    #             if "object_spilling_config" in inspect.signature(ray.init).parameters:
+    #                 spill_dir = os.path.join(ray_tmp_dir, "spill")
+    #                 os.makedirs(spill_dir, exist_ok=True)
+    #                 ray_init_args.setdefault(
+    #                     "object_spilling_config",
+    #                     json.dumps(
+    #                         {"type": "filesystem", "params": {"directory_path": spill_dir}}
+    #                     ),
+    #                 )
+    #         except Exception:
+    #             pass
+
+    if config_sim["common"]["multi_node"]:
+        ray_init_args = {}
+        ray_init_args["address"] = "auto"
+        ray_init_args["runtime_env"] = {"py_modules": [mak]}
+    return device, ray_init_args, client_res
+
+def gen_dir_outfile_server(config):
+    # generates the basic directory structure for out data and the header for file
+    today = date.today()
+    BASE_DIR = "output"
+    if not os.path.exists(BASE_DIR):
+        os.mkdir(BASE_DIR)
+
+    # create a date wise folder
+    if not os.path.exists(os.path.join(BASE_DIR, str(today))):
+        os.mkdir(os.path.join(BASE_DIR, str(today)))
+
+    # create saperate folder based on strategy
+    if not os.path.exists(
+        os.path.join(BASE_DIR, str(today), config["server"]["strategy"])
+    ):
+        os.mkdir(os.path.join(BASE_DIR, str(today), config["server"]["strategy"]))
+
+    # create saperate folder based on data distribution type
+    if not os.path.exists(
+        os.path.join(
+            BASE_DIR,
+            str(today),
+            config["server"]["strategy"],
+            config["common"]["data_type"],
+        )
+    ):
+        os.mkdir(
+            os.path.join(
+                BASE_DIR,
+                str(today),
+                config["server"]["strategy"],
+                config["common"]["data_type"],
+            )
+        )
+
+    dirs = os.listdir(
+        os.path.join(
+            BASE_DIR,
+            str(today),
+            config["server"]["strategy"],
+            config["common"]["data_type"],
+        )
+    )
+    final_dir_path = os.path.join(
+        BASE_DIR,
+        str(today),
+        config["server"]["strategy"],
+        config["common"]["data_type"],
+        str(len(dirs)),
+    )
+
+    if not os.path.exists(final_dir_path):
+        os.mkdir(final_dir_path)
+    if not os.path.exists(os.path.join(final_dir_path, "clients")):
+        os.mkdir(os.path.join(final_dir_path, "clients"))
+    # models_dir = os.path.join(final_dir_path,'models')
+    now = datetime.now()
+    current_time = now.strftime("%H-%M-%S")
+    # save all confugration file as json file
+    json_file_name = f"config.json"
+    with open(os.path.join(final_dir_path, json_file_name), "w") as fp:
+        json.dump(config, fp, indent=4)
+    dataset_str = config["common"]["dataset"].replace("/", "_")
+    file_name = f"{config['server']['strategy']}_{dataset_str}_{config['common']['data_type']}_{config['client']['batch_size']}_{config['client']['lr']}_{config['client']['epochs']}"
+    file_name = f"{file_name}.csv"
+    out_file_path = os.path.join(final_dir_path, file_name)
+    # create empty server history file
+    if not os.path.exists(out_file_path):
+        with open(out_file_path, "w", encoding="UTF8") as f:
+            # create the csv writer
+            header = ["round", "global_accuracy", "global_f1_score", "global_loss", "local_accuracy", "local_f1", "local_loss", "processing_time", "upload_gb", "download_gb"]
+            writer = csv.writer(f)
+            writer.writerow(header)
+            f.close()
+    return out_file_path, final_dir_path
+
+def get_partitioner(config_sim):
+    num_clients = config_sim["server"]["num_clients"]
+
+    if config_sim["common"]["data_type"] == "dirichlet_niid":
+        # alpha value
+        dirichlet_alpha = config_sim["common"]["dirichlet_alpha"]
+        # dataset
+        dataset_name = config_sim["common"]["dataset"]
+        # dataset's label column
+        label = dataset_info[dataset_name]["output_column"]
+        # create partitioner
+        partitioner = DirichletPartitioner(
+            num_partitions=num_clients,
+            partition_by=label,
+            alpha=dirichlet_alpha,
+            min_partition_size=1,  # minimum number of samples in each partition
+            self_balancing=False,
+            shuffle=True,
+            seed=config_sim["common"]["seed"],
+        )
+        
+    else:
+       partitioner = IidPartitioner(num_partitions=num_clients)
+    # return train data
+    return {"train": partitioner}
 
 def get_dataset(config_sim):
     partitioner = get_partitioner(config_sim=config_sim)
     dataset_name = config_sim["common"]["dataset"]
     if dataset_name not in dataset_info.keys():
         raise Exception(f"Dataset name should be among : {list(dataset_info.keys())}")
+    
 
     # --------------------------------------------
     # UPMC-Food101: prefer local extracted dataset
@@ -858,45 +696,44 @@ def get_dataset(config_sim):
             / "UPMC-Food-101"
         )
 
-        train_csv = upmc_root / "train.csv"
-        test_csv = upmc_root / "test.csv"
+        texts_dir = upmc_root / "texts"
+        train_titles = texts_dir / "train_titles.csv"
+        test_titles = texts_dir / "test_titles.csv"
         images_dir = upmc_root / f"images_{resize_to}"
         if not images_dir.exists():
             images_dir = upmc_root / "images"
 
-        if train_csv.exists() and test_csv.exists() and images_dir.exists():
-            log(INFO, f"Loading UPMC-Food101 from local files: {upmc_root}")
-            train_df = pd.read_csv(train_csv)
-            test_df = pd.read_csv(test_csv)
+        if train_titles.exists() and test_titles.exists() and images_dir.exists():
+            log(INFO, f"Loading UPMC-Food101 from titles files: {upmc_root}")
+            train_df = pd.read_csv(train_titles)
+            test_df = pd.read_csv(test_titles)
 
-            # Build image paths (keep as plain strings, decode lazily via HFImage)
-            tr_paths = [
-                str(images_dir / "train" / str(ann) / str(img_id))
-                for ann, img_id in zip(train_df["annotation"], train_df["id"])
-            ]
-            te_paths = [
-                str(images_dir / "test" / str(ann) / str(img_id))
-                for ann, img_id in zip(test_df["annotation"], test_df["id"])
-            ]
+            # Infer label and image path from folder
+            train_imgs, train_texts, train_labels = add_label_from_folder(
+                train_df,
+                images_dir,
+                split="train",
+                save_csv_path=train_titles,
+            )
+            test_imgs, test_texts, test_labels = add_label_from_folder(
+                test_df,
+                images_dir,
+                split="test",
+                save_csv_path=test_titles,
+            )
 
-            # Create datasets (store paths; HFImage will decode lazily)
+            # Create datasets (same as before)
             features = Features(
                 {"image": HFImage(), "text": Value("string"), "label": Value("int64")}
             )
+
             train_ds = Dataset.from_dict(
-                {
-                    "image": tr_paths,
-                    "text": train_df["text"].fillna("").astype(str).tolist(),
-                    "label": train_df["label"].astype(int).tolist(),
-                },
+                {"image": train_imgs, "text": train_texts, "label": train_labels},
                 features=features,
             )
+
             test_ds = Dataset.from_dict(
-                {
-                    "image": te_paths,
-                    "text": test_df["text"].fillna("").astype(str).tolist(),
-                    "label": test_df["label"].astype(int).tolist(),
-                },
+                {"image": test_imgs, "text": test_texts, "label": test_labels},
                 features=features,
             )
 
@@ -920,12 +757,6 @@ def get_dataset(config_sim):
 
             # Centralized test set (keep existing truncation behavior)
             centralized_testset = test_ds
-            max_test_samples = 200
-            n = min(max_test_samples, len(centralized_testset))
-            centralized_testset = centralized_testset.select(
-                range(len(centralized_testset) - n, len(centralized_testset))
-            )
-            log(INFO, f"UPMC-Food101 test set truncated to {n} samples")
 
             num_classes = dataset_info[dataset_name]["num_classes"]
             classnames = [f"class{i}" for i in range(num_classes)]
@@ -933,61 +764,20 @@ def get_dataset(config_sim):
 
         log(INFO, f"Local UPMC-Food101 not ready at {upmc_root}, falling back to HuggingFace Hub")
 
-    # Load from HuggingFace Hub (default)
-    log(INFO, f"Loading dataset from HuggingFace Hub: {dataset_name}")
-    fds = FederatedDataset(dataset=dataset_name, partitioners=partitioner)
-    # get test column name
-    test_set = dataset_info[dataset_name]["test_set"]
-    if test_set is None:
-        # If no test set, use train split and create validation split
-        train_data = fds.load_split("train")
-        # Split train into train/val (80/20)
-        train_data = train_data.train_test_split(test_size=0.2, seed=config_sim["common"]["seed"])
-        centralized_testset = train_data["test"]
-    else:
-        centralized_testset = fds.load_split(test_set)
-    
-    # For UPMC-Food101, download zip and load text from CSV
-    if dataset_name == "kkim0451/UPMC-Food101":
-        max_test_samples = 200
-        n = min(max_test_samples, len(centralized_testset))
-        centralized_testset = centralized_testset.select(range(len(centralized_testset) - n, len(centralized_testset)))
-        log(INFO, f"UPMC-Food101 test set truncated to {n} samples")
-        
-        log(INFO, "Loading text data from zip file for UPMC-Food101")
-        
-        # Download zip and extract CSV files
-        text_data = load_text_from_zip(dataset_name)
-        
-        if text_data:
-            # Add text to test dataset
-            if text_data.get("test"):
-                def add_text_test(example, idx):
-                    if idx < len(text_data["test"]):
-                        return {"text": text_data["test"][idx]}
-                    return {"text": ""}
-                centralized_testset = centralized_testset.map(add_text_test, with_indices=True)
-                log(INFO, f"Added {len(text_data['test'])} text entries to test dataset")
-            else:
-                def add_empty_text(example, idx):
-                    return {"text": ""}
-                centralized_testset = centralized_testset.map(add_empty_text, with_indices=True)
-                log(INFO, "Added empty text field to test dataset")
-            
-            # Note: Cannot add text to train and recreate FederatedDataset(DatasetDict)
-            # because flwr_datasets.FederatedDataset only supports dataset: str; it
-            # calls datasets.load_dataset(path=...) and fails when path is DatasetDict.
-            # Train partitions stay image-only; only test set has text for evaluation.
-            if text_data.get("train"):
-                log(INFO, "Train text data loaded from zip but not merged: FederatedDataset requires dataset name (str). Train partitions remain image-only.")
-            else:
-                log(INFO, "No train text data found")
+    else: #For other datasets, always load from HuggingFace Hub (which will cache locally after first download)
+        # Load from HuggingFace Hub (default)
+        log(INFO, f"Loading dataset from HuggingFace Hub: {dataset_name}")
+        fds = FederatedDataset(dataset=dataset_name, partitioners=partitioner)
+        # get test column name
+        test_set = dataset_info[dataset_name]["test_set"]
+        if test_set is None:
+            # If no test set, use train split and create validation split
+            train_data = fds.load_split("train")
+            # Split train into train/val (80/20)
+            train_data = train_data.train_test_split(test_size=0.2, seed=config_sim["common"]["seed"])
+            centralized_testset = train_data["test"]
         else:
-            log(INFO, "Failed to load text from zip, adding empty text fields")
-            def add_empty_text(example, idx):
-                return {"text": ""}
-            centralized_testset = centralized_testset.map(add_empty_text, with_indices=True)
-
+            centralized_testset = fds.load_split(test_set)
     # get class names for pFedMoAP
     out_col = dataset_info[dataset_name]["output_column"]
     feat = centralized_testset.features.get(out_col, None)
@@ -1004,7 +794,7 @@ def extract_linear_layers(model, config):
     Optionally skips layers specified in layers_to_skip.
     """
     linear_layers = {}
-    skip_layer_names = ["pre_classifier", "classifier", "model.norm", "score", "classifier.dense", "classifier.out_proj"]
+    skip_layer_names = ["pre_classifier", "classifier", "model.norm", "score", "classifier.dense", "classifier.out_proj", "visual_projection", "text_projection"]
     attenion_layer_names = ["self_attn", "attn", "attention"]
 
     for name, module in model.named_modules():
@@ -1051,7 +841,10 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
     rank = config["peft"]["rank"]
     alpha = config["peft"]["alpha"]
     method = config["peft"]["method"]
-
+    dp_fedsvd = False
+    if config["fedsvd_config"]:
+        dp_fedsvd = config["fedsvd_config"]["dp"]["enabled"]
+        
     for name, layer in layers_to_svd.items():
         weight_matrix = layer.weight.data
         original_bias = layer.bias.data if layer.bias is not None else None
@@ -1225,7 +1018,7 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
             if isinstance(layer, torch.nn.Conv2d): #Conv2d layer SVD
                 # weight_matrix = weight_matrix.view(weight_matrix.size(0), -1)  # Flatten Conv2d weights
                 c_out, c_in, k1, k2 = weight_matrix.shape
-                W_flat = weight_matrix.view(c_out, -1)  # Shape: [c_out, c_in * k1 * k2]
+                W_flat = weight_matrix.reshape(c_out, -1)  # Shape: [c_out, c_in * k1 * k2]
 
                 # SVD decompistion
                 U, S, Vt = torch.linalg.svd(W_flat, full_matrices=False)
@@ -1270,9 +1063,24 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
                 W_res = weight_matrix - (U_select @ torch.diag(S_select) @ Vt_select).view(c_out, c_in, k1, k2)
                 A = U_select @ torch.diag(torch.sqrt(S_select))  # Shape: [c_out, rank]
                 B = torch.diag(torch.sqrt(S_select)) @ Vt_select  # Shape: [rank, c_in * k1 * k2]
+                
+                # A = (U_select * torch.sqrt(S_select)).reshape(c_out, rank, 1, 1)
+                # B = (torch.sqrt(S_select)[:, None] * Vt_select).reshape(rank, c_in, k1, k2)
 
+                # # ---- Residual base weight (PiSSA) ----
+                # delta_W = torch.einsum("orxy, rixy -> oixy", A, B)
+                # W_res = weight_matrix - delta_W
                 # ----- Compute relative differences -----
                 rel_recon_error = torch.norm(weight_matrix - (A @ B).view(c_out, c_in, k1, k2)) / torch.norm(weight_matrix)
+                print(f"Relative reconstruction error (PiSSA Conv-LoRA): {rel_recon_error:.6e}")
+
+                with torch.no_grad():
+                    delta_norm = torch.norm(
+                        (A.view(A.size(0), -1) @ B.view(B.size(0), -1))
+                    )
+                    base_norm = torch.norm(W_res)
+                    print("||ΔW|| / ||W_res|| =", delta_norm / base_norm)
+
 
             else: #Linear layer SVD
                 U, S, Vt = torch.linalg.svd(weight_matrix, full_matrices=False) 
@@ -1336,14 +1144,9 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
                 log(INFO, f"Warning: Could not freeze A for layer {name}: {e}")
 
         # Split layer name and replace the original layer
-        # Handle top-level modules (no '.' in name) like 'classifier', 'visual_projection'
-        if "." in name:
-            parent_name, child_name = name.rsplit(".", 1)
-            parent = model.get_submodule(parent_name)
-            setattr(parent, child_name, new_layer)
-        else:
-            # Top-level module - set directly on model
-            setattr(model, name, new_layer)  
+        parent_name, child_name = name.rsplit(".", 1)
+        parent = model.get_submodule(parent_name)
+        setattr(parent, child_name, new_layer)  
     
     return model
 
@@ -1396,9 +1199,8 @@ def compute_client_distributions(config, dataset, num_clients: int) -> dict:
     """
     client_distributions = {}
     dataset_name = config["common"]["dataset"]
-    is_multi_label = dataset_info.get(dataset_name, {}).get("multi_label", False)
     output_column = dataset_info[dataset_name]["output_column"]
-    
+
     log(INFO, "=>>>>> CLASS DISTRIBUTIONS OF ALL CLIENTS <<<<<<=")
     for cid in range(num_clients):
         # Load partition for all datasets using load_partition method
@@ -1413,19 +1215,7 @@ def compute_client_distributions(config, dataset, num_clients: int) -> dict:
             # Fallback to iteration if direct access not supported
             labels = [item[output_column] for item in client_data]
         
-        if is_multi_label:
-            # For multi-label datasets, labels are lists - flatten and count individual labels
-            flattened_labels = []
-            for label_list in labels:
-                if isinstance(label_list, list):
-                    flattened_labels.extend(label_list)
-                else:
-                    flattened_labels.append(label_list)
-            client_distributions[cid] = dict(sorted(Counter(flattened_labels).items()))
-        else:
-            # For single-label datasets, count labels directly
-            client_distributions[cid] = dict(sorted(Counter(labels).items()))
-        
+        client_distributions[cid] = dict(sorted(Counter(labels).items()))
         log(INFO, f"Client {cid} ({len(client_distributions[cid])} classes, {len(client_data)} samples) : {client_distributions[cid]}")
     log(INFO, f"Total samples from all clients: {sum([sum(dist.values()) for dist in client_distributions.values()])}")
     log(INFO, "*" * 150)
@@ -1470,8 +1260,9 @@ def get_model(config, shape, classnames=None):
         "Qwen/Qwen1.5-0.5B", 
         "meta-llama/Llama-2-7b-hf",
         "openai/clip-vit-base-patch32",
+        "openai/clip-vit-large-patch14",
         ]:  # Add more as needed
-        from transformers import AutoModelForSequenceClassification, BitsAndBytesConfig, CLIPModel
+        from transformers import AutoModelForSequenceClassification, BitsAndBytesConfig
         if model_name == "Qwen/Qwen1.5-0.5B": #Need to check again when applying the quantization -> still error
             quantization_8_bit_config = BitsAndBytesConfig(
                 load_in_8bit=True,
@@ -1492,29 +1283,11 @@ def get_model(config, shape, classnames=None):
             # Set pad_token_id to eos_token_id
             if base_model.config.pad_token_id is None:
                 base_model.config.pad_token_id = base_model.config.eos_token_id
-        elif model_name in ["openai/clip-vit-base-patch32", "openai/clip-vit-large-patch14"]: #For multimodal datasets MM-IMDb and UPMC-Food101
-            clip_model = CLIPModel.from_pretrained(model_name, use_safetensors=True)
-            class CustomCLIP(torch.nn.Module):
-                def __init__(self):
-                    super().__init__()
-                    self.vision_model = clip_model.vision_model
-                    self.text_model = clip_model.text_model
-                    self.visual_projection = clip_model.visual_projection
-                    self.text_projection = clip_model.text_projection
-                    embed_dim = clip_model.config.projection_dim #512
-                    self.classifier = torch.nn.Linear(embed_dim*2, num_classes) # Concatenate vision + text embeds
-                def forward(self, pixel_values, input_ids, attention_mask):
-                    vision_outputs = self.vision_model(pixel_values=pixel_values)
-                    text_outputs = self.text_model(input_ids=input_ids, attention_mask=attention_mask)
-                    vision_embeds = self.visual_projection(vision_outputs.pooler_output)
-                    text_embeds = self.text_projection(text_outputs.pooler_output)
-                    # Concatenate vision and text embeddings
-                    combined = torch.cat([vision_embeds, text_embeds], dim=1)
-                    logits = self.classifier(combined)
-                    return logits
-            base_model = CustomCLIP()
+        elif model_name in ["openai/clip-vit-base-patch32", "openai/clip-vit-large-patch14"]: #For multimodal dataset MM-IMDB
+            from mak.models.multi_modal_clip import MultiModalCLIP
+            base_model = MultiModalCLIP(model_name, num_labels=num_classes)
         else:
-            base_model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=num_classes, device_map="auto")
+            base_model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=num_classes)
 
         return base_model
 
@@ -1547,8 +1320,7 @@ def get_evaluate_fn(
         method = config_sim.get("peft", {}).get("method", "")
         bias = config_sim.get("peft", {}).get("bias", "")
 
-        # Only use PFedMoAP-specific logic if strategy is explicitly "PFedMoAP"
-        if strategy == "PFedMoAP":
+        if strategy == "PFedMoAP" or method == "pfedmoap":
             if len(parameters) != 1:
                 raise ValueError(f"PFedMoAP centralized eval expects 1 prompt, got {len(parameters)}")
 
@@ -1566,13 +1338,13 @@ def get_evaluate_fn(
                 parameters=parameters,
                 device=device,
             )
-        else:
+        else: #Other methods
             set_params(model, parameters, method=method, bias=bias)
 
         model.to(device)
-
+        
         # Handle multimodal datasets (no transform, use CLIPCollator)
-        is_multimodal = dataset_name in ['pranavmr/MM-IMDb', 'kkim0451/UPMC-Food101']
+        is_multimodal = dataset_name in ['kkim0451/UPMC-Food101']
         # NOTE: don't assign to `clip_collator` in this scope (would shadow outer var)
         local_clip_collator = clip_collator
         
@@ -1793,6 +1565,24 @@ def get_server(strategy, client_manager, out_file_path, target_acc, num_train_th
             num_train_thread=num_train_thread,
             num_test_thread=num_test_thread,
         )
+    elif isinstance(strategy, FedPOEStrategy):
+        return FedPOEServer(
+            strategy=strategy,
+            client_manager=client_manager,
+            out_file_path=out_file_path,
+            target_acc=target_acc,
+            num_train_thread=num_train_thread,
+            num_test_thread=num_test_thread,
+        )
+    elif isinstance(strategy, FedPOERegressionTextStrategy):
+        return FedPOERegressionTextServer(
+            strategy=strategy,
+            client_manager=client_manager,
+            out_file_path=out_file_path,
+            target_acc=target_acc,
+            num_train_thread=num_train_thread,
+            num_test_thread=num_test_thread,
+        )
     else:           
         return ServerSaveData(
             strategy=strategy,
@@ -1878,8 +1668,39 @@ def get_strategy(
             "candidate_client_set": config["powd_config"]["candidate_client_set"],
         },
     } 
+    init_params = fl.common.ndarrays_to_parameters(
+        [val.cpu().numpy() for _, val in model.state_dict().items()]
+    )
+    if STRATEGY == "FedSVD":
+        fedsvd_cfg = config.get("fedsvd_config", {}) or {}
+        kwargs["FedSVD"] = {
+            "mode": fedsvd_cfg.get("mode", "fedavg"),
+            "send_deltas": bool(fedsvd_cfg.get("send_deltas", False)),
+            "agg_flora": bool(fedsvd_cfg.get("agg_flora", False)),
+            "agg_fedex": bool(fedsvd_cfg.get("agg_fedex", False)),
+            "recalculate_svd_period": int(fedsvd_cfg.get("recalculate_svd_period", 0) or 0),
+            "svd_warmup_steps": int(fedsvd_cfg.get("svd_warmup_steps", 0) or 0),
+            # Provide parameter names so the strategy can select LoRA A/B.
+            "param_name_fn": (lambda: list(model.state_dict().keys())) if model is not None else None,
+        }
 
-    if STRATEGY == "PFedMoAP":
+    elif STRATEGY == "FedPOE":
+        fedpoe_cfg = config.get("fedpoe_config", {}) or {}
+        kwargs["FedPOE"] = {
+            "eta": float(fedpoe_cfg.get("eta", 0.0) or 0.0),
+        }
+        
+    elif STRATEGY == "FedPOERegressionText":
+        poe_cfg = config.get("fedpoe_regression_text_config", {}) or {}
+        kwargs["FedPOERegressionText"] = {
+            "eta": float(poe_cfg.get("eta", 0.0) or 0.0),
+            "lam": float(poe_cfg.get("lam", 0.0) or 0.0),
+            "num_kernels": int(poe_cfg.get("num_kernels", 4) or 4),
+            "n_components": int(poe_cfg.get("n_components", 256) or 256),
+            "pooling": str(poe_cfg.get("pooling", "auto") or "auto"),
+        }
+        
+    elif STRATEGY == "PFedMoAP":
         prompt_len = config["pfedmoap_config"]["prompt_len"]
         
         prompt_dim = int(model.prompt_learner.ctx.shape[1])
@@ -2056,4 +1877,3 @@ def get_size_weights(federated_dataset, num_clients):
         sample_size.append(len(federated_dataset.load_partition(i)))
     size_weights = [i / sum(sample_size) for i in sample_size]
     return size_weights
-
