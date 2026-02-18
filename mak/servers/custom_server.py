@@ -503,11 +503,6 @@ def fit_clients(
         batch_results = []
         batch_failures = []
         for client_proxy, ins in batch:
-            # Add small delay to ensure Ray actors are ready (fixes race condition)
-            # This ensures Ray actors have time to complete initialization before receiving requests
-            import time
-            time.sleep(0.01)  # 10ms delay to allow Ray actor initialization
-            
             try:
                 result = client_proxy.fit(ins, timeout=timeout)
                 batch_results.append((client_proxy, result))
