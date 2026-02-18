@@ -23,7 +23,7 @@ from mak.utils.pytorch_transformations import (
     TransformationPipeline, 
     TextTransformationPipeline, 
     CLIPTransformationPipeline,
-    CLIPCollator
+    CLIPCollator,
 )
 from transformers import CLIPProcessor
 from mak.clients import get_client_fn
@@ -69,18 +69,17 @@ def main():
 
     # Initialize clip_collator for multimodal datasets
     clip_collator = None
-    
+
     # Check if the dataset is a text dataset and use the appropriate transformation pipeline
     if dataset_name in ['SetFit/20_newsgroups', 'legacy-datasets/banking77', 'fancyzhx/dbpedia_14', 'stanfordnlp/sst2']:
         # For text datasets, we need to use a different transformation pipeline
         transformation_pipeline = TextTransformationPipeline(dataset_name=dataset_name, model_name=model_name)
         # Get the transformations for train and test data
         apply_transforms, apply_transforms_test = transformation_pipeline.get_transformations()
-    elif dataset_name in ['pranavmr/MM-IMDb', 'kkim0451/UPMC-Food101']:
-        # Multimodal datasets: Use CLIPProcessor + CLIPCollator (no dataset transforms)
+    elif dataset_name in ['kkim0451/UPMC-Food101']:
         # Dataset stays raw, processing happens in collate_fn
         log(INFO, f"Multimodal dataset detected: {dataset_name}. Using CLIPProcessor + CLIPCollator.")
-        
+
         # Create CLIPProcessor (module-level, picklable)
         clip_processor = CLIPProcessor.from_pretrained(model_name)
         
@@ -146,6 +145,8 @@ def main():
             #Compute client distributions and kl_norm values
             client_distributions = compute_client_distributions(config = config_sim, dataset=fds,num_clients=config_sim['server']['num_clients'])
             kl_normalized_per_client = compute_KL_divergence(client_distributions, num_classes=dataset_info[dataset_name]["num_classes"])
+            print(f"KL Normalized per client: {kl_normalized_per_client}")
+            print("Mean KL Normalized per client: ", sum(kl_normalized_per_client.values())/len(kl_normalized_per_client))
             for cid, kl_norm_val in kl_normalized_per_client.items():
                 log(INFO, f"Client {cid}: Normalized KL Divergence = {kl_norm_val:.4f}")
 
@@ -209,7 +210,7 @@ def main():
         client_model = base_model
 
     try:
-        dir_alpha = fds._partitioners['train']._alpha[0]
+        dir_alpha = config_sim['common']['dirichlet_alpha']
     except (AttributeError):
         dir_alpha = "NA"
 
@@ -237,6 +238,7 @@ def main():
     log(INFO,f" =>>>>> Dataset : {dataset_name}") 
     log(INFO,f" =>>>>> Model : {base_model._get_name()} Device : {device}")
     log(INFO,f" =>>>>> Partitoner : {config_sim['common']['data_type']} Alpha : {dir_alpha}")
+    log(INFO,f" =>>>>> Learning Rate: {config_sim['client']['lr']} Batch Size : {config_sim['client']['batch_size']}")
     log(INFO,f" =>>>>> Ray init args : {ray_init_args} Client Res : {client_res}")
 
     # NEW: Create DynamicDataScheduler if dynamic_data is enabled
@@ -266,8 +268,8 @@ def main():
         apply_transforms_test=apply_transforms_test,
         size_weights=size_weights,
         model=server_model,
-        clip_collator=clip_collator,  # NEW: Pass shared CLIPCollator to server
-    )
+        clip_collator=clip_collator,  # NEW: Pass shared CLIPCollator to strategy for evaluation
+        )
     
     server = get_server(
         strategy = strategy,
@@ -306,7 +308,7 @@ def main():
             kl_norm_dict=kl_normalized_per_client if peft_method == "fedkls" else None,  # Pass precomputed kl_norms
             data_scheduler=data_scheduler,  # NEW: Pass data scheduler for dynamic data allocation
             rank_policy_map=rank_policy_map,
-            clip_collator=clip_collator if dataset_name in ['pranavmr/MM-IMDb', 'kkim0451/UPMC-Food101'] else None,  # Pass collator for multimodal
+            clip_collator=clip_collator if dataset_name in ['kkim0451/UPMC-Food101'] else None,  # Pass collator for multimodal
         )(cid)
 
     
@@ -325,6 +327,13 @@ def main():
 
     simu_data_file_path = out_file_path.replace('.csv','_metrics.csv')
     save_simulation_history(hist=hist,path = simu_data_file_path)
-
+    # delete FedKLS client .pt files
+    if config_sim['peft']['enabled'] and config_sim['peft']['method'] == "fedkls":
+        client_models_dir = os.path.join(saved_models_path, "client_models")
+        if os.path.exists(client_models_dir):
+            for f in os.listdir(client_models_dir):
+                if f.endswith(".pt"):
+                    os.remove(os.path.join(client_models_dir, f))
+            
 if __name__ == "__main__":
     main()
