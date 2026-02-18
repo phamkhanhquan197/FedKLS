@@ -19,7 +19,6 @@ def test(net, testloader, device: str, feature_key: str, dataset_name: str = Non
     Args:
         feature_key: Can be str (for text/image-only) or list (for multimodal)
         dataset_name: Dataset name to determine multi-label vs single-label
-        desc: Description for progress bar (default: "Evaluating")
     """
 
     correct = 0
@@ -125,15 +124,7 @@ def test(net, testloader, device: str, feature_key: str, dataset_name: str = Non
     # =========================
     elif feature_key in ["text", "content", "sentence"]:
         with torch.no_grad():
-            pbar = tqdm(
-                testloader,
-                desc=desc,
-                unit="batch",
-                leave=False,
-                mininterval=1.0,
-                disable=disable_pbar,
-            )
-            for batch in pbar:
+            for batch in testloader:
                 input_ids = batch["input_ids"].to(device)
                 attention_mask = batch["attention_mask"].to(device)
                 labels = batch["labels"].to(device)
@@ -150,34 +141,16 @@ def test(net, testloader, device: str, feature_key: str, dataset_name: str = Non
 
                 correct += (predicted == labels).sum().item()
                 total += labels.size(0)
-                num_batches += 1
 
                 all_labels.extend(labels.cpu().numpy())
                 all_preds.extend(predicted.cpu().numpy())
-                
-                if (not disable_pbar) and (num_batches % 10 == 0):
-                    pbar.set_postfix(
-                        {
-                            "loss": f"{loss / num_batches:.4f}",
-                            "acc": f"{correct / total:.4f}",
-                            "samples": total,
-                        }
-                    )
 
     # =========================
     # Image-only
     # =========================
     else:
         with torch.no_grad():
-            pbar = tqdm(
-                testloader,
-                desc=desc,
-                unit="batch",
-                leave=False,
-                mininterval=1.0,
-                disable=disable_pbar,
-            )
-            for data in pbar:
+            for data in testloader:
                 keys = list(data.keys())
                 x_label, y_label = keys[0], keys[1]
 
@@ -191,18 +164,8 @@ def test(net, testloader, device: str, feature_key: str, dataset_name: str = Non
                 correct += (predicted == labels).sum().item()
 
                 total += labels.size(0)
-                num_batches += 1
                 all_labels.extend(labels.cpu().numpy())
                 all_preds.extend(predicted.cpu().numpy())
-                
-                if (not disable_pbar) and (num_batches % 10 == 0):
-                    pbar.set_postfix(
-                        {
-                            "loss": f"{loss / num_batches:.4f}",
-                            "acc": f"{correct / total:.4f}",
-                            "samples": total,
-                        }
-                    )
 
     accuracy = correct / total if total > 0 else 0.0
     f1 = f1_score(all_labels, all_preds, average="weighted")
@@ -262,30 +225,7 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays],
         if method == "ffa_lora": #Freeze all A adapters after full model update
             [p.__setattr__("requires_grad", False) for name, p in model.named_parameters() if name.endswith(".A")]
         return
-    else:
-        # ------------------------------------------------------------
-        # Generic adapter-based partial update (SVDAdapter/ConvAdapter)
-        # Works for models like CustomCLIP where params are ".A/.B[/bias]"
-        # ------------------------------------------------------------
-        a_keys = [k for k in model_state.keys() if k.endswith(".A")]
-        b_keys = [k for k in model_state.keys() if k.endswith(".B")]
-        if a_keys or b_keys:
-            bases = {k[:-2] for k in (a_keys + b_keys)}  # strip ".A"/".B"
-            bias_keys = [f"{base}.bias" for base in bases if f"{base}.bias" in model_state] if bias else []
-            target_keys = sorted(set(a_keys + b_keys + bias_keys))
-            if len(params) != len(target_keys):
-                raise ValueError(
-                    f"Adapter set_params expects {len(target_keys)} params, got {len(params)}"
-                )
-
-            dev = torch.device(device) if isinstance(device, str) else device
-            update = OrderedDict()
-            for key, array in zip(target_keys, params):
-                update[key] = torch.from_numpy(np.asarray(array)).to(device=dev)
-            model_state.update(update)
-            model.load_state_dict(model_state, strict=False)
-            return
-
+    else:        
         if method == "ffa_lora": #Send and receive only LoRA B adapters
             if any(k.startswith("distilbert.") for k in model_state.keys()):
                 if bias:
@@ -442,6 +382,11 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays],
             elif any(key.startswith("layer") for key in model_state.keys()): #RESNET models
                 if bias:
                     lora_keys = [k for k in model_state.keys() if ("conv" in k)]
+                else:
+                    lora_keys = [k for k in model_state.keys() if k.endswith(".B") or k.endswith(".A")]
+            elif any(key.startswith("vision_model") for key in model_state.keys()) or any(key.startswith("text_model") for key in model_state.keys()): #CustomCLIP
+                if bias:
+                    lora_keys = [k for k in model_state.keys() if ("self_attn" in k or "mlp" in k)]
                 else:
                     lora_keys = [k for k in model_state.keys() if k.endswith(".B") or k.endswith(".A")]
 
