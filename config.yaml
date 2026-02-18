@@ -2,40 +2,48 @@
 
 common:
   data_type : dirichlet_niid # data_type = data distribution one among ['iid','dirichlet_niid']
-  # dataset : cifar100 # data_set = data set used one among ['kkim0451/UPMC-Food101', 'pranavmr/MM-IMDb','SetFit/20_newsgroups', 'legacy-datasets/banking77', 'fancyzhx/dbpedia_14', 'cifar10', 'cifar100', 'mnist', 'fashion_mnist', 'sasha/dog-food', 'zh-plus/tiny-imagenet', 'Mike0307/MNIST-M', 'flwrlabs/usps']
-  dataset: SetFit/20_newsgroups
+  # dataset : cifar10 # data_set = data set used one among ['kkim0451/UPMC-Food101', 'pranavmr/MM-IMDb','SetFit/20_newsgroups', 'legacy-datasets/banking77', 'fancyzhx/dbpedia_14', 'cifar10', 'cifar100', 'mnist', 'fashion_mnist', 'sasha/dog-food', 'zh-plus/tiny-imagenet', 'Mike0307/MNIST-M', 'flwrlabs/usps']
+  # dataset: stanfordnlp/sst2
+  # dataset: SetFit/20_newsgroups
   # dataset: legacy-datasets/banking77
   # dataset: zh-plus/tiny-imagenet
-  dirichlet_alpha : 0.05 #dirichlet concentration parameter (only used if data_type is dirchlet-niid)
+  dataset: kkim0451/UPMC-Food101
+  dirichlet_alpha : 0.01 #dirichlet concentration parameter (only used if data_type is dirchlet-niid)
   target_acc : 0.99
   # model : Qwen/Qwen1.5-0.5B # one among [distilbert-base-uncased, bert-base-uncased, meta-llama/Llama-2-7b-hf, Qwen/Qwen1.5-0.5B, Net, CifarNet, SimpleCNN, KerasExpCNN, MNISTCNN, SimpleDNN, FMCNNModel,FedAVGCNN,Resnet18, Resnet34,ResNet18Pretrained, ResNet34Pretrained,ResNet18Small, ResNet20Small,MobileNetV2,EfficientNetB0,LSTMModel]
-  model: distilbert-base-uncased
+  # model: distilbert-base-uncased
+  model: openai/clip-vit-base-patch32
+  # model: bert-base-uncased
   # model: Clip
   # model: ResNet18Pretrained
+  # model: roberta-base
+  # model: ResNet34Pretrained
   optimizer : sgd # one among [sgd,adam]
   sgd_momentum : 0.9
   seed : 123  #123 456 789
   multi_node : False
   save_log : True
+  upmc_resize_to: 224 #Use when resize image from UPMC-Food101
   num_train_thread: 10 #Save the most memory when setting to 1
   num_test_thread: 10
+
 
 server:
   num_rounds : 1000
   address : 127.0.0.1
   fraction_fit : 0.3 # fraction of clients to be selected for training
-  min_fit_clients : 3 # minimum number of clients to be selected for training
-  num_clients : 10 # total number of clients participating in training
+  min_fit_clients : 6 # minimum number of clients to be selected for training
+  num_clients : 20 # total number of clients participating in training
   fraction_evaluate : 1 # fraction of clients to be selected for evaluation
-  min_evaluate_clients : 10 # minimum number of clients to be selected for evaluation
-  strategy : FedSALoRA  #[FedAWA, FedKLSVD, FedAvg, FFALoRA, FlexLoRA, FedSALoRA, PFedMoAP, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova]
+  min_evaluate_clients : 20 # minimum number of clients to be selected for evaluation
+  strategy : FedAvg  #[FedAWA, FedKLSVD, FedAvg, FedSVD, FFALoRA, FlexLoRA, FedSALoRA, PFedMoAP, FedPOE, FedPOERegressionText, FedLaw, FedProx, FedAvgM, FedOpt, FedAdam, FedMedian, PowD, Scaffold, FedNova]
 
 client:
   loss: FocalLoss # [CrossEntropyLoss, FocalLoss]
   epochs : 1
   batch_size : 32
   test_batch_size : 32    
-  lr: 0.005 #  [0.00002, 0.0001,0.001, 0.005, 0.01, 0.1, 0.2] 0.005->distilbert-base-uncased, 0.001->bert-base-uncased, 0.0001->Qwen/Qwen1.5-0.5B
+  lr: 0.001 #  [0.00002, 0.0001,0.001, 0.005, 0.01, 0.1, 0.2] 0.005->distilbert-base-uncased, 0.001->bert-base-uncased, 0.0001->Qwen/Qwen1.5-0.5B
   save_train_res : True
   total_cpus : 70 # no. of CPU cores that are assigned for all simulation
   total_gpus : 1 # no. of GPU's assigned for whole simulation
@@ -47,9 +55,9 @@ peft:
   enabled: True #False = FFT, do not set method = fedkls when running FFT, pfedmoap do not run with peft=True
   rank: 32
   alpha: 32 #Equal to the rank
-  method: fedsa_lora # ['pissa', 'milora', 'middle', 'fedkls', 'lora', 'ffa_lora', 'fedsa_lora ','pfedmoap', 'flex_lora']
+  method: milora # ['pissa', 'milora', 'middle', 'fedkls', 'lora', 'ffa_lora', 'fedsa_lora ','pfedmoap', 'flex_lora']
   bias: True #To send the bias layer(after A/B) to server for aggregation or not
-  layer: attention_only #['all_linear','attention_only']
+  layer: all_linear #['all_linear','attention_only']
 
 # NEW: Dynamic Data Updates Configuration
 dynamic_data:
@@ -83,7 +91,39 @@ flex_lora_config:
   #Options: uniform | heavy_tail_light | heavy_tail_strong | normal
   distribution: normal 
 
-  fedawa_config:
+# FedSVD (fed-svd-like) config
+fedsvd_config:
+  mode: "ffa"       # "fedavg" (aggregate A+B) | "ffa" (aggregate B only)
+  send_deltas: False   # True => clients send deltas; server applies deltas to round-start params
+  agg_flora: False     # (placeholder) requires delta semantics
+  agg_fedex: False     # (placeholder) requires delta semantics
+  # Optional: rerun SVD on LoRA (server-side) periodically, like 3rd-party/fed-svd
+  # 0 disables. 1 means rerun every round after warmup.
+  recalculate_svd_period: 1
+  svd_warmup_steps: 1
+  dp:
+    enabled: False        # True => enable DP-SGD (Opacus) during client training
+    eps: 8.0              # target epsilon (used to compute noise_multiplier if noise_multiplier is null)
+    delta: 1.0e-5         # target delta
+    max_grad_norm: 2.0    # per-sample grad clipping norm
+    noise_multiplier: null  # override if set; otherwise computed from (eps, delta, sample_rate, epochs)
+    secure_rng: False     # True => use secure RNG (slower)
+
+fedpoe_config:
+  eta: 0.1  # set >0 to enable a,b updates: a*=exp(-eta*loss_fed), b*=exp(-eta*loss_loc)
+  period : 1 # number update model server, default if POE is 20
+  M : 4   # number of local epochs per POE update
+
+# FedPOERegressionText: regression-style POE over text embeddings using an RFF head
+fedpoe_regression_text_config:
+  eta: 0.1
+  lam: 0.0
+  num_kernels: 4
+  n_components: 256
+  pooling: auto
+
+
+fedawa_config:
   server_valid_ratio: 0.2 
   server_epochs: 1       
   server_optimizer: adam   
