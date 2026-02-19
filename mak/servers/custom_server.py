@@ -17,6 +17,7 @@
 
 import concurrent.futures
 import csv
+import os
 import timeit
 from logging import DEBUG, INFO
 from typing import Dict, List, Optional, Tuple, Union
@@ -151,7 +152,7 @@ class ServerSaveData:
             # Evaluate model on a sample of available clients
             res_fed = self.evaluate_round(server_round=current_round, timeout=timeout, curr_round_start_time=curr_round_start_time)
             if res_fed is not None:
-                loss_fed, evaluate_metrics_fed, _ = res_fed
+                loss_fed, evaluate_metrics_fed, metric_each_client  = res_fed
                 if loss_fed is not None:
                     history.add_loss_distributed(
                         server_round=current_round, loss=loss_fed
@@ -163,6 +164,7 @@ class ServerSaveData:
             # Local results
             local_loss = res_fed[0] if res_fed is not None else None
             local_metric = res_fed[1] if res_fed is not None else None
+
             # Safely extract metrics - handle both dict and non-dict types
             # Use try-except to handle any edge cases with metric extraction
             try:
@@ -208,6 +210,38 @@ class ServerSaveData:
                     dictwriter_object = csv.DictWriter(f, fieldnames=field_names)
                     dictwriter_object.writerow(row_dict)
                     f.close()
+
+            # ------------------ NEW: store each client metrics ------------------
+            if self.out_file_path is not None and metric_each_client is not None:
+                results = metric_each_client[0]  # raw client results
+
+                client_file = self.out_file_path.replace(".csv", "_clients.csv")
+
+                client_fields = ["round", "client_id", "accuracy", "f1_score", "loss", "num_examples"]
+
+                # Check if file already exists and is not empty
+                file_exists = os.path.isfile(client_file) and os.path.getsize(client_file) > 0
+
+                # Open ONCE per round (fast & safe)
+                with open(client_file, "a", newline="") as f:
+                    writer = csv.DictWriter(f, fieldnames=client_fields)
+
+                    # Write header only once
+                    if not file_exists:
+                        writer.writeheader()
+
+                    # Write all clients in this round
+                    for _, eval_res in results:
+                        row = {
+                            "round": current_round,
+                            "client_id": eval_res.metrics.get("client_id"),
+                            "accuracy": eval_res.metrics.get("accuracy"),
+                            "f1_score": eval_res.metrics.get("f1_score"),
+                            "loss": eval_res.loss,
+                            "num_examples": eval_res.num_examples,
+                        }
+                        writer.writerow(row)
+
             if global_accuracy is not None and global_accuracy >= float(self.target_acc):
                 log(
                     INFO,
