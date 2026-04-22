@@ -1,4 +1,3 @@
-# mak/servers/fedsa_lora_server.py
 from mak.servers.custom_server import ServerSaveData
 
 

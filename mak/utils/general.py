@@ -1,6 +1,7 @@
 from collections import OrderedDict
 from typing import List, Tuple
 
+from mak.models import svd_model
 import numpy as np
 import flwr as fl
 import torch
@@ -208,15 +209,69 @@ def _slice_pad_lora_params(t: torch.Tensor, target_rank: int, param_type: str) -
 
     return t
 
+def set_fedspec_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays], device: str = "cuda", bias: bool = True):
+    """Set model weights from a list of NumPy ndarrays."""
+    model_state = model.state_dict()
+    has_lora = any(k.endswith(".A") for k in model_state.keys())
+
+    # -------------------------
+    # Case 1: No adapters
+    # -------------------------
+    if not has_lora:
+        params_dict = zip(model_state.keys(), params)
+        state_dict = OrderedDict({k: v.clone().detach().to(device) if isinstance(v, torch.Tensor) else torch.tensor(v, device=device)
+                                  for k, v in params_dict})
+        model.load_state_dict(state_dict, strict=False)
+
+
+    elif has_lora:
+        # -------------------------
+        # Case 2: Full LoRA model
+        # -------------------------
+        if len(model_state) == len(params):
+            params_dict = zip(model_state.keys(), params)
+            for k, v in params_dict:
+                new_tensor = torch.tensor(v, device=device)
+
+                if model_state[k].shape != new_tensor.shape:
+                    m = model
+                    for p in k.split(".")[:-1]:
+                        m = getattr(m, p)
+                    m._parameters[k.split(".")[-1]] = torch.nn.Parameter(new_tensor)
+
+                model_state[k] = new_tensor
+
+            model.load_state_dict(model_state, strict=True)
+
+        # -------------------------
+        # Case 3: LoRA factors only (A and B, with optional bias)
+        # -------------------------
+        else:
+            if bias:
+                lora_keys = [k for k in model_state.keys() if ("lin" in k)]
+            else:
+                lora_keys = [k for k in model_state.keys() if k.endswith(".B") or k.endswith(".A")]
+            for k, v in zip(lora_keys, params):
+                new_tensor = torch.tensor(v, device=device)
+
+                if model_state[k].shape != new_tensor.shape:
+                    m = model
+                    for p in k.split(".")[:-1]:
+                        m = getattr(m, p)
+                    m._parameters[k.split(".")[-1]] = torch.nn.Parameter(new_tensor)
+
+                model_state[k] = new_tensor
+            model.load_state_dict(model_state, strict=True)
+
+
+
 def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays], 
                device: str = "cuda", method: str = None, bias: bool = True,
                rank_policy_map: dict | None = None, client_id: str | None = None):
-
     """Set model weights from a list of NumPy ndarrays."""
     model_state = model.state_dict()
     if params is None:
         return  # Skip if parameters is None
-
     if len(model_state.items()) == len(params): #Full model update (Round = 1 or full finetune)
         params_dict = zip(model_state.keys(), params)
         state_dict = OrderedDict({k: v.clone().detach().to(device) if isinstance(v, torch.Tensor) else torch.tensor(v, device=device)

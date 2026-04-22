@@ -71,7 +71,7 @@ class ServerSaveData:
     ) -> None:
         self._client_manager: ClientManager = client_manager
         self.parameters: Parameters = Parameters(
-            tensors=[], tensor_type="numpy.ndarray"
+            tensors=[], tensor_type="ndefumpy.ndarray"
         )
         self.strategy: Strategy = strategy if strategy is not None else FedAvg()
         self.max_workers: Optional[int] = None
@@ -122,6 +122,7 @@ class ServerSaveData:
             curr_round_start_time = timeit.default_timer()
             res_fit = self.fit_round(
                 server_round=current_round,
+                num_rounds=num_rounds,
                 timeout=timeout,
             )
             if res_fit is not None:
@@ -152,7 +153,7 @@ class ServerSaveData:
             # Evaluate model on a sample of available clients
             res_fed = self.evaluate_round(server_round=current_round, timeout=timeout, curr_round_start_time=curr_round_start_time)
             if res_fed is not None:
-                loss_fed, evaluate_metrics_fed, metric_each_client  = res_fed
+                loss_fed, evaluate_metrics_fed, metric_each_client = res_fed
                 if loss_fed is not None:
                     history.add_loss_distributed(
                         server_round=current_round, loss=loss_fed
@@ -275,6 +276,11 @@ class ServerSaveData:
             parameters=self.parameters,
             client_manager=self._client_manager,
         )
+        #Check the shape of the parameters sent to clients
+        # for client, ins in client_instructions:
+        #     param_shapes = [p.shape for p in parameters_to_ndarrays(ins.parameters)]
+        #     log(INFO, f"Client {client.cid} received parameters with shapes: {param_shapes}")
+
         log(INFO, "**************************************************")
         if not client_instructions:
             log(INFO, "Start evaluating: no clients selected, cancel")
@@ -333,15 +339,23 @@ class ServerSaveData:
     def fit_round(
         self,
         server_round: int,
+        num_rounds: int,
         timeout: Optional[float]) -> Optional[Tuple[Optional[Parameters], Dict[str, Scalar], FitResultsAndFailures]]:
         """Perform a single round of federated averaging."""
+
+        log(INFO, "======================================Round %s/%s======================================", server_round, num_rounds)
         # Get clients and their respective instructions from strategy
         client_instructions = self.strategy.configure_fit(
             server_round=server_round,
             parameters=self.parameters,
             client_manager=self._client_manager,
         )
-        
+
+        #Check the shape of the parameters sent to clients
+        # for client, ins in client_instructions:
+        #     param_shapes = [p.shape for p in parameters_to_ndarrays(ins.parameters)]
+        #     log(INFO, f"Client {client.cid} received parameters with shapes: {param_shapes}")
+
         #Track download size (server -> clients)
         param_size = sum(len(p) for p in self.parameters.tensors) / 1e9 # Convert to GB
         num_clients = len(client_instructions)
@@ -350,7 +364,7 @@ class ServerSaveData:
             upload=0,
             download=param_size * num_clients)
 
-        log(INFO, "======================================Round %s======================================", server_round)
+        
         log(INFO, f"Model size: {param_size:.4f} GB = {param_size*1024:.4f} MB")
         if not client_instructions:
             log(INFO, "Start trainining: no clients selected, cancel")
@@ -417,9 +431,7 @@ class ServerSaveData:
             train_samples = results[i][1].num_examples
             num_class =  len(results[i][1].metrics["class_distribution"])
             class_dist = results[i][1].metrics["class_distribution"]
-
-            log(INFO, "Client %s (Total training samples: %s, Class Distribution (%s classes): %s)", 
-                client_id, train_samples, num_class, class_dist) 
+            log(INFO, f"Client {client_id} (Total training samples: {train_samples}, Class Distribution ({num_class} classes): {class_dist})") 
 
         # Standard aggregation for non-LoRA models
         parameters_aggregated, metrics_aggregated = self.strategy.aggregate_fit(

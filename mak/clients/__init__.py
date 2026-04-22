@@ -12,9 +12,11 @@ from mak.clients.fedsa_lora_client import FedSALoRAClient
 from mak.clients.flex_lora_client import FlexLoRAClient
 from mak.clients.fedpoe_client import FedPOEClient, FedPOERegressionTextClient
 from mak.clients.fedsvd_client import FedSVDClient
+from mak.clients.fedspec_client import FedSpecClient
 
 from logging import INFO
 from flwr.common.logger import log
+from mak.models import svd_model
 
 def get_client_fn(
     config_sim: dict,
@@ -35,7 +37,7 @@ def get_client_fn(
     method = config_sim["peft"]["method"]
     
     # Use precomputed kl_norm values if provided by server, otherwise compute them
-    if method == "fedkls" and kl_norm_dict is None:
+    if method in ["fedkls", "fedspec"] and kl_norm_dict is None:
         log(INFO, "No precomputed KL divergence values provided. Computing client distributions and kl_norm...")
         from mak.utils.helper import compute_KL_divergence, compute_client_distributions
         from mak.utils.dataset_info import dataset_info
@@ -49,7 +51,7 @@ def get_client_fn(
         for cid, kl_norm_val in kl_normalized_per_client.items():
             log(INFO, f"Client {cid}: Normalized KL Divergence = {kl_norm_val:.4f}")
 
-    elif method == "fedkls" and kl_norm_dict is not None:
+    elif method in ["fedkls", "fedspec"] and kl_norm_dict is not None:
         kl_normalized_per_client = kl_norm_dict
         # log(INFO, "Using precomputed kl_norm values for clients from server.")
     else:
@@ -77,7 +79,7 @@ def get_client_fn(
                 valset = client_dataset_splits["test"]    # Raw dataset
 
         #Pass the normalized KL divergence to the client
-        kl_norm = kl_normalized_per_client[int(cid)] if method == "fedkls" else 0.0
+        kl_norm = kl_normalized_per_client[int(cid)] if method in ["fedkls", "fedspec"] else 0.0
         client = client_class(
             client_id=int(cid),
             model=model, 
@@ -124,5 +126,7 @@ def get_client_class(strategy: str):
         return FedPOERegressionTextClient
     elif strategy == "FedSVD":
         return FedSVDClient
+    elif strategy == "FedSpec":
+        return FedSpecClient
     else:
         return FedAvgClient

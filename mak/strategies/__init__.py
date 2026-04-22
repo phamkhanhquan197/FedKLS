@@ -10,3 +10,9 @@ from mak.strategies.ffa_lora_strategy import FFALoRAStrategy as FFALoRA
 from mak.strategies.pfedmoap_strategy import PFedMoAPStrategy as PFedMoAP
 from mak.strategies.fedsa_lora_strategy import FedSALoRAStrategy as FedSALoRA
 from mak.strategies.flex_lora_strategy import FlexLoRAStrategy as FlexLoRA
+from mak.strategies.fedspec_strategy import FedSpecStrategy as FedSpec
+from mak.strategies.fedsvd_strategy import FedSVDStrategy as FedSVD
+from mak.strategies.fedpoe_strategy import (
+	FedPOEStrategy as FedPOE,
+    FedPOERegressionTextStrategy as FedPOERegressionText,
+)

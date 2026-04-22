@@ -140,8 +140,8 @@ def main():
 
     #Apply SVD if LoRA is enabled
     if lora_enabled:
-        #Decide the client model based on the LoRA method
-        if peft_method == "fedkls":
+        #Decide the client model based on the SVD method
+        if peft_method == "fedkls": #FedSpec has the same codeflow with FedKLS at initialization.
             #Compute client distributions and kl_norm values
             client_distributions = compute_client_distributions(config = config_sim, dataset=fds,num_clients=config_sim['server']['num_clients'])
             kl_normalized_per_client = compute_KL_divergence(client_distributions, num_classes=dataset_info[dataset_name]["num_classes"])
@@ -165,12 +165,13 @@ def main():
                 del client_model  # Free memory
                 gc.collect()
 
-            log(INFO, "FedKLS method enabled: Applied SVD to client models with client-specific kl_norm.")
+            log(INFO, f"{peft_method.upper()} method enabled: Applied SVD to client models with client-specific kl_norm.")
 
             log(INFO, "Applying SVD to create svd model for server...")
             # Create a deep copy of base_model to avoid modifying it
             model_for_svd = copy.deepcopy(base_model)
             svd_model = apply_svd_to_model(model=model_for_svd, config=config_sim, kl_norm= sum(kl_normalized_per_client.values())/len(kl_normalized_per_client))
+            # svd_model = apply_svd_to_model(model=model_for_svd, config=config_sim, kl_norm=0)
             svd_model = svd_model.cpu()  ### CHANGE ###: Ensure svd_model is on CPU
             log(INFO, f"Model after SVD: {svd_model}")
             for name, tensor in svd_model.state_dict().items():
@@ -178,6 +179,38 @@ def main():
             log(INFO, f"=>>>>>>>>>>>>>>>>>Number of layers: {len(svd_model.state_dict())}")
             #Server always needs the SVD-adapted model when PEFT is enabled
             server_model = svd_model
+
+        elif peft_method == "fedspec":
+            #Compute client distributions and kl_norm values
+            client_distributions = compute_client_distributions(config = config_sim, dataset=fds,num_clients=config_sim['server']['num_clients'])
+            kl_normalized_per_client = compute_KL_divergence(client_distributions, num_classes=dataset_info[dataset_name]["num_classes"])
+            print(f"KL Normalized per client: {kl_normalized_per_client}")
+            print("Mean KL Normalized per client: ", sum(kl_normalized_per_client.values())/len(kl_normalized_per_client))
+            for cid, kl_norm_val in kl_normalized_per_client.items():
+                log(INFO, f"Client {cid}: Normalized KL Divergence = {kl_norm_val:.4f}")
+
+            #Pre-apply SVD to each client's model using their KL_norm value
+            client_models = {} ### CHANGE ###: Dictionary to store file paths instead of models
+            initial_rank_dict  = {} ### Dictonary to store the rank used for each client in the first round.
+            os.makedirs(os.path.join(saved_models_path, 'client_models'), exist_ok=True)  ### CHANGE ###: Create directory for model files
+            for cid in range(config_sim['server']['num_clients']):
+                kl_norm = kl_normalized_per_client[cid]
+                client_model = copy.deepcopy(base_model)  # Create a copy for each client
+                client_model = apply_svd_to_model(model=client_model, config=config_sim, kl_norm=kl_norm, client_id=cid)
+
+                # Extract adapter rank
+                initial_rank_dict [cid] = next(param.shape[1] for name, param in client_model.named_parameters() if name.endswith(".A"))
+
+                #Save model to disk
+                model_path = os.path.join(saved_models_path, 'client_models', f'client_{cid}_model.pt')
+                torch.save(client_model, model_path)  ### CHANGE ###: Save full model to disk
+                client_models[cid] = model_path  # Store file path instead of model
+                del client_model  # Free memory
+                gc.collect()
+            log(INFO, f"{peft_method.upper()} method enabled: Applied SVD to client models with client-specific kl_norm.")
+
+            server_model = copy.deepcopy(base_model)  # Server uses the original base model in FedSpec, clients have SVD-adapted models
+            
 
         elif peft_method in ["pissa", "milora", "middle", "lora", "ffa_lora", "fedsa_lora", "flex_lora"]:
             log(INFO, "Applying SVD to create svd model for server...")
@@ -198,6 +231,7 @@ def main():
             client_model = svd_model
             _ = compute_client_distributions(config = config_sim, dataset=fds,num_clients=config_sim['server']['num_clients'])
             log(INFO, f"=>>>>> Method {peft_method.upper()}: Sending svd_model to clients.")
+
         else:
             log(INFO, f"Unknown PEFT method {peft_method}. Defaulting to base_model for clients.")
             import sys
@@ -269,6 +303,8 @@ def main():
         size_weights=size_weights,
         model=server_model,
         clip_collator=clip_collator,  # NEW: Pass shared CLIPCollator to strategy for evaluation
+        initial_rank_dict = initial_rank_dict if peft_method == "fedspec" else None,  # Pass initial rank dict for FedSpec
+        initial_kl_dict= kl_normalized_per_client if peft_method == "fedspec" else None,
         )
     
     server = get_server(
@@ -281,10 +317,13 @@ def main():
     )
     
     log(INFO,f" =>>>>> Using Strategy : {strategy.__class__} Server : {server.__class__}")
+    if peft_method == "fedspec":
+        log(INFO, f" =>>>>> Initial_rank_dict = {initial_rank_dict}")
+
     #Update client_fn to pass kl_norm along with the model
     def client_fn_with_models(cid):
         cid = int(cid)
-        if peft_method == "fedkls":
+        if peft_method == "fedkls" or peft_method == "fedspec":
             # Load model from disk
             model_path = client_models[cid]
             model = torch.load(model_path, map_location=device, weights_only = False)  # Load model from file
@@ -293,7 +332,7 @@ def main():
         elif peft_method == "flex_lora":
             model = copy.deepcopy(client_model)
         else:
-            model = client_model
+            model = copy.deepcopy(client_model)
             kl_norm = None
 
         rank_policy_map = config_sim.get("flex_lora_config", {}).get("client_rank_policy_map", None)
@@ -305,7 +344,7 @@ def main():
             device=device,
             apply_transforms=apply_transforms,
             save_dir=saved_models_path,
-            kl_norm_dict=kl_normalized_per_client if peft_method == "fedkls" else None,  # Pass precomputed kl_norms
+            kl_norm_dict=kl_normalized_per_client if peft_method == "fedkls" or peft_method == "fedspec" else None,  # Pass precomputed kl_norms
             data_scheduler=data_scheduler,  # NEW: Pass data scheduler for dynamic data allocation
             rank_policy_map=rank_policy_map,
             clip_collator=clip_collator if dataset_name in ['kkim0451/UPMC-Food101'] else None,  # Pass collator for multimodal

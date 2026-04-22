@@ -32,6 +32,7 @@ from mak.servers.scaffold_server import ScaffoldServer
 from mak.servers.pfedmoap_server import PFedMoAPServer
 from mak.servers.fedsa_lora_server import FedSALoRAServer
 from mak.servers.flex_lora_server import FlexLoRAServer
+from mak.servers.fedspec_server import FedSpecServer
 from mak.servers.fedpoe_server import FedPOEServer
 from mak.servers.fedpoe_server import FedPOERegressionTextServer
 
@@ -42,11 +43,12 @@ from mak.strategies.ffa_lora_strategy import FFALoRAStrategy
 from mak.strategies.pfedmoap_strategy import PFedMoAPStrategy
 from mak.strategies.fedsa_lora_strategy import FedSALoRAStrategy
 from mak.strategies.flex_lora_strategy import FlexLoRAStrategy
+from mak.strategies.fedspec_strategy import FedSpecStrategy
 from mak.strategies.fedpoe_strategy import FedPOEStrategy
 from mak.strategies.fedpoe_strategy import FedPOERegressionTextStrategy
 
 from mak.utils.dataset_info import dataset_info
-from mak.utils.general import set_params, test, weighted_average
+from mak.utils.general import set_params, set_fedspec_params, test, weighted_average
 from mak.models.svd_model import SVDAdapter, ConvAdapter
 import math
 from collections import Counter
@@ -817,6 +819,20 @@ def extract_conv2_layers(model):
             conv2_layers[name] = module
     return conv2_layers
 
+def get_rank_candidates(max_rank, min_rank=1):
+    pos, r = [], 1
+    while r <= max_rank:
+        if r >= min_rank:
+            pos.append(r)
+        r <<= 1
+    # Ensure max_rank is included (even if not power of two)
+    if pos and pos[-1] != max_rank:
+        pos.append(max_rank)
+    elif not pos and max_rank >= min_rank:
+        pos = [max_rank]
+
+    return [-x for x in reversed(pos)] + [0] + pos, pos
+
 def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
     """
     Apply SVD to the specified linear layers of the model, replacing them with SVDAdapter.
@@ -844,7 +860,14 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
     dp_fedsvd = False
     if config["fedsvd_config"]:
         dp_fedsvd = config["fedsvd_config"]["dp"]["enabled"]
-        
+    if method == "fedspec": #Scan for findind the valid maximum rank for each client among the layers
+        max_client_rank = float('inf')
+        for layer in layers_to_svd.values():
+            m, n = layer.weight.shape
+            max_client_rank = min(max_client_rank, min(m, n))  
+        _, state_space = get_rank_candidates(max_client_rank)
+        rank = np.random.choice(state_space)
+
     for name, layer in layers_to_svd.items():
         weight_matrix = layer.weight.data
         original_bias = layer.bias.data if layer.bias is not None else None
@@ -1117,6 +1140,17 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
                     U_select = U[:, index_start:index_end]
                     S_select = S[index_start:index_end]
                     Vt_select = Vt[index_start:index_end, :]
+                
+                elif method == 'fedspec':
+                    index_start = math.floor(kl_norm * (max_possible_rank - rank)) if kl_norm is not None else 0
+                    index_end = index_start + rank
+
+                    if client_id is not None:
+                        log(INFO, f"Client {client_id}: SVD applied with index range {index_start} to {index_end} with rank {rank} for layer {name}.")
+                
+                    U_select = U[:, index_start:index_end]
+                    S_select = S[index_start:index_end]
+                    Vt_select = Vt[index_start:index_end, :]
                 else:
                     raise ValueError(f"Unknown method: {method}")
 
@@ -1124,9 +1158,11 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
                 A = U_select @ torch.diag(torch.sqrt(S_select))
                 B = torch.diag(torch.sqrt(S_select)) @ Vt_select
 
+                if method == 'fedspec':
+                    W_res = weight_matrix 
+
                 rel_recon_error = torch.norm(weight_matrix - A @ B) / torch.norm(weight_matrix)
                 log(INFO, f"Layer {name}: Relative reconstruction error (W vs ΔW): {rel_recon_error:.6f}")
-
 
             log(INFO, f"Layer {name}: Applied {method} with rank {rank}.")
 
@@ -1338,6 +1374,9 @@ def get_evaluate_fn(
                 parameters=parameters,
                 device=device,
             )
+        elif method == "fedspec":
+            set_fedspec_params(model, parameters, bias=bias)
+
         else: #Other methods
             set_params(model, parameters, method=method, bias=bias)
 
@@ -1583,6 +1622,15 @@ def get_server(strategy, client_manager, out_file_path, target_acc, num_train_th
             num_train_thread=num_train_thread,
             num_test_thread=num_test_thread,
         )
+    elif isinstance(strategy, FedSpecStrategy):
+        return FedSpecServer(
+            strategy=strategy,
+            client_manager=client_manager,
+            out_file_path=out_file_path,
+            target_acc=target_acc,
+            num_train_thread=num_train_thread,
+            num_test_thread=num_test_thread,
+        )
     else:           
         return ServerSaveData(
             strategy=strategy,
@@ -1604,6 +1652,8 @@ def get_strategy(
     size_weights,
     model,
     clip_collator=None,  # NEW: Use shared CLIPCollator from main.py
+    initial_rank_dict=None, # FedSpec only
+    initial_kl_dict=None,
 ):
     STRATEGY = config["server"]["strategy"]
     MIN_CLIENTS_FIT = config["server"]["min_fit_clients"]
@@ -1663,6 +1713,12 @@ def get_strategy(
             "global_rank": config.get("flex_lora_config", {}).get(
                 "global_rank", config.get("peft", {}).get("rank", 32)
             ),
+        },
+        "FedSpec": {
+            "config": config,
+            "model": model,
+            "initial_rank_dict": initial_rank_dict ,
+            "initial_kl_dict": initial_kl_dict,
         },
         "PowD": {
             "candidate_client_set": config["powd_config"]["candidate_client_set"],
@@ -1773,7 +1829,6 @@ def get_fit_config_fn(config_sim):
             "optimizer": config_sim["common"]["optimizer"],
             "sgd_momentum": config_sim["common"]["sgd_momentum"],
             "strategy": config_sim["server"]["strategy"],
-            "proximal_mu": config_sim["fedprox"]["proximal_mu"],
             "loss": config_sim["client"]["loss"],
         }
         # P2 FIX: Add explicit payload kind for FlexLoRA
