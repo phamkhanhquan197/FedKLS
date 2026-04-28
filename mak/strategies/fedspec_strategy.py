@@ -46,7 +46,6 @@ class FedSpecStrategy(FedAvg):
             if name.endswith(".weight") and base_name in layer_to_svd:
                 self.W_0[name] = param.detach().cpu().numpy().copy()
 
-
     def configure_fit(
         self, server_round: int, parameters: Parameters, client_manager: ClientManager
     ) -> List[Tuple[ClientProxy, FitIns]]:
@@ -137,12 +136,13 @@ class FedSpecStrategy(FedAvg):
             if metrics is not None:
                 self.rank_dict[client_id] = metrics.get("rank", None)
                 self.kl_dict[client_id] = metrics.get("kl_norm", None)
+            # OPTIONAL: This code to check the shapes of the received adapters from clients before aggregation
+            # weights = parameters_to_ndarrays(fit_res.parameters)
+            # shapes = [w.shape for w in weights]
+            # print(f"[Round {server_round}] Client {client_id} BEFORE padding ({len(shapes)} adapters): {shapes}")
 
-        # OPTIONAL: This code to check the shapes of the received adapters from clients before aggregation
-        for client_idx, (weights, _) in enumerate(client_ndarrays):
-            shapes = [w.shape for w in weights]
-            # print(f"[Round {server_round}] Client {client_idx} BEFORE padding ({len(shapes)} adapters): {shapes}")
 
+        
         # ---- Step 1: Infer global max_rank ----
         max_rank = max(min(w.shape) for weights, _ in client_ndarrays for w in weights if w.ndim == 2)
 
@@ -164,35 +164,35 @@ class FedSpecStrategy(FedAvg):
         
         weights_results = [([ _pad(w) for w in weights ], num_examples) for weights, num_examples in client_ndarrays]
         
-        # OPTIONAL: Check shapes AFTER padding
-        for client_idx, (weights, _) in enumerate(weights_results):
+        # OPTIONAL: Check shapes AFTER padding, do not use 
+        for client_proxy, fit_res in results:
+            client_id = int(client_proxy.cid)
+            weights = parameters_to_ndarrays(fit_res.parameters)
             shapes = [w.shape for w in weights]
-            # print(f"[Round {server_round}] Client {client_idx} AFTER padding ({len(shapes)} adapters): {shapes}")
+            print(f"[Round {server_round}] Client {client_id} AFTER padding ({len(shapes)} adapters): {shapes}")
         
         # ---- Step 3: Aggregate LoRA with max rank (A_global, B_global) ----
         aggregated_lora = aggregate(weights_results)
         # aggregated_lora = self.masked_aggregate(weights_results)
         # print(f"[Round {server_round}] Aggregated LoRA shape: {[w.shape for w in aggregated_lora]}")
 
-        # ---- Step 4: Intilialize W_0 (only once) ----
+        # ---- Step 4: Initialize W_0 with SVD components (only once) ----
         if server_round == 1 and not hasattr(self, "W_0"):
             self.store_initial_model(self.model, self.config)
             # print(f"[Round {server_round}] Initial W_0 shape: {[w.shape for w in self.W_0.values()]}")
 
-        # ---- Step 5: Reconstruct FULL model weights W_global = W_0 + A_global@B_global^T ----
+        # ---- Step 5: Reconstruct FULL model weights W_global = W_res + A_global@B_global^T ----
         W_global = []
         lora_idx = 0
         for name, param in self.model.state_dict().items():
             
-            if name in self.W_0:
-                # print(f"Processing layer: {name} with shape {param.shape}")
+            if name in self.W_0:               
                 # ---- LoRA reconstruction ----
                 A_global = aggregated_lora[lora_idx]
                 B_global = aggregated_lora[lora_idx + 1]
 
                 delta = A_global @ B_global
-                W = self.W_0[name] + delta
-
+                W = self.W_0[name] + delta 
                 W_global.append(W)
 
                 lora_idx += 3
@@ -202,7 +202,6 @@ class FedSpecStrategy(FedAvg):
                 # print(f"Processing bias layer: {name} with shape {param.shape}")
                 W_global.append(param.detach().cpu().numpy())
             
-            #elif server_round == 1:
             else:
                 # Remaning layers 
                 W_global.append(param.detach().cpu().numpy())
