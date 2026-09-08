@@ -106,7 +106,190 @@ class FedSpecStrategy(FedAvg):
         # Return client/config pairs
         return [(client, evaluate_ins) for client in clients]
 
+    def aggregate_fedspec(self, weights_results, results):
+        """
+        weights_results: List[(List[np.ndarray], num_examples)]
+        Uses self.rank_dict_current for masking.
+        """
 
+        num_layers = len(weights_results[0][0])
+
+        # map client index → rank using same ordering as results
+        client_ranks = [
+        self.rank_dict_current[int(client_proxy.cid)]
+        for client_proxy, _ in results
+        ]
+
+        aggregated = []
+
+        for layer_idx in range(num_layers):
+            shape = weights_results[0][0][layer_idx].shape
+
+            agg_num = np.zeros(shape, dtype=np.float32)
+            agg_den = np.zeros(shape, dtype=np.float32)
+
+            for c_idx, (weights, num_examples) in enumerate(weights_results):
+                W = weights[layer_idx]
+                r = client_ranks[c_idx]
+
+                # ---- build mask correctly ----
+                if W.ndim == 2:
+                    M = np.zeros_like(W, dtype=np.float32)
+
+                    # Case 1: LoRA B → (r, d) padded on rows
+                    if W.shape[0] >= W.shape[1]:
+                        # safer heuristic: rank is row-dimension BEFORE padding
+                        M[:r, :] = 1.0
+
+                    # Case 2: LoRA A → (d, r) padded on cols
+                    else:
+                        M[:, :r] = 1.0
+
+                elif W.ndim == 1:
+                    # bias → always valid
+                    M = np.ones_like(W, dtype=np.float32)
+
+                else:
+                    raise ValueError(f"Unsupported tensor rank: {W.ndim}")
+
+                agg_num += num_examples * W * M
+                agg_den += num_examples * M
+
+            W_agg = np.divide(
+                agg_num,
+                agg_den,
+                out=np.zeros_like(agg_num),
+                where=agg_den > 0
+            )
+
+            aggregated.append(W_agg)
+
+        return aggregated
+
+    
+
+    # def aggregate_fit(
+    #     self,
+    #     server_round: int,
+    #     results: List[Tuple[ClientProxy, FitRes]],
+    #     failures: List[Union[Tuple[ClientProxy, FitRes], BaseException]],
+    # ) -> Tuple[Optional[Parameters], Dict[str, Scalar]]:
+    #     """Aggregate fit results using weighted average (FedSpec-compatible)."""
+    #     if not results:
+    #         log(WARNING, f"Round {server_round}: No results to aggregate")
+    #         return None, {}
+    #     if not self.accept_failures and failures:
+    #         log(WARNING, f"Round {server_round}: {len(failures)} client failures during fit")
+    #         return None, {}
+        
+    #     # Convert all client parameters once
+    #     client_ndarrays = [
+    #         (parameters_to_ndarrays(fit_res.parameters), fit_res.num_examples)
+    #         for _, fit_res in results
+    #     ]
+
+    #     # Update rank_dict and kl_dict based on client metrics (for next round's configuration)
+    #     self.rank_dict = self.initial_rank_dict if server_round == 1 else self.rank_dict
+    #     self.rank_dict_current = self.rank_dict.copy()
+    #     for client_proxy, fit_res in results:
+    #         client_id = int(client_proxy.cid)
+    #         metrics = fit_res.metrics
+    #         if metrics is not None:
+    #             self.rank_dict[client_id] = metrics.get("rank", None)
+    #             self.kl_dict[client_id] = metrics.get("kl_norm", None)
+    #         # OPTIONAL: This code to check the shapes of the received adapters from clients before aggregation
+    #         weights = parameters_to_ndarrays(fit_res.parameters)
+    #         shapes = [w.shape for w in weights]
+    #         print(f"[Round {server_round}] Client {client_id} BEFORE padding ({len(shapes)} adapters): {shapes}")
+
+    #     def convert_to_delta(weights):
+    #         new_weights = []
+    #         idx = 0
+
+    #         while idx < len(weights):
+    #             w = weights[idx]
+
+    #             # LoRA block: A, B, bias
+    #             if w.ndim == 2:
+    #                 A = weights[idx]
+    #                 B = weights[idx + 1]
+
+    #                 delta = A @ B   # 🔥 core operation
+
+    #                 new_weights.append(delta)
+
+    #                 # keep bias aligned
+    #                 if idx + 2 < len(weights) and weights[idx + 2].ndim == 1:
+    #                     new_weights.append(weights[idx + 2])
+    #                     idx += 3
+    #                 else:
+    #                     idx += 2
+    #             else:
+    #                 new_weights.append(w)
+    #                 idx += 1
+
+    #         return new_weights
+        
+    #     weights_results = [(convert_to_delta(weights), num_examples) for weights, num_examples in client_ndarrays]
+    #     # print(f"[Round {server_round}] After padding to max_rank={max_rank}, client adapter shapes: {[ [w.shape for w in weights] for weights, _ in weights_results ]}")
+        
+    #     # OPTIONAL: Check shapes AFTER padding, use weights_results which are padded, do not use client_ndarrays which are not padded
+    #     for (client_proxy, _), (weights, _) in zip(results, weights_results):
+    #         client_id = int(client_proxy.cid)
+    #         shapes = [w.shape for w in weights]
+    #         print(f"[Round {server_round}] Client {client_id} AFTER padding ({len(shapes)} adapters): {shapes}")
+
+    #     # ---- Step 3: Aggregate LoRA with max rank (A_global, B_global) ----
+    #     aggregated_lora = aggregate(weights_results)
+    #     # aggregated_lora = self.aggregate_fedspec(weights_results, results)
+    #     # print(f"[Round {server_round}] Aggregated LoRA shape: {[w.shape for w in aggregated_lora]}")
+
+    #     # ---- Step 4: Initialize W_0 (base model) ----
+    #     if server_round == 1 and not hasattr(self, "W_0"):
+    #         self.store_initial_model(self.model, self.config)
+
+    #     # ---- Step 5: Reconstruct FULL model ----
+    #     W_global = []
+    #     agg_idx = 0
+
+    #     for name, param in self.model.state_dict().items():
+
+    #         if name in self.W_0:
+    #             # This is a LoRA layer → aggregated result is ΔW
+    #             delta = aggregated_lora[agg_idx]
+
+    #             W = self.W_0[name] + delta
+    #             W_global.append(W)
+
+    #             agg_idx += 1
+
+    #         elif name.endswith(".bias") and (name.replace(".bias", ".weight") in self.W_0):
+    #             # Bias was already aggregated
+    #             bias = aggregated_lora[agg_idx]
+    #             W_global.append(bias)
+
+    #             agg_idx += 1
+
+    #         else:
+    #             # Non-LoRA layers → keep server weights (NOT client ones)
+    #             W_global.append(param.detach().cpu().numpy())
+
+  
+    #     # ---- Step 6: Convert to Parameters ----
+    #     parameters_aggregated = ndarrays_to_parameters(W_global)
+    #     print(f"[Round {server_round}] Aggregated global model parameter shapes: {[w.shape for w in W_global]}")
+
+    #     # ---- Step 7: Metrics ----
+    #     metrics_aggregated = {}
+    #     if self.fit_metrics_aggregation_fn:
+    #         fit_metrics = [(res.num_examples, res.metrics) for _, res in results]
+    #         metrics_aggregated = self.fit_metrics_aggregation_fn(fit_metrics)
+
+    #     elif server_round == 1:
+    #         log(WARNING, "No fit_metrics_aggregation_fn provided")
+
+    #     return parameters_aggregated, metrics_aggregated
+################
     def aggregate_fit(
         self,
         server_round: int,
@@ -137,12 +320,11 @@ class FedSpecStrategy(FedAvg):
                 self.rank_dict[client_id] = metrics.get("rank", None)
                 self.kl_dict[client_id] = metrics.get("kl_norm", None)
             # OPTIONAL: This code to check the shapes of the received adapters from clients before aggregation
-            # weights = parameters_to_ndarrays(fit_res.parameters)
-            # shapes = [w.shape for w in weights]
-            # print(f"[Round {server_round}] Client {client_id} BEFORE padding ({len(shapes)} adapters): {shapes}")
+            weights = parameters_to_ndarrays(fit_res.parameters)
+            shapes = [w.shape for w in weights]
+            print(f"[Round {server_round}] Client {client_id} BEFORE padding ({len(shapes)} adapters): {shapes}")
 
 
-        
         # ---- Step 1: Infer global max_rank ----
         max_rank = max(min(w.shape) for weights, _ in client_ndarrays for w in weights if w.ndim == 2)
 
@@ -163,17 +345,17 @@ class FedSpecStrategy(FedAvg):
             return np.pad(w, ((0, 0), (0, max_rank - r)), mode="constant")
         
         weights_results = [([ _pad(w) for w in weights ], num_examples) for weights, num_examples in client_ndarrays]
+        print(f"[Round {server_round}] After padding to max_rank={max_rank}, client {client_id} adapter shapes: {[ [w.shape for w in weights] for weights, _ in weights_results ]}")
         
-        # OPTIONAL: Check shapes AFTER padding, do not use 
-        for client_proxy, fit_res in results:
+        # OPTIONAL: Check shapes AFTER padding, use weights_results which are padded, do not use client_ndarrays which are not padded
+        for (client_proxy, _), (weights, _) in zip(results, weights_results):
             client_id = int(client_proxy.cid)
-            weights = parameters_to_ndarrays(fit_res.parameters)
             shapes = [w.shape for w in weights]
             print(f"[Round {server_round}] Client {client_id} AFTER padding ({len(shapes)} adapters): {shapes}")
-        
+
         # ---- Step 3: Aggregate LoRA with max rank (A_global, B_global) ----
-        aggregated_lora = aggregate(weights_results)
-        # aggregated_lora = self.masked_aggregate(weights_results)
+        # aggregated_lora = aggregate(weights_results)
+        aggregated_lora = self.aggregate_fedspec(weights_results, results)
         # print(f"[Round {server_round}] Aggregated LoRA shape: {[w.shape for w in aggregated_lora]}")
 
         # ---- Step 4: Initialize W_0 with SVD components (only once) ----
@@ -209,7 +391,7 @@ class FedSpecStrategy(FedAvg):
         # ---- Step 6: Convert to Parameters ----
         parameters_aggregated = ndarrays_to_parameters(W_global)
 
-        # print(f"[Round {server_round}] Aggregated global model parameter shapes: {[w.shape for w in W_global]}")
+        print(f"[Round {server_round}] Aggregated global model parameter shapes: {[w.shape for w in W_global]}")
 
         # ---- Step 7: Metrics ----
         metrics_aggregated = {}
@@ -221,4 +403,3 @@ class FedSpecStrategy(FedAvg):
             log(WARNING, "No fit_metrics_aggregation_fn provided")
 
         return parameters_aggregated, metrics_aggregated
-    
