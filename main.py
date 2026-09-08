@@ -66,6 +66,7 @@ def main():
     
     model_name = config_sim['common']['model']
     shape = dataset_info[dataset_name]["input_shape"]
+    
 
     # Initialize clip_collator for multimodal datasets
     clip_collator = None
@@ -141,7 +142,49 @@ def main():
     #Apply SVD if LoRA is enabled
     if lora_enabled:
         #Decide the client model based on the SVD method
-        if peft_method == "fedkls": #FedSpec has the same codeflow with FedKLS at initialization.
+        if peft_method == "fedkls" and strategy == "FedKLSHetero": #FedSpec has the same codeflow with FedKLS at initialization.
+            log (INFO, "Applying SVD to create client models for FedKLS-Hetero...")
+
+
+            #Compute client distributions and kl_norm values
+            client_distributions = compute_client_distributions(config = config_sim, dataset=fds,num_clients=config_sim['server']['num_clients'])
+            kl_normalized_per_client = compute_KL_divergence(client_distributions, num_classes=dataset_info[dataset_name]["num_classes"])
+            print(f"KL Normalized per client: {kl_normalized_per_client}")
+            print("Mean KL Normalized per client: ", sum(kl_normalized_per_client.values())/len(kl_normalized_per_client))
+            for cid, kl_norm_val in kl_normalized_per_client.items():
+                log(INFO, f"Client {cid}: Normalized KL Divergence = {kl_norm_val:.4f}")
+
+            #Pre-apply SVD to each client's model using their KL_norm value
+            client_models = {} ### CHANGE ###: Dictionary to store file paths instead of models
+            os.makedirs(os.path.join(saved_models_path, 'client_models'), exist_ok=True)  ### CHANGE ###: Create directory for model files
+            for cid in range(config_sim['server']['num_clients']):
+                kl_norm = kl_normalized_per_client[cid]
+                client_model = copy.deepcopy(base_model)  # Create a copy for each client
+                client_model = apply_svd_to_model(model=client_model, config=config_sim, kl_norm=kl_norm, client_id=cid)
+
+                #Save model to disk
+                model_path = os.path.join(saved_models_path, 'client_models', f'client_{cid}_model.pt')
+                torch.save(client_model, model_path)  ### CHANGE ###: Save full model to disk
+                client_models[cid] = model_path  # Store file path instead of model
+                del client_model  # Free memory
+                gc.collect()
+
+            log(INFO, f"{peft_method.upper()} method enabled: Applied SVD to client models with client-specific kl_norm.")
+
+            log(INFO, "Applying SVD to create svd model for server...")
+            # Create a deep copy of base_model to avoid modifying it
+            model_for_svd = copy.deepcopy(base_model)
+            svd_model = apply_svd_to_model(model=model_for_svd, config=config_sim, kl_norm= sum(kl_normalized_per_client.values())/len(kl_normalized_per_client))
+            # svd_model = apply_svd_to_model(model=model_for_svd, config=config_sim, kl_norm=0)
+            svd_model = svd_model.cpu()  ### CHANGE ###: Ensure svd_model is on CPU
+            log(INFO, f"Model after SVD: {svd_model}")
+            for name, tensor in svd_model.state_dict().items():
+                log(INFO, f"{name}: shape {tuple(tensor.shape)}")  
+            log(INFO, f"=>>>>>>>>>>>>>>>>>Number of layers: {len(svd_model.state_dict())}")
+            #Server always needs the SVD-adapted model when PEFT is enabled
+            server_model = svd_model
+
+        elif peft_method == "fedkls" and strategy != "FedKLSHetero":
             #Compute client distributions and kl_norm values
             client_distributions = compute_client_distributions(config = config_sim, dataset=fds,num_clients=config_sim['server']['num_clients'])
             kl_normalized_per_client = compute_KL_divergence(client_distributions, num_classes=dataset_info[dataset_name]["num_classes"])
