@@ -26,6 +26,7 @@ from pathlib import Path
 import mak
 from mak.servers.custom_server import ServerSaveData
 from mak.servers.fedklsvd_server import FedKLSVDServer
+from mak.servers.fedkls_hetero_server import FedKLSHeteroServer
 from mak.servers.ffa_lora_server import FFALoRAServer
 from mak.servers.fednova_server import FedNovaServer
 from mak.servers.scaffold_server import ScaffoldServer
@@ -39,6 +40,7 @@ from mak.servers.fedpoe_server import FedPOERegressionTextServer
 from mak.strategies.fednova_strategy import FedNovaStrategy
 from mak.strategies.scaffold_strategy import ScaffoldStrategy
 from mak.strategies.fedklsvd_strategy import FedKLSVDStrategy
+from mak.strategies.fedkls_hetero_strategy import FedKLSHeteroStrategy
 from mak.strategies.ffa_lora_strategy import FFALoRAStrategy
 from mak.strategies.pfedmoap_strategy import PFedMoAPStrategy
 from mak.strategies.fedsa_lora_strategy import FedSALoRAStrategy
@@ -860,7 +862,7 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
     dp_fedsvd = False
     if config["fedsvd_config"]:
         dp_fedsvd = config["fedsvd_config"]["dp"]["enabled"]
-    if method == "fedspec": #Scan for findind the valid maximum rank for each client among the layers
+    if method == "fedspec" or (method == "fedkls" and config["server"]["strategy"] == "FedKLSHetero"): #Scan for findind the valid maximum rank for each client among the layers
         max_client_rank = float('inf')
         for layer in layers_to_svd.values():
             m, n = layer.weight.shape
@@ -1104,7 +1106,6 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
                     base_norm = torch.norm(W_res)
                     print("||ΔW|| / ||W_res|| =", delta_norm / base_norm)
 
-
             else: #Linear layer SVD
                 U, S, Vt = torch.linalg.svd(weight_matrix, full_matrices=False) 
                 max_possible_rank = S.size(0)
@@ -1118,6 +1119,13 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
                     U_select = U[:, :rank]
                     S_select = S[:rank]
                     Vt_select = Vt[:rank, :]
+                    #Shift the index by rank 32
+                    # index_start = 736
+                    # index_end = index_start + rank
+                    # U_select = U[:, index_start:index_end]
+                    # S_select = S[index_start:index_end]
+                    # Vt_select = Vt[index_start:index_end, :]
+                    # log(INFO, f"Layer {name}: PiSSA/Flex-LoRA selected index range {index_start} to {index_end} with rank {rank} for SVD components.")
 
                 elif method == 'milora':
                     # Minor component as adapter (MiLoRA)
@@ -1133,6 +1141,7 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
                     Vt_select = Vt[middle_index_start:middle_index_end, :]
 
                 elif method == 'fedkls':
+
                     index_start = math.floor(kl_norm * (max_possible_rank - rank)) if kl_norm is not None else 0
                     index_end = index_start + rank
                     if client_id is not None:
@@ -1155,6 +1164,7 @@ def apply_svd_to_model(model, config, kl_norm = None, client_id = None):
                     raise ValueError(f"Unknown method: {method}")
 
                 W_res = weight_matrix - (U_select @ torch.diag(S_select) @ Vt_select)
+                # W_res = weight_matrix
                 A = U_select @ torch.diag(torch.sqrt(S_select))
                 B = torch.diag(torch.sqrt(S_select)) @ Vt_select
 
@@ -1374,7 +1384,7 @@ def get_evaluate_fn(
                 parameters=parameters,
                 device=device,
             )
-        elif method == "fedspec":
+        elif method == "fedspec" or method == "fedkls":
             set_fedspec_params(model, parameters, bias=bias)
 
         else: #Other methods
@@ -1563,6 +1573,13 @@ def get_server(strategy, client_manager, out_file_path, target_acc, num_train_th
         )
     elif isinstance(strategy, FedKLSVDStrategy):
         return FedKLSVDServer(
+            strategy=strategy,
+            client_manager=client_manager,
+            out_file_path=out_file_path,
+            target_acc=target_acc,
+        )
+    elif isinstance(strategy, FedKLSHeteroStrategy):
+        return FedKLSHeteroServer(
             strategy=strategy,
             client_manager=client_manager,
             out_file_path=out_file_path,
