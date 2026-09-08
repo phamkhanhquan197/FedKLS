@@ -175,11 +175,11 @@ class FedSpecClient(BaseClient):
 
 
         #To check how Q-Table changes after every round
-        # print(f"====> Q-TABLE {self.client_id}<====")
-        # print(f"  Action space: {self.action_space}")
-        # for i,j in zip(self.state_space,self.q_table):
-        #     print(f"State: {i} - {j}")
-        # print("====> END OF Q-TABLE <====")
+        print(f"====> Q-TABLE {self.client_id}<====")
+        print(f"  Action space: {self.action_space}")
+        for i,j in zip(self.state_space,self.q_table):
+            print(f"State: {i} - {j}")
+        print("====> END OF Q-TABLE <====")
 
         # ===== 5. SELECT ACTION (EPSILON-GREEDY) =====
         current_round = config.get("current_round", 0)
@@ -271,11 +271,11 @@ class FedSpecClient(BaseClient):
             json.dump(self.q_table, f)
 
         #To check how Q-Table changes after every round
-        # print(f"====> Q-TABLE {self.client_id}<====")
-        # print(f"  Action space: {self.action_space}")
-        # for i,j in zip(self.state_space,self.q_table):
-        #     print(f"State: {i} - {j}")
-        # print("====> END OF Q-TABLE <====")
+        print(f"====> Q-TABLE {self.client_id}<====")
+        print(f"  Action space: {self.action_space}")
+        for i,j in zip(self.state_space,self.q_table):
+            print(f"State: {i} - {j}")
+        print("====> END OF Q-TABLE <====")
         
 
 
