@@ -209,6 +209,12 @@ def _slice_pad_lora_params(t: torch.Tensor, target_rank: int, param_type: str) -
 
     return t
 
+def _compute_svd_for_adapters(model: torch.nn.ModuleList):
+    """Compute and cache SVD for all SVDAdapters in the model (called once)."""
+    for name, module in model.named_modules():
+        if hasattr(module, 'compute_svd_once'):
+            module.compute_svd_once()
+
 def set_fedspec_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays], device: str = "cuda", bias: bool = True):
     """Set model weights from a list of NumPy ndarrays."""
     model_state = model.state_dict()
@@ -222,6 +228,7 @@ def set_fedspec_params(model: torch.nn.ModuleList, params: List[fl.common.NDArra
         state_dict = OrderedDict({k: v.clone().detach().to(device) if isinstance(v, torch.Tensor) else torch.tensor(v, device=device)
                                   for k, v in params_dict})
         model.load_state_dict(state_dict, strict=False)
+        # print("Full model update applied (no adapters detected).")
 
 
     elif has_lora:
@@ -242,11 +249,17 @@ def set_fedspec_params(model: torch.nn.ModuleList, params: List[fl.common.NDArra
                 model_state[k] = new_tensor
 
             model.load_state_dict(model_state, strict=True)
+            # print("Full model update applied (LoRA adapters detected).")
 
         # -------------------------
         # Case 3: LoRA factors only (A and B, with optional bias)
         # -------------------------
         else:
+            # Save old ranks
+            old_ranks = {}
+            for name, module in model.named_modules():
+                if hasattr(module, 'rank'):
+                    old_ranks[name] = module.rank
             if bias:
                 lora_keys = [k for k in model_state.keys() if ("lin" in k)]
             else:
@@ -262,7 +275,7 @@ def set_fedspec_params(model: torch.nn.ModuleList, params: List[fl.common.NDArra
 
                 model_state[k] = new_tensor
             model.load_state_dict(model_state, strict=True)
-
+            # print("LoRA factors update applied.")
 
 
 def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays], 
@@ -270,6 +283,10 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays],
                rank_policy_map: dict | None = None, client_id: str | None = None):
     """Set model weights from a list of NumPy ndarrays."""
     model_state = model.state_dict()
+    #print layer name and parameter shape for debugging
+    # for name ,p in model_state.items():
+    #     print(name, p.shape)
+    
     if params is None:
         return  # Skip if parameters is None
     if len(model_state.items()) == len(params): #Full model update (Round = 1 or full finetune)
@@ -277,9 +294,11 @@ def set_params(model: torch.nn.ModuleList, params: List[fl.common.NDArrays],
         state_dict = OrderedDict({k: v.clone().detach().to(device) if isinstance(v, torch.Tensor) else torch.tensor(v, device=device)
                                   for k, v in params_dict})
         model.load_state_dict(state_dict, strict=False)
+        # print("Full model update applied.")
         if method == "ffa_lora": #Freeze all A adapters after full model update
             [p.__setattr__("requires_grad", False) for name, p in model.named_parameters() if name.endswith(".A")]
         return
+        
     else:        
         if method == "ffa_lora": #Send and receive only LoRA B adapters
             if any(k.startswith("distilbert.") for k in model_state.keys()):
