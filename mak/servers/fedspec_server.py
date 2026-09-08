@@ -61,7 +61,27 @@ class FedSpecServer(ServerSaveData):
         weights = np.exp(scores) / np.sum(np.exp(scores))
 
         return weights
+    # def combine_experts(self, selected_experts):
 
+    #     U_all, S_all, Vt_all = [], [], []
+
+    #     for e in selected_experts:
+    #         U_all.append(e["U"])
+    #         S_all.append(e["S"])
+    #         Vt_all.append(e["Vt"])
+
+    #     U_cat = np.concatenate(U_all, axis=1)
+    #     S_cat = np.concatenate(S_all)
+    #     Vt_cat = np.concatenate(Vt_all, axis=0)
+
+    #     sqrt_S = np.sqrt(S_cat)
+
+    #     A = U_cat * sqrt_S
+    #     B = sqrt_S[:, None] * Vt_cat
+
+    #     return A, B
+
+    # ============
     # def combine_experts(self, selected_experts, weights=None):
     #     """
     #     Combine experts WITHOUT increasing rank.
@@ -99,6 +119,28 @@ class FedSpecServer(ServerSaveData):
     #             B_sum += w * B
 
     #     return A_sum, B_sum
+
+    # A_list = []
+    # B_list = []
+
+    # for w, e in zip(weights, selected_experts):
+    #     U = e["U"]
+    #     S = e["S"]
+    #     Vt = e["Vt"]
+
+    #     sqrt_S = np.sqrt(S)
+
+    #     A = U * sqrt_S[np.newaxis, :]
+    #     B = sqrt_S[:, np.newaxis] * Vt
+
+    #     # weight correctly
+    #     A_list.append(np.sqrt(w) * A)
+    #     B_list.append(np.sqrt(w) * B)
+
+    # A_cat = np.concatenate(A_list, axis=1)  # (d, k*r)
+    # B_cat = np.concatenate(B_list, axis=0)  # (k*r, d)
+
+    # return A_cat, B_cat
 
     def combine_experts(self, selected_experts, weights=None, rank=None):
         """
